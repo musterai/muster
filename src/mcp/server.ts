@@ -182,7 +182,7 @@ All AI agents and human operators collaborating within Muster must follow this p
 
 3. **Kanban Card Workflow & Flexible Board Structures**:
    - Boards are flexible and may have 3 lanes ('To Do' → 'In Progress' → 'Done'), standard 5 lanes, or custom columns. Inspect the active board layout via \`get_board\`.
-   - Call \`list_cards\` or \`get_board\` to find unassigned cards in initial state columns ('To Do' / 'Backlog').
+   - Call \`list_cards\` or \`get_board\` to find unassigned cards in initial state columns ('To Do' / 'Backlog'). When you know only part of a card title, use \`search_cards\` with the project ID and title query.
    - When starting work on a task, call \`claim_card\` to record yourself as the assignee and create the work lease, then call \`move_card\` to advance it to the next active-work lane—normally 'In Progress'. Always respect column WIP limits; the server rejects over-limit creates/moves and unresolved blockers on claims or moves into 'In Progress'.
 
 4. **Mandatory Progress Comments on Cards**:
@@ -315,6 +315,19 @@ All AI agents and human operators collaborating within Muster must follow this p
     archived: z.boolean().optional()
   }, withPermission('list_cards', auth, async (filters) => {
     const cards = await services.cardService.list(filters);
+    return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
+  }));
+
+  server.tool('search_cards', {
+    project_id: z.string().min(1).describe('Project whose active cards should be searched'),
+    query: z.string().trim().min(1).describe('Literal, case-insensitive substring to match against card titles'),
+    exclude_card_id: cardReferenceSchema.optional().describe('Optional card ULID or human-readable key to omit from results'),
+    limit: z.number().int().min(1).max(100).optional().describe('Maximum results to return; defaults to 20 and cannot exceed 100'),
+  }, withPermission('search_cards', auth, async ({ project_id, query, exclude_card_id, limit }) => {
+    const cards = await services.cardService.searchByTitle(project_id, query, {
+      excludeCardId: exclude_card_id,
+      limit,
+    });
     return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
   }));
 

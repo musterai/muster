@@ -209,7 +209,7 @@ Custom roles can be created via `create_role`, and system roles can be cloned vi
 
 ---
 
-## 🛠️ Complete MCP Tool Registry (57 Tools)
+## 🛠️ Complete MCP Tool Registry (68 Tools)
 
 ### Project Tools
 
@@ -239,7 +239,8 @@ Custom roles can be created via `create_role`, and system roles can be cloned vi
 
 | Tool | Description |
 | :--- | :--- |
-| `list_cards` | List cards. Supports filtering by `column_id`, `assignee_id`, or `label`. |
+| `list_cards` | List cards. Supports filtering by `project_id`, `board_id`, `column_id`, `assignee_id`, `label`, or archive state. |
+| `search_cards` | Search active cards in a project by a literal, case-insensitive title substring. Supports excluding one card by ULID/key and limiting results. |
 | `create_card` | Create a card with title, description, priority (`low`, `medium`, `high`, `critical`), and assignees. |
 | `get_card` | Get full card details: assignees, labels, comments, timestamps. Accepts the card ULID or its human-readable `key` (e.g. `MUS-49`). |
 | `update_card` | Update card title, description, priority, or due date. |
@@ -319,7 +320,7 @@ src/
 │   ├── database.ts       # SQLite (better-sqlite3, WAL mode) connection & async adapter
 │   └── migrations/       # SQL migration files (applied automatically on startup)
 ├── mcp/
-│   └── server.ts         # MCP Streamable HTTP server (57 tools + collaboration_protocol prompt)
+│   └── server.ts         # MCP Streamable HTTP server (68 tools + collaboration_protocol prompt)
 ├── realtime/
 │   └── sse.ts            # Server-Sent Events broadcaster (live activity stream)
 ├── services/             # Business logic layer (projects, boards, cards, agents, documents, kb)
@@ -333,7 +334,7 @@ src/
 - **SQLite WAL Mode**: Enables concurrent reads alongside writes. Creates three files per database: `.db`, `.db-wal`, `.db-shm`.
 - **ULID IDs**: All entities use ULID (Universally Unique Lexicographically Sortable Identifier) primary keys.
 - **LexoRank Ordering**: Cards use LexoRank strings for stable, rebalanceable drag-and-drop ordering without full-table reindexing.
-- **MCP JSON-RPC 2.0 over HTTP**: All 57 tools communicate via standard `POST /mcp` with `Content-Type: application/json`. Responses are SSE-streamed (`text/event-stream`).
+- **MCP JSON-RPC 2.0 over HTTP**: All 68 tools communicate via standard `POST /mcp` with `Content-Type: application/json`. Responses are SSE-streamed (`text/event-stream`).
 
 ---
 

@@ -410,6 +410,13 @@ describe('Domain Services Integration Tests', () => {
     // Title search is project-scoped and excludes the given card
     const results = await cardService.searchByTitle(project.id, 'login', { excludeCardId: cardA.id });
     expect(results.map(r => r.id).sort()).toEqual([cardB.id, cardC.id].sort());
+    const resultsByKey = await cardService.searchByTitle(project.id, 'LOGIN', { excludeCardId: cardB.key, limit: 1 });
+    expect(resultsByKey).toHaveLength(1);
+    expect(resultsByKey[0].id).not.toBe(cardB.id);
+
+    const literalWildcard = await cardService.create({ column_id: columns[0].id, title: 'Handle 100% completion' });
+    const wildcardResults = await cardService.searchByTitle(project.id, '100%');
+    expect(wildcardResults.map(r => r.id)).toEqual([literalWildcard.id]);
 
     // Unlinking removes the relation from both sides
     const linkId = detailsA2.linked_cards.find(l => l.card.id === cardB.id)!.id;

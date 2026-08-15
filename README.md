@@ -193,7 +193,7 @@ All agents must follow these 5 rules. Full details in [AGENTS.md](AGENTS.md).
 
 ## 🛠️ MCP Tool Reference
 
-Muster exposes **54 MCP tools** across 7 categories. All tools communicate via standard JSON-RPC 2.0 over `POST /mcp`.
+Muster exposes **68 MCP tools** across 8 categories. All tools communicate via standard JSON-RPC 2.0 over `POST /mcp`.
 
 ### Projects (5)
 
@@ -203,13 +203,13 @@ Muster exposes **54 MCP tools** across 7 categories. All tools communicate via s
 
 `list_boards` · `create_board` · `get_board` · `update_board` · `delete_board` · `create_column` · `update_column` · `move_column` · `delete_column`
 
-### Cards (20)
+### Cards, Labels & Comments (25)
 
-`list_cards` · `create_card` · `get_card` · `update_card` · `move_card` · `claim_card` · `delete_card` · `assign_card` · `unassign_card` · `add_comment` · `update_comment` · `delete_comment` · `add_label` · `remove_label` · `archive_card` · `create_label` · `list_labels` · `link_card` · `unlink_card` · `link_document_to_card` · `unlink_document_from_card`
+`list_cards` · `search_cards` · `create_card` · `get_card` · `update_card` · `move_card` · `claim_card` · `delete_card` · `assign_card` · `unassign_card` · `add_comment` · `update_comment` · `delete_comment` · `add_label` · `remove_label` · `archive_card` · `create_label` · `list_labels` · `link_card` · `unlink_card` · `link_document_to_card` · `unlink_document_from_card` · `add_work_link` · `remove_work_link` · `list_work_links`
 
-### Documents (6)
+### Documents (7)
 
-`list_documents` · `create_document` · `get_document` · `update_document` · `set_document_status` · `get_document_history`
+`list_documents` · `create_document` · `get_document` · `update_document` · `set_document_status` · `get_document_history` · `delete_document`
 
 ### Agents (5)
 
@@ -222,6 +222,10 @@ Muster exposes **54 MCP tools** across 7 categories. All tools communicate via s
 ### Activity (1)
 
 `get_activity`
+
+### Roles (6)
+
+`list_roles` · `get_role` · `create_role` · `update_role` · `delete_role` · `clone_role`
 
 For full parameter documentation, see [AGENTS.md](AGENTS.md).
 
@@ -238,7 +242,7 @@ muster/
 │   │   ├── database.ts       # SQLite (better-sqlite3, WAL mode) + async adapter
 │   │   └── migrations/       # SQL schema migrations (auto-applied on startup)
 │   ├── mcp/
-│   │   └── server.ts         # MCP Streamable HTTP server (57 tools + prompts)
+│   │   └── server.ts         # MCP Streamable HTTP server (68 tools + prompts)
 │   ├── realtime/
 │   │   └── sse.ts            # Server-Sent Events broadcaster
 │   ├── services/             # Business logic (projects, boards, cards, agents, documents)

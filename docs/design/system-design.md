@@ -411,7 +411,8 @@ Tools are grouped by domain. Every tool returns structured JSON results.
 
 | Tool            | Parameters                                                                 | Description                              |
 | --------------- | -------------------------------------------------------------------------- | ---------------------------------------- |
-| `list_cards`    | `column_id?`, `board_id?`, `assignee_id?`, `label?`, `status?`             | List/filter cards                        |
+| `list_cards`    | `project_id?`, `board_id?`, `column_id?`, `assignee_id?`, `label?`, `archived?` | List/filter cards                     |
+| `search_cards`  | `project_id`, `query`, `exclude_card_id?`, `limit?`                         | Search active cards by title substring   |
 | `create_card`   | `column_id`, `title`, `description?`, `priority?`, `labels?`, `assignees?` | Create a card                            |
 | `get_card`      | `card_id` (ULID or key e.g. `MUS-49`)                                  | Get full card details including comments |
 | `update_card`   | `card_id`, `title?`, `description?`, `priority?`, `due_date?`              | Update card fields                       |

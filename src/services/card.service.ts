@@ -938,7 +938,7 @@ export class CardService {
   }
 
   async searchByTitle(projectId: string, query: string, opts: { excludeCardId?: string; limit?: number } = {}): Promise<Card[]> {
-    const limit = opts.limit ?? 20;
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
     const params: unknown[] = [projectId];
     const excludeCardId = opts.excludeCardId
       ? await resolveCardId(this.db, opts.excludeCardId)
@@ -950,8 +950,9 @@ export class CardService {
       WHERE b.project_id = ? AND c.archived = 0`;
 
     if (query.trim()) {
-      sql += ' AND c.title LIKE ?';
-      params.push(`%${query.trim()}%`);
+      const literalQuery = query.trim().replace(/[\\%_]/g, '\\$&');
+      sql += " AND LOWER(c.title) LIKE LOWER(?) ESCAPE '\\'";
+      params.push(`%${literalQuery}%`);
     }
 
     if (excludeCardId) {

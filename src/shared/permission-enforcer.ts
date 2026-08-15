@@ -74,6 +74,7 @@ export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
 
   // ── Card Tools ──
   list_cards: 'project.create', // reading card list requires workspace membership
+  search_cards: 'project.create', // searching cards requires workspace membership
   get_card: 'project.create',   // reading card details requires workspace membership
   create_card: 'card.create',
   update_card: 'card.update',

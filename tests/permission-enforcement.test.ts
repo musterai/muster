@@ -129,7 +129,7 @@ describe('MUS-22: Permission enforcement', () => {
       'list_projects', 'create_project', 'get_project_summary', 'update_project', 'delete_project',
       'list_boards', 'get_board', 'create_board', 'update_board', 'delete_board',
       'create_column', 'update_column', 'move_column', 'delete_column',
-      'list_cards', 'create_card', 'get_card', 'update_card', 'move_card',
+      'list_cards', 'search_cards', 'create_card', 'get_card', 'update_card', 'move_card',
       'claim_card', 'assign_card', 'unassign_card',
       'add_comment', 'update_comment', 'delete_comment', 'add_label', 'remove_label',
       'archive_card', 'delete_card',
@@ -159,6 +159,43 @@ describe('MUS-22: Permission enforcement', () => {
     const mappedNames = Object.keys(TOOL_PERMISSIONS);
     const unknownMappings = mappedNames.filter(n => !registeredTools.includes(n));
     expect(unknownMappings, `TOOL_PERMISSIONS has stale entries: ${unknownMappings.join(', ')}`).toEqual([]);
+  });
+
+  it('search_cards exposes validated project-scoped title search through MCP', async () => {
+    const project = await projectService.create({ name: 'MCP Card Search Project' });
+    const boards = await boardService.list(project.id);
+    const columns = await columnService.list(boards[0].id);
+    const first = await cardService.create({ column_id: columns[0].id, title: 'Investigate login timeout' });
+    const second = await cardService.create({ column_id: columns[0].id, title: 'Fix login redirect' });
+
+    const services: Services = {
+      projectService,
+      boardService,
+      columnService,
+      cardService,
+      commentService,
+      documentService,
+      agentService,
+      eventService,
+      kbService,
+      roleService,
+    };
+    const server = createMcpServer(services, undefined, OPEN_AUTH_CONTEXT) as any;
+    const tool = server._registeredTools.search_cards;
+
+    expect(tool.inputSchema.safeParse({ project_id: project.id, query: 'login' }).success).toBe(true);
+    expect(tool.inputSchema.safeParse({ project_id: project.id, query: '   ' }).success).toBe(false);
+    expect(tool.inputSchema.safeParse({ project_id: project.id, query: 'login', limit: 101 }).success).toBe(false);
+
+    const result = await tool.handler({
+      project_id: project.id,
+      query: 'LOGIN',
+      exclude_card_id: first.key,
+      limit: 10,
+    }, {});
+    const cards = JSON.parse(result.content[0].text);
+
+    expect(cards.map((card: { id: string }) => card.id)).toEqual([second.id]);
   });
 
   // ================================================================
