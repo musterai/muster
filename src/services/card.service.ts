@@ -18,6 +18,7 @@ interface ColumnCapacity {
   name: string;
   wip_limit: number | null;
   card_count: number;
+  is_terminal: number;
 }
 
 interface UnresolvedBlocker {
@@ -41,17 +42,17 @@ export class CardService {
     if (db.dialect === 'postgres') {
       await db.query<{ id: string }>('SELECT id FROM "column" WHERE id = ? FOR UPDATE', [columnId]);
     }
-    const rows = await db.query<{ id: string; name: string; wip_limit: number | null; card_count: number | string }>(
-      `SELECT col.id, col.name, col.wip_limit, COUNT(c.id) AS card_count
+    const rows = await db.query<{ id: string; name: string; wip_limit: number | null; card_count: number | string; is_terminal: number | string }>(
+      `SELECT col.id, col.name, col.wip_limit, col.is_terminal, COUNT(c.id) AS card_count
        FROM "column" col
        LEFT JOIN card c ON c.column_id = col.id AND c.archived = 0
        WHERE col.id = ?
-       GROUP BY col.id, col.name, col.wip_limit`,
+       GROUP BY col.id, col.name, col.wip_limit, col.is_terminal`,
       [columnId]
     );
     const row = rows[0];
     if (!row) throw new NotFoundError(`Column with ID ${columnId} not found`);
-    return { ...row, card_count: Number(row.card_count) };
+    return { ...row, card_count: Number(row.card_count), is_terminal: Number(row.is_terminal) };
   }
 
   private async getUnresolvedBlockers(cardId: string, db: DatabaseAdapter = this.db): Promise<UnresolvedBlocker[]> {
@@ -512,7 +513,17 @@ export class CardService {
     const cardId = await resolveCardId(this.db, id);
     const { moveEvent, overrideRules } = await this.db.transaction(async (tx) => {
       const overrideRules: Array<Record<string, unknown>> = [];
-      let moveEvent: { projectId: string; fromColumnId: string; toColumnId: string; position: string } | null = null;
+      let moveEvent: {
+        projectId: string;
+        fromColumnId: string;
+        toColumnId: string;
+        position: string;
+        isColumnChange: boolean;
+        toTerminal: boolean;
+        toColumnName: string;
+        cardKey: string;
+        cardTitle: string;
+      } | null = null;
       const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
       const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
       const existing = rows[0];
@@ -579,7 +590,17 @@ export class CardService {
 
       const projectId = await this.getProjectIdForColumn(target_column_id, tx);
       if (!projectId) throw new Error(`Column ${target_column_id} is not attached to a project`);
-      moveEvent = { projectId, fromColumnId: existing.column_id, toColumnId: target_column_id, position };
+      moveEvent = {
+        projectId,
+        fromColumnId: existing.column_id,
+        toColumnId: target_column_id,
+        position,
+        isColumnChange,
+        toTerminal: capacity.is_terminal === 1,
+        toColumnName: capacity.name,
+        cardKey: existing.key,
+        cardTitle: existing.title,
+      };
 
       return { moveEvent, overrideRules };
     });
@@ -597,6 +618,26 @@ export class CardService {
           position: moveEvent.position,
         },
       });
+
+      // MUS-45: a card landing in a terminal (Done) lane is a completion —
+      // emit a dedicated event so the human operator can be alerted about it
+      // without the client having to interpret column semantics.
+      if (moveEvent.isColumnChange && moveEvent.toTerminal) {
+        await this.eventService.create({
+          project_id: moveEvent.projectId,
+          entity_type: 'card',
+          entity_id: cardId,
+          action: 'completed',
+          actor_id: actorId,
+          payload: {
+            card_key: moveEvent.cardKey,
+            card_title: moveEvent.cardTitle,
+            from_column_id: moveEvent.fromColumnId,
+            to_column_id: moveEvent.toColumnId,
+            to_column_name: moveEvent.toColumnName,
+          },
+        });
+      }
     }
 
     if (overrideRules.length > 0 && moveEvent) {
