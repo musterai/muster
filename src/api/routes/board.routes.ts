@@ -20,6 +20,29 @@ export function createBoardRouter(
     }
   });
 
+  router.get('/projects/:projectId/all-boards', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const boards = await boardService.list(req.params.projectId);
+      const cards = await cardService.list({ project_id: req.params.projectId });
+      const columnsList = await Promise.all(boards.map((b) => columnService.list(b.id)));
+      const columns = columnsList.flat();
+
+      res.json({
+        id: 'all',
+        project_id: req.params.projectId,
+        name: 'All Boards',
+        slug: 'all',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        boards,
+        columns,
+        cards,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.post('/projects/:projectId/boards', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const board = await boardService.create({ ...req.body, project_id: req.params.projectId });

@@ -305,6 +305,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   // --- Card Tools ---
   server.tool('list_cards', {
     board_id: z.string().optional(),
+    project_id: z.string().optional(),
     column_id: z.string().optional(),
     assignee_id: z.string().optional(),
     label: z.string().optional(),

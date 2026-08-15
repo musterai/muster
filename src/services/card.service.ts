@@ -366,16 +366,20 @@ export class CardService {
     ];
   }
 
-  async list(filters: { column_id?: string; board_id?: string; assignee_id?: string; label?: string; archived?: boolean } = {}): Promise<Card[]> {
-    let sql = 'SELECT DISTINCT c.* FROM card c';
+  async list(filters: { column_id?: string; board_id?: string; project_id?: string; assignee_id?: string; label?: string; archived?: boolean } = {}): Promise<Card[]> {
+    let sql = 'SELECT DISTINCT c.*, col.board_id AS board_id, b.name AS board_name, b.slug AS board_slug FROM card c JOIN "column" col ON c.column_id = col.id JOIN board b ON col.board_id = b.id';
     const joins: string[] = [];
     const conditions: string[] = [];
     const params: unknown[] = [];
 
     if (filters.board_id) {
-      joins.push('JOIN "column" col ON c.column_id = col.id');
       conditions.push('col.board_id = ?');
       params.push(filters.board_id);
+    }
+
+    if (filters.project_id) {
+      conditions.push('b.project_id = ?');
+      params.push(filters.project_id);
     }
 
     if (filters.column_id) {
@@ -439,10 +443,34 @@ export class CardService {
       assigneesByCard.set(assignee.card_id, cardAssignees);
     }
 
-    return cards.map(card => ({
-      ...card,
-      assignees: assigneesByCard.get(card.id) || [],
-    }));
+    const parentLinkRows = await this.db.query<{
+      child_id: string;
+      parent_id: string;
+      parent_key: string;
+      parent_title: string;
+    }>(
+      `SELECT cl.target_card_id AS child_id, parent.id AS parent_id, parent.key AS parent_key, parent.title AS parent_title
+       FROM card_link cl
+       JOIN card parent ON parent.id = cl.source_card_id
+       WHERE cl.relation_type = 'parent_of' AND cl.target_card_id IN (${placeholders})`,
+      cards.map(card => card.id)
+    );
+
+    const parentEpicByChild = new Map<string, { id: string; key: string; title: string }>();
+    for (const row of parentLinkRows) {
+      parentEpicByChild.set(row.child_id, { id: row.parent_id, key: row.parent_key, title: row.parent_title });
+    }
+
+    return cards.map(card => {
+      const parentEpic = parentEpicByChild.get(card.id);
+      return {
+        ...card,
+        assignees: assigneesByCard.get(card.id) || [],
+        parent_epic_id: parentEpic ? parentEpic.id : null,
+        parent_epic_key: parentEpic ? parentEpic.key : null,
+        parent_epic_title: parentEpic ? parentEpic.title : null,
+      };
+    });
   }
 
   async update(id: string, data: UpdateCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {

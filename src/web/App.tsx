@@ -200,17 +200,20 @@ export const App: React.FC = () => {
       setBoards(boardsData);
       const nav = parseLocation();
       const activeBoardId = selectedBoardIdRef.current;
-      const targetBoard = (activeBoardId && boardsData.find((candidate) => candidate.id === activeBoardId))
-        || (nav.boardSlug && boardsData.find((candidate) => candidate.slug === nav.boardSlug))
-        || boardsData[0]
-        || null;
+      const isAllRoute = nav.boardSlug === 'all' || activeBoardId === 'all';
+      const targetBoard: Board | null = isAllRoute
+        ? { id: 'all', project_id: selectedProjectId, name: 'All Boards', slug: 'all', created_at: '', updated_at: '' }
+        : (activeBoardId && boardsData.find((candidate) => candidate.id === activeBoardId))
+          || (nav.boardSlug && boardsData.find((candidate) => candidate.slug === nav.boardSlug))
+          || boardsData[0]
+          || null;
       const targetBoardId = targetBoard?.id ?? null;
       rememberSelectedBoard(targetBoardId);
       selectedBoardSlugRef.current = targetBoard?.slug ?? null;
       updateLocation(nav.projectSlug, nav.tab, nav.docId, nav.entityId, targetBoard?.slug ?? null, true);
 
       if (targetBoardId) {
-        const boardDetails = await api.getBoardDetails(targetBoardId);
+        const boardDetails = await api.getBoardDetails(targetBoardId, selectedProjectId);
         if (selectedBoardIdRef.current !== targetBoardId) return;
         setBoard(boardDetails);
         setColumns(boardDetails.columns || []);
@@ -264,7 +267,7 @@ export const App: React.FC = () => {
     const project = projects.find((candidate) => candidate.id === selectedProjectId);
     if (project) {
       const boardSlug = tab === 'board'
-        ? boards.find((candidate) => candidate.id === selectedBoardIdRef.current)?.slug ?? selectedBoardSlugRef.current
+        ? (selectedBoardIdRef.current === 'all' ? 'all' : (boards.find((candidate) => candidate.id === selectedBoardIdRef.current)?.slug ?? selectedBoardSlugRef.current))
         : null;
       updateLocation(project.slug, tab, selectedDocId, selectedEntityId, boardSlug);
     }
@@ -275,13 +278,16 @@ export const App: React.FC = () => {
 
     rememberSelectedBoard(boardId);
     const project = projects.find((candidate) => candidate.id === selectedProjectId);
-    const selectedBoard = boards.find((candidate) => candidate.id === boardId);
+    const selectedBoard: Board | undefined = boardId === 'all'
+      ? { id: 'all', project_id: selectedProjectId!, name: 'All Boards', slug: 'all', created_at: '', updated_at: '' }
+      : boards.find((candidate) => candidate.id === boardId);
     selectedBoardSlugRef.current = selectedBoard?.slug ?? null;
     if (project && selectedBoard) {
       updateLocation(project.slug, 'board', null, null, selectedBoard.slug);
     }
     try {
-      const boardDetails = await api.getBoardDetails(boardId);
+      if (!selectedProjectId) return;
+      const boardDetails = await api.getBoardDetails(boardId, selectedProjectId);
       if (selectedBoardIdRef.current !== boardId) return;
       setBoard(boardDetails);
       setColumns(boardDetails.columns || []);

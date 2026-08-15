@@ -214,6 +214,12 @@ export interface Card {
   claim_expires_at: string | null;
   is_epic: number;
   assignees?: CardAssignee[];
+  parent_epic_id?: string | null;
+  parent_epic_key?: string | null;
+  parent_epic_title?: string | null;
+  board_id?: string;
+  board_name?: string;
+  board_slug?: string;
 }
 
 export interface ClaimCard {

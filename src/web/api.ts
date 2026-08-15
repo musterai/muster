@@ -75,7 +75,13 @@ export const api = {
   getBoards: (projectId: string) => fetchJSON<Board[]>(`/projects/${projectId}/boards`),
   createBoard: (projectId: string, name: string, template?: 'simple' | 'standard', columns?: string[]) =>
     fetchJSON<Board>(`/projects/${projectId}/boards`, { method: 'POST', body: JSON.stringify({ name, template, columns }) }),
-  getBoardDetails: (id: string) => fetchJSON<Board & { columns: Column[]; cards: Card[] }>(`/boards/${id}`),
+  getBoardDetails: (id: string, projectId?: string) => {
+    if (id === 'all' && projectId) {
+      return fetchJSON<Board & { columns: Column[]; cards: Card[] }>(`/projects/${projectId}/all-boards`);
+    }
+    return fetchJSON<Board & { columns: Column[]; cards: Card[] }>(`/boards/${id}`);
+  },
+  getAllBoardsDetails: (projectId: string) => fetchJSON<Board & { columns: Column[]; cards: Card[] }>(`/projects/${projectId}/all-boards`),
   updateBoard: (id: string, name: string) => fetchJSON<Board>(`/boards/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
   deleteBoard: (id: string) => fetchJSON<void>(`/boards/${id}`, { method: 'DELETE' }),
 

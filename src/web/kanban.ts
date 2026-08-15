@@ -32,10 +32,20 @@ export const getLaneCards = (
   columnId: string,
   columnName: string,
   order: CardDateSortOrder,
-  doneVisibleLimit = DONE_LANE_PAGE_SIZE
+  doneVisibleLimit = DONE_LANE_PAGE_SIZE,
+  columnMap?: Record<string, string>
 ): { all: Card[]; visible: Card[]; hiddenCount: number } => {
+  const isAllView = columnId.startsWith('all-col-');
+  const targetName = columnName.trim().toLowerCase();
   const all = sortCardsByUpdatedAt(
-    cards.filter((card) => card.column_id === columnId && !card.archived),
+    cards.filter((card) => {
+      if (card.archived) return false;
+      if (isAllView && columnMap) {
+        const cardColName = (columnMap[card.column_id] || '').trim().toLowerCase();
+        return cardColName === targetName;
+      }
+      return card.column_id === columnId;
+    }),
     order
   );
   const visible = isDoneLane(columnName)

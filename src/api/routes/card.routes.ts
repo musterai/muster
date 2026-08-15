@@ -66,6 +66,21 @@ export function createCardRouter(cardService: CardService, commentService: Comme
     }
   });
 
+  router.get('/projects/:projectId/cards', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const cards = await cardService.list({
+        project_id: req.params.projectId,
+        column_id: req.query.column_id as string,
+        assignee_id: req.query.assignee_id as string,
+        label: req.query.label as string,
+        archived: req.query.archived === 'true',
+      });
+      res.json(cards);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get('/boards/:boardId/cards', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const cards = await cardService.list({
