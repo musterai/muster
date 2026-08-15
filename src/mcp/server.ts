@@ -25,6 +25,9 @@ import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { withPermission } from '../shared/permission-enforcer.js';
 
 const z = zod;
+const cardReferenceSchema = z.string().describe(
+  'The card ULID or its human-readable key (e.g. "MUS-49"); writes resolve it to the immutable card ID.'
+);
 
 export interface Services {
   projectService: ProjectService;
@@ -334,14 +337,14 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.tool('get_card', {
-    card_id: z.string().describe('The card ULID or its human-readable key (e.g. "MUS-49")'),
+    card_id: cardReferenceSchema,
   }, withPermission('get_card', auth, async ({ card_id }) => {
     const details = await services.cardService.getById(card_id);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('update_card', {
-    card_id: z.string(),
+    card_id: cardReferenceSchema,
     title: z.string().optional(),
     description: z.string().optional(),
     priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
@@ -365,7 +368,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.tool('move_card', {
-    card_id: z.string(),
+    card_id: cardReferenceSchema,
     target_column_id: z.string().optional(),
     position: z.string().optional(),
     operator_override: z.boolean().optional().describe('Explicitly bypass card WIP and blocker rules when the authenticated caller has operator override authority'),
@@ -386,7 +389,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.tool('claim_card', {
-    card_id: z.string(),
+    card_id: cardReferenceSchema,
     agent_id: z.string().describe('Required — the principal/agent ID claiming the card. This also records the assignee and work lease. After a successful claim, call move_card to advance it to the next active-work lane.'),
     ttl_seconds: z.number().optional().describe('Lease duration in seconds; defaults to 600 (10 minutes)'),
     operator_override: z.boolean().optional().describe('Explicitly bypass blocker rules when the authenticated caller has operator override authority'),
@@ -404,14 +407,14 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(response, null, 2) }] };
   }));
 
-  server.tool('assign_card', { card_id: z.string(), agent_id: z.string() }, withPermission('assign_card', auth, async ({ card_id, agent_id }) => {
+  server.tool('assign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('assign_card', auth, async ({ card_id, agent_id }) => {
     await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'card.assign_others');
     await services.cardService.assign(card_id, agent_id, resolveActor(auth));
     const details = await services.cardService.getById(card_id);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
-  server.tool('unassign_card', { card_id: z.string(), agent_id: z.string() }, withPermission('unassign_card', auth, async ({ card_id, agent_id }) => {
+  server.tool('unassign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('unassign_card', auth, async ({ card_id, agent_id }) => {
     await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'card.assign_others');
     await services.cardService.unassign(card_id, agent_id, resolveActor(auth));
     const details = await services.cardService.getById(card_id);
@@ -419,7 +422,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.tool('add_comment', {
-    card_id: z.string(),
+    card_id: cardReferenceSchema,
     content: z.string(),
     author_id: z.string().optional().describe(
       'Deprecated alias retained for compatibility. Open-mode MCP clients must pass agent_id; authenticated-mode attribution comes from the bearer/session principal.'
@@ -450,41 +453,41 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Comment ${comment_id} deleted` }) }] };
   }));
 
-  server.tool('add_label', { card_id: z.string(), label_id: z.string() }, withPermission('add_label', auth, async ({ card_id, label_id }) => {
+  server.tool('add_label', { card_id: cardReferenceSchema, label_id: z.string() }, withPermission('add_label', auth, async ({ card_id, label_id }) => {
     await services.cardService.addLabel(card_id, label_id, resolveActor(auth));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
   }));
 
-  server.tool('remove_label', { card_id: z.string(), label_id: z.string() }, withPermission('remove_label', auth, async ({ card_id, label_id }) => {
+  server.tool('remove_label', { card_id: cardReferenceSchema, label_id: z.string() }, withPermission('remove_label', auth, async ({ card_id, label_id }) => {
     await services.cardService.removeLabel(card_id, label_id, resolveActor(auth));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
   }));
 
-  server.tool('archive_card', { card_id: z.string() }, withPermission('archive_card', auth, async ({ card_id }) => {
+  server.tool('archive_card', { card_id: cardReferenceSchema }, withPermission('archive_card', auth, async ({ card_id }) => {
     await services.cardService.archive(card_id, resolveActor(auth));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
   }));
 
-  server.tool('delete_card', { card_id: z.string() }, withPermission('delete_card', auth, async ({ card_id }) => {
+  server.tool('delete_card', { card_id: cardReferenceSchema }, withPermission('delete_card', auth, async ({ card_id }) => {
     await services.cardService.delete(card_id, resolveActor(auth));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Card ${card_id} deleted` }) }] };
   }));
 
-  server.tool('link_document_to_card', { card_id: z.string(), document_id: z.string() }, withPermission('link_document_to_card', auth, async ({ card_id, document_id }) => {
+  server.tool('link_document_to_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('link_document_to_card', auth, async ({ card_id, document_id }) => {
     await services.cardService.linkDocument(card_id, document_id, resolveActor(auth));
     const details = await services.cardService.getById(card_id);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
-  server.tool('unlink_document_from_card', { card_id: z.string(), document_id: z.string() }, withPermission('unlink_document_from_card', auth, async ({ card_id, document_id }) => {
+  server.tool('unlink_document_from_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('unlink_document_from_card', auth, async ({ card_id, document_id }) => {
     await services.cardService.unlinkDocument(card_id, document_id, resolveActor(auth));
     const details = await services.cardService.getById(card_id);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('link_card', {
-    card_id: z.string(),
-    target_card_id: z.string(),
+    card_id: cardReferenceSchema,
+    target_card_id: cardReferenceSchema,
     relation_type: z.enum(['blocks', 'blocked_by', 'relates_to', 'duplicates', 'parent_of', 'child_of']),
   }, withPermission('link_card', auth, async ({ card_id, target_card_id, relation_type }) => {
     await services.cardService.linkCard(card_id, target_card_id, relation_type, resolveActor(auth));
@@ -492,14 +495,14 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
-  server.tool('unlink_card', { card_id: z.string(), link_id: z.string() }, withPermission('unlink_card', auth, async ({ card_id, link_id }) => {
+  server.tool('unlink_card', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('unlink_card', auth, async ({ card_id, link_id }) => {
     await services.cardService.unlinkCard(card_id, link_id, resolveActor(auth));
     const details = await services.cardService.getById(card_id);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('add_work_link', {
-    card_id: z.string(),
+    card_id: cardReferenceSchema,
     kind: z.enum(['branch', 'pull_request', 'commit', 'pipeline']),
     provider: z.enum(['forgejo', 'github', 'gitlab', 'other']),
     url: z.string(),
@@ -512,13 +515,13 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
-  server.tool('remove_work_link', { card_id: z.string(), link_id: z.string() }, withPermission('remove_work_link', auth, async ({ card_id, link_id }) => {
+  server.tool('remove_work_link', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('remove_work_link', auth, async ({ card_id, link_id }) => {
     await services.cardService.removeWorkLink(card_id, link_id, resolveActor(auth));
     const details = await services.cardService.getById(card_id);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
-  server.tool('list_work_links', { card_id: z.string() }, withPermission('list_work_links', auth, async ({ card_id }) => {
+  server.tool('list_work_links', { card_id: cardReferenceSchema }, withPermission('list_work_links', auth, async ({ card_id }) => {
     const links = await services.cardService.listWorkLinks(card_id);
     return { content: [{ type: 'text', text: JSON.stringify(links, null, 2) }] };
   }));

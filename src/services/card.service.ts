@@ -9,6 +9,7 @@ import { config } from '../config/index.js';
 import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.js';
 import { assertHttpUrl } from '../shared/url.js';
 import { canonicalizeCardLink } from './helpers/card-links.helper.js';
+import { resolveCardId } from './helpers/card-id.helper.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
 
@@ -476,6 +477,7 @@ export class CardService {
   async update(id: string, data: UpdateCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
     assertMaxLength(data.description, CARD_TEXT_MAX_CHARS, 'Card description');
     const existing = await this.getById(id);
+    const cardId = existing.id;
 
     const title = data.title !== undefined ? data.title : existing.title;
     const description = data.description !== undefined ? data.description : existing.description;
@@ -486,7 +488,7 @@ export class CardService {
 
     await this.db.execute(
       `UPDATE card SET title = ?, description = ?, priority = ?, due_date = ?, is_epic = ?, updated_at = ? WHERE id = ?`,
-      [title, description, priority, due_date, is_epic, updated_at, id]
+      [title, description, priority, due_date, is_epic, updated_at, cardId]
     );
 
     if (this.eventService) {
@@ -495,7 +497,7 @@ export class CardService {
         await this.eventService.create({
           project_id: projectId,
           entity_type: 'card',
-          entity_id: id,
+          entity_id: cardId,
           action: 'updated',
           actor_id: actorId,
           payload: data as Record<string, unknown>,
@@ -503,17 +505,18 @@ export class CardService {
       }
     }
 
-    return this.getById(id);
+    return this.getById(cardId);
   }
 
   async move(id: string, data: MoveCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
+    const cardId = await resolveCardId(this.db, id);
     const { moveEvent, overrideRules } = await this.db.transaction(async (tx) => {
       const overrideRules: Array<Record<string, unknown>> = [];
       let moveEvent: { projectId: string; fromColumnId: string; toColumnId: string; position: string } | null = null;
       const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
-      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [id]);
+      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
       const existing = rows[0];
-      if (!existing) throw new NotFoundError(`Card with ID ${id} not found`);
+      if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
 
       const target_column_id = data.target_column_id || existing.column_id;
       const capacity = await this.getColumnCapacity(target_column_id, tx);
@@ -539,7 +542,7 @@ export class CardService {
       }
 
       if (isColumnChange && capacity.name.trim().toLowerCase() === 'in progress') {
-        const blockers = await this.getUnresolvedBlockers(id, tx);
+        const blockers = await this.getUnresolvedBlockers(cardId, tx);
         if (blockers.length > 0) {
           const details = {
             rule: 'blocked_by',
@@ -571,7 +574,7 @@ export class CardService {
       const updated_at = new Date().toISOString();
       await tx.execute(
         `UPDATE card SET column_id = ?, position = ?, updated_at = ? WHERE id = ?`,
-        [target_column_id, position, updated_at, id]
+        [target_column_id, position, updated_at, cardId]
       );
 
       const projectId = await this.getProjectIdForColumn(target_column_id, tx);
@@ -585,7 +588,7 @@ export class CardService {
       await this.eventService.create({
         project_id: moveEvent.projectId,
         entity_type: 'card',
-        entity_id: id,
+        entity_id: cardId,
         action: 'moved',
         actor_id: actorId,
         payload: {
@@ -597,13 +600,14 @@ export class CardService {
     }
 
     if (overrideRules.length > 0 && moveEvent) {
-      await this.recordOverride(moveEvent.projectId, id, actorId, 'move', { rules: overrideRules });
+      await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules });
     }
 
-    return this.getById(id);
+    return this.getById(cardId);
   }
 
-  async assign(cardId: string, agentId: string, actorId?: string): Promise<void> {
+  async assign(idOrKey: string, agentId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     await this.db.execute(
       `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
       [cardId, agentId]
@@ -625,7 +629,8 @@ export class CardService {
     }
   }
 
-  async unassign(cardId: string, agentId: string, actorId?: string): Promise<void> {
+  async unassign(idOrKey: string, agentId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     await this.db.execute(
       `DELETE FROM card_assignee WHERE card_id = ? AND principal_id = ?`,
       [cardId, agentId]
@@ -644,6 +649,7 @@ export class CardService {
     actorId?: string,
     options: CardOperationOptions = {},
   ): Promise<CardDetails | ClaimRefusal> {
+    const canonicalCardId = await resolveCardId(this.db, cardId);
     let overrideProjectId: string | null = null;
     let overrideBlockers: UnresolvedBlocker[] = [];
 
@@ -660,9 +666,9 @@ export class CardService {
       // see DatabaseAdapter.dialect's doc comment for why that's the
       // deliberate exception rather than the norm.
       const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
-      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
+      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [canonicalCardId]);
       const card = rows[0];
-      if (!card) throw new Error(`Card with ID ${cardId} not found`);
+      if (!card) throw new NotFoundError(`Card with ID ${canonicalCardId} not found`);
 
       const now = new Date();
       const nowIso = now.toISOString();
@@ -677,14 +683,14 @@ export class CardService {
         const refusal: ClaimRefusal = {
           success: false,
           reason: 'already_claimed',
-          card_id: cardId,
+          card_id: canonicalCardId,
           held_by: { id: card.claimed_by as string, name: holderRows[0]?.name ?? null },
           claim_expires_at: card.claim_expires_at as string,
         };
         return refusal;
       }
 
-      const blockers = await this.getUnresolvedBlockers(cardId, tx);
+      const blockers = await this.getUnresolvedBlockers(canonicalCardId, tx);
       if (blockers.length > 0) {
         if (!options.operatorOverride) {
           const blockerSummary = blockers.map(blocker => `${blocker.key} "${blocker.title}"`).join(', ');
@@ -705,11 +711,11 @@ export class CardService {
       const expiresIso = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
       await tx.execute(
         `UPDATE card SET claimed_by = ?, claimed_at = ?, claim_expires_at = ?, updated_at = ? WHERE id = ?`,
-        [agentId, nowIso, expiresIso, nowIso, cardId]
+        [agentId, nowIso, expiresIso, nowIso, canonicalCardId]
       );
       await tx.execute(
         `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
-        [cardId, agentId]
+        [canonicalCardId, agentId]
       );
 
       if (this.eventService) {
@@ -718,7 +724,7 @@ export class CardService {
           await this.eventService.create({
             project_id: projectId,
             entity_type: 'card',
-            entity_id: cardId,
+            entity_id: canonicalCardId,
             action: 'claimed',
             actor_id: agentId,
             payload: { claim_expires_at: expiresIso },
@@ -726,11 +732,11 @@ export class CardService {
         }
       }
 
-      return this.getById(cardId, tx);
+      return this.getById(canonicalCardId, tx);
     });
 
     if (overrideProjectId && overrideBlockers.length > 0) {
-      await this.recordOverride(overrideProjectId, cardId, actorId || agentId, 'claim', {
+      await this.recordOverride(overrideProjectId, canonicalCardId, actorId || agentId, 'claim', {
         rule: 'blocked_by',
         blockers: overrideBlockers.map(blocker => ({ ...blocker })),
       });
@@ -780,21 +786,24 @@ export class CardService {
     return expired.map(c => c.id);
   }
 
-  async addLabel(cardId: string, labelId: string, actorId?: string): Promise<void> {
+  async addLabel(idOrKey: string, labelId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     await this.db.execute(
       `INSERT OR IGNORE INTO card_label (card_id, label_id) VALUES (?, ?)`,
       [cardId, labelId]
     );
   }
 
-  async removeLabel(cardId: string, labelId: string, actorId?: string): Promise<void> {
+  async removeLabel(idOrKey: string, labelId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     await this.db.execute(
       `DELETE FROM card_label WHERE card_id = ? AND label_id = ?`,
       [cardId, labelId]
     );
   }
 
-  async linkDocument(cardId: string, documentId: string, actorId?: string): Promise<void> {
+  async linkDocument(idOrKey: string, documentId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     const linked_at = new Date().toISOString();
     await this.db.execute(
       `INSERT OR IGNORE INTO card_document (card_id, document_id, linked_at) VALUES (?, ?, ?)`,
@@ -817,14 +826,19 @@ export class CardService {
     }
   }
 
-  async unlinkDocument(cardId: string, documentId: string, actorId?: string): Promise<void> {
+  async unlinkDocument(idOrKey: string, documentId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     await this.db.execute(
       `DELETE FROM card_document WHERE card_id = ? AND document_id = ?`,
       [cardId, documentId]
     );
   }
 
-  async linkCard(cardId: string, targetCardId: string, relationType: CardLinkRelationType, actorId?: string): Promise<void> {
+  async linkCard(idOrKey: string, targetIdOrKey: string, relationType: CardLinkRelationType, actorId?: string): Promise<void> {
+    const [cardId, targetCardId] = await Promise.all([
+      resolveCardId(this.db, idOrKey),
+      resolveCardId(this.db, targetIdOrKey),
+    ]);
     const { sourceCardId, destCardId, storedType } = canonicalizeCardLink(cardId, targetCardId, relationType);
 
     const id = ulid();
@@ -850,14 +864,16 @@ export class CardService {
     }
   }
 
-  async unlinkCard(cardId: string, linkId: string, actorId?: string): Promise<void> {
+  async unlinkCard(idOrKey: string, linkId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     await this.db.execute(
       `DELETE FROM card_link WHERE id = ? AND (source_card_id = ? OR target_card_id = ?)`,
       [linkId, cardId, cardId]
     );
   }
 
-  async addWorkLink(cardId: string, data: CreateCardWorkLink, actorId?: string): Promise<CardWorkLink> {
+  async addWorkLink(idOrKey: string, data: CreateCardWorkLink, actorId?: string): Promise<CardWorkLink> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     assertHttpUrl(data.url);
 
     const id = ulid();
@@ -890,7 +906,8 @@ export class CardService {
     return { id, card_id: cardId, kind: data.kind, provider: data.provider, url: data.url, external_ref, title, status, created_at };
   }
 
-  async removeWorkLink(cardId: string, linkId: string, actorId?: string): Promise<void> {
+  async removeWorkLink(idOrKey: string, linkId: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     await this.db.execute(
       `DELETE FROM card_work_link WHERE id = ? AND card_id = ?`,
       [linkId, cardId]
@@ -912,7 +929,8 @@ export class CardService {
     }
   }
 
-  async listWorkLinks(cardId: string, db: DatabaseAdapter = this.db): Promise<CardWorkLink[]> {
+  async listWorkLinks(idOrKey: string, db: DatabaseAdapter = this.db): Promise<CardWorkLink[]> {
+    const cardId = await resolveCardId(db, idOrKey);
     return db.query<CardWorkLink>(
       `SELECT * FROM card_work_link WHERE card_id = ? ORDER BY created_at ASC`,
       [cardId]
@@ -922,6 +940,9 @@ export class CardService {
   async searchByTitle(projectId: string, query: string, opts: { excludeCardId?: string; limit?: number } = {}): Promise<Card[]> {
     const limit = opts.limit ?? 20;
     const params: unknown[] = [projectId];
+    const excludeCardId = opts.excludeCardId
+      ? await resolveCardId(this.db, opts.excludeCardId)
+      : undefined;
 
     let sql = `SELECT c.* FROM card c
       JOIN "column" col ON c.column_id = col.id
@@ -933,9 +954,9 @@ export class CardService {
       params.push(`%${query.trim()}%`);
     }
 
-    if (opts.excludeCardId) {
+    if (excludeCardId) {
       sql += ' AND c.id != ?';
-      params.push(opts.excludeCardId);
+      params.push(excludeCardId);
     }
 
     sql += ' ORDER BY c.updated_at DESC LIMIT ?';
@@ -944,30 +965,31 @@ export class CardService {
     return this.db.query<Card>(sql, params);
   }
 
-  async archive(cardId: string, actorId?: string): Promise<void> {
+  async archive(idOrKey: string, actorId?: string): Promise<void> {
+    const cardId = await resolveCardId(this.db, idOrKey);
     const updated_at = new Date().toISOString();
     await this.db.execute(`UPDATE card SET archived = 1, updated_at = ? WHERE id = ?`, [updated_at, cardId]);
   }
 
   async delete(cardId: string, actorId?: string): Promise<void> {
     const existing = await this.getById(cardId);
-    if (!existing) throw new Error(`Card with ID ${cardId} not found`);
+    const canonicalCardId = existing.id;
 
     const projectId = await this.getProjectIdForColumn(existing.column_id);
 
-    await this.db.execute('DELETE FROM card_assignee WHERE card_id = ?', [cardId]);
-    await this.db.execute('DELETE FROM card_label WHERE card_id = ?', [cardId]);
-    await this.db.execute('DELETE FROM card_document WHERE card_id = ?', [cardId]);
-    await this.db.execute('DELETE FROM card_link WHERE source_card_id = ? OR target_card_id = ?', [cardId, cardId]);
-    await this.db.execute('DELETE FROM card_work_link WHERE card_id = ?', [cardId]);
-    await this.db.execute('DELETE FROM comment WHERE card_id = ?', [cardId]);
-    await this.db.execute('DELETE FROM card WHERE id = ?', [cardId]);
+    await this.db.execute('DELETE FROM card_assignee WHERE card_id = ?', [canonicalCardId]);
+    await this.db.execute('DELETE FROM card_label WHERE card_id = ?', [canonicalCardId]);
+    await this.db.execute('DELETE FROM card_document WHERE card_id = ?', [canonicalCardId]);
+    await this.db.execute('DELETE FROM card_link WHERE source_card_id = ? OR target_card_id = ?', [canonicalCardId, canonicalCardId]);
+    await this.db.execute('DELETE FROM card_work_link WHERE card_id = ?', [canonicalCardId]);
+    await this.db.execute('DELETE FROM comment WHERE card_id = ?', [canonicalCardId]);
+    await this.db.execute('DELETE FROM card WHERE id = ?', [canonicalCardId]);
 
     if (this.eventService && projectId) {
       await this.eventService.create({
         project_id: projectId,
         entity_type: 'card',
-        entity_id: cardId,
+        entity_id: canonicalCardId,
         action: 'deleted',
         actor_id: actorId,
         payload: { title: existing.title },
@@ -994,10 +1016,11 @@ export class CardService {
 
     if (agentIds.length === 0) return false;
 
+    const canonicalCardId = await resolveCardId(this.db, cardId);
     const placeholders = agentIds.map(() => '?').join(',');
     const rows = await this.db.query<{ card_id: string }>(
       `SELECT card_id FROM card_assignee WHERE card_id = ? AND principal_id IN (${placeholders}) LIMIT 1`,
-      [cardId, ...agentIds]
+      [canonicalCardId, ...agentIds]
     );
     return rows.length > 0;
   }

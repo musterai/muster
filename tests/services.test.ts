@@ -384,21 +384,21 @@ describe('Domain Services Integration Tests', () => {
     const cardC = await cardService.create({ column_id: columns[0].id, title: 'Write login docs' });
 
     // A blocks B -> B should see "blocked_by" A
-    await cardService.linkCard(cardA.id, cardB.id, 'blocks');
+    await cardService.linkCard(cardA.key, cardB.key, 'blocks');
     const detailsA = await cardService.getById(cardA.id);
     const detailsB = await cardService.getById(cardB.id);
     expect(detailsA.linked_cards.find(l => l.card.id === cardB.id)?.relation_type).toBe('blocks');
     expect(detailsB.linked_cards.find(l => l.card.id === cardA.id)?.relation_type).toBe('blocked_by');
 
     // Choosing "blocked_by" from the other side stores the inverse direction
-    await cardService.linkCard(cardC.id, cardA.id, 'blocked_by');
+    await cardService.linkCard(cardC.key, cardA.key, 'blocked_by');
     const detailsC = await cardService.getById(cardC.id);
     expect(detailsC.linked_cards.find(l => l.card.id === cardA.id)?.relation_type).toBe('blocked_by');
     const detailsA2 = await cardService.getById(cardA.id);
     expect(detailsA2.linked_cards.find(l => l.card.id === cardC.id)?.relation_type).toBe('blocks');
 
     // Symmetric relation
-    await cardService.linkCard(cardB.id, cardC.id, 'relates_to');
+    await cardService.linkCard(cardB.key, cardC.key, 'relates_to');
     const detailsB2 = await cardService.getById(cardB.id);
     const detailsC2 = await cardService.getById(cardC.id);
     expect(detailsB2.linked_cards.find(l => l.card.id === cardC.id)?.relation_type).toBe('relates_to');
@@ -423,6 +423,63 @@ describe('Domain Services Integration Tests', () => {
     await cardService.delete(cardC.id);
     const detailsA4 = await cardService.getById(cardA.id);
     expect(detailsA4.linked_cards.some(l => l.card.id === cardC.id)).toBe(false);
+  });
+
+  it('resolves human-readable card keys for all card-scoped writers', async () => {
+    const project = await projectService.create({ name: 'Keyed Writes Project' });
+    const boards = await boardService.list(project.id);
+    const columns = await columnService.list(boards[0].id);
+    const source = await cardService.create({ column_id: columns[0].id, title: 'Keyed source' });
+    const target = await cardService.create({ column_id: columns[0].id, title: 'Keyed target' });
+    const agent = await agentService.register({ name: 'Keyed Writes Agent' });
+
+    const updated = await cardService.update(source.key, { title: 'Updated by key' });
+    expect(updated.id).toBe(source.id);
+    expect(updated.title).toBe('Updated by key');
+
+    const moved = await cardService.move(source.key, { target_column_id: columns[1].id });
+    expect(moved.id).toBe(source.id);
+    expect(moved.column_id).toBe(columns[1].id);
+
+    await cardService.assign(source.key, agent.id);
+    expect((await cardService.getById(source.id)).assignees.some(a => a.id === agent.id)).toBe(true);
+    await cardService.unassign(source.key, agent.id);
+    expect((await cardService.getById(source.id)).assignees.some(a => a.id === agent.id)).toBe(false);
+
+    const document = await documentService.create({
+      project_id: project.id,
+      title: 'Keyed link document',
+      content: 'content',
+    });
+    await cardService.linkDocument(source.key, document.id);
+    expect((await cardService.getById(source.id)).linked_documents.some(d => d.id === document.id)).toBe(true);
+    await cardService.unlinkDocument(source.key, document.id);
+    expect((await cardService.getById(source.id)).linked_documents.some(d => d.id === document.id)).toBe(false);
+
+    const workLink = await cardService.addWorkLink(source.key, {
+      kind: 'branch',
+      provider: 'github',
+      url: 'https://github.com/example/repo/tree/feature/keyed-card',
+    });
+    expect(workLink.card_id).toBe(source.id);
+    expect((await cardService.listWorkLinks(source.key)).map(link => link.card_id)).toEqual([source.id]);
+    await cardService.removeWorkLink(source.key, workLink.id);
+    expect(await cardService.listWorkLinks(source.key)).toEqual([]);
+
+    const comment = await commentService.create({
+      card_id: source.key,
+      author_id: agent.id,
+      content: 'Comment created by key',
+    });
+    expect(comment.card_id).toBe(source.id);
+    expect((await commentService.listByCard(source.key)).map(item => item.id)).toEqual([comment.id]);
+
+    const claim = await cardService.claim(target.key, agent.id);
+    expect('success' in claim ? claim.success : claim.claimed_by).not.toBe(false);
+    await cardService.archive(target.key);
+    expect((await cardService.getById(target.id)).archived).toBe(1);
+    await cardService.delete(target.key);
+    await expect(cardService.getById(target.id)).rejects.toThrow(/not found/);
   });
 
   it('Feature: epic cards flag themselves and link to children via parent_of/child_of', async () => {

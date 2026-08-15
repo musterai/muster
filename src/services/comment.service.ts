@@ -5,6 +5,7 @@ import { Comment, CreateComment } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.js';
 import { config } from '../config/index.js';
+import { resolveCardId } from './helpers/card-id.helper.js';
 
 export class CommentService {
   constructor(
@@ -14,30 +15,32 @@ export class CommentService {
 
   async create(data: CreateComment): Promise<Comment> {
     assertMaxLength(data.content, CARD_TEXT_MAX_CHARS, 'Comment content');
+    const cardId = await resolveCardId(this.db, data.card_id);
     const id = ulid();
     const created_at = new Date().toISOString();
 
     await this.db.execute(
       `INSERT INTO comment (id, card_id, author_id, content, created_at)
        VALUES (?, ?, ?, ?, ?)`,
-      [id, data.card_id, data.author_id, data.content, created_at]
+      [id, cardId, data.author_id, data.content, created_at]
     );
 
     const comment: Comment = {
       id,
-      card_id: data.card_id,
+      card_id: cardId,
       author_id: data.author_id,
       content: data.content,
       created_at,
     };
 
-    await this.recordEvent(data.card_id, 'commented', data.author_id, { comment_id: id, content: data.content });
+    await this.recordEvent(cardId, 'commented', data.author_id, { comment_id: id, content: data.content });
 
     return comment;
   }
 
   async listByCard(cardId: string): Promise<Comment[]> {
-    return this.db.query<Comment>('SELECT * FROM comment WHERE card_id = ? ORDER BY created_at ASC', [cardId]);
+    const canonicalCardId = await resolveCardId(this.db, cardId);
+    return this.db.query<Comment>('SELECT * FROM comment WHERE card_id = ? ORDER BY created_at ASC', [canonicalCardId]);
   }
 
   async getById(id: string): Promise<Comment | null> {

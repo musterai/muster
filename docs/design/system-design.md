@@ -422,6 +422,12 @@ Tools are grouped by domain. Every tool returns structured JSON results.
 | `add_label`     | `card_id`, `label_id`                                                      | Tag a card with a label                  |
 | `archive_card`  | `card_id`                                                                  | Archive a completed card                 |
 
+All card references accepted by card-scoped tools, including `card_id` and
+`target_card_id`, may be either the immutable card ULID or the human-readable
+card key (for example `MUS-49`). The service layer resolves keys before writing
+foreign-key and relationship columns, so persisted and returned relationship
+records always use immutable IDs.
+
 #### Document Management
 
 | Tool                   | Parameters                                            | Description                                              |

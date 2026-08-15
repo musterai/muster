@@ -247,7 +247,7 @@ Custom roles can be created via `create_role`, and system roles can be cloned vi
 | `claim_card` | Atomically claim a card, record the agent as assignee, and create a work lease; then call `move_card` to advance it to the next active-work lane. |
 | `assign_card` | Assign an agent to a card. |
 | `unassign_card` | Remove an agent assignment from a card. |
-| `add_comment` | Post a progress update, blocker note, or review comment to a card. |
+| `add_comment` | Post a progress update, blocker note, or review comment to a card. `card_id` accepts the card ULID or human-readable key. |
 | `update_comment` | Edit a comment's content. Author-only, or `workspace.admin`. |
 | `delete_comment` | Delete a comment. Author-only, or `workspace.admin`. |
 | `add_label` | Attach a label to a card. |
@@ -256,7 +256,7 @@ Custom roles can be created via `create_role`, and system roles can be cloned vi
 | `delete_card` | Permanently delete a card and all its comments, links, and assignments. |
 | `create_label` | Create a new label on a board. |
 | `list_labels` | List all labels available on a board. |
-| `link_card` | Create a directed relation between two cards (`blocks`, `blocked_by`, `relates_to`, `duplicates`). |
+| `link_card` | Create a directed relation between two cards (`blocks`, `blocked_by`, `relates_to`, `duplicates`). Both card references accept a ULID or human-readable key; storage uses immutable IDs. |
 | `unlink_card` | Remove a card-to-card relation by `link_id`. |
 | `link_document_to_card` | Attach a design document to a card. |
 | `unlink_document_from_card` | Detach a design document from a card. |
