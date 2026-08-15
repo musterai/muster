@@ -55,6 +55,44 @@ describe('renderMarkdown sanitization', () => {
     expect(host.querySelector('[onerror]')).toBeNull();
   });
 
+  const dataUriAttacks: Array<[string, string]> = [
+    ['img data:text/html script', '<img src="data:text/html,<script>window.__pwned=1</script>">'],
+    ['a data:text/html link', '[click](data:text/html,<script>window.__pwned=1</script>)'],
+    ['object data URI', '<object data="data:text/html,<script>window.__pwned=1</script>"></object>'],
+    ['embed data URI', '<embed src="data:text/html,<script>window.__pwned=1</script>">'],
+    ['iframe data URI', '<iframe src="data:text/html,<script>window.__pwned=1</script>"></iframe>'],
+    ['video data URI', '<video src="data:text/html,<script>window.__pwned=1</script>"></video>'],
+    ['source data URI', '<source src="data:text/html,<script>window.__pwned=1</script>">'],
+    ['audio data URI', '<audio src="data:text/html,<script>window.__pwned=1</script>"></audio>'],
+    ['form action data URI', '<form action="data:text/html,<script>window.__pwned=1</script>"><button>Go</button></form>'],
+    ['button formaction data URI', '<button formaction="data:text/html,<script>window.__pwned=1</script>">Go</button>'],
+    ['input image data URI', '<input type="image" src="data:text/html,<script>window.__pwned=1</script>">'],
+    ['svg image data URI', '<image href="data:text/html,<script>window.__pwned=1</script>">'],
+  ];
+
+  it.each(dataUriAttacks)('neutralizes data: URI vector: %s', (_name, payload) => {
+    const host = document.createElement('div');
+    host.innerHTML = renderMarkdown(payload);
+
+    // No element should carry a data: URI in any URL-bearing attribute.
+    for (const el of host.querySelectorAll('*')) {
+      for (const attr of ['href', 'src', 'action', 'formaction', 'data']) {
+        const value = el.getAttribute(attr);
+        if (value) {
+          expect(value.trim().toLowerCase()).not.toMatch(/^data:/);
+        }
+      }
+    }
+  });
+
+  it('does not execute a data: URI script payload once attached to the DOM', () => {
+    const host = document.createElement('div');
+    host.innerHTML = renderMarkdown('<img src="data:text/html,<script>window.__pwned=1</script>">');
+    document.body.appendChild(host);
+
+    expect((window as unknown as Record<string, unknown>).__pwned).toBeUndefined();
+  });
+
   it('preserves legitimate markdown structure', () => {
     const html = renderMarkdown(
       '# Title\n\nSome **bold** and `code`.\n\n- one\n- two\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```js\nconst x = 1;\n```'

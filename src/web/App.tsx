@@ -15,6 +15,12 @@ import { UserAccountModal } from './components/UserAccountModal.js';
 import { ShortcutsHelpModal } from './components/ShortcutsHelpModal.js';
 import { ThemeProvider } from './ThemeContext.js';
 import {
+  shouldAlertOnCompletion,
+  completionAlert,
+  fireBrowserNotification,
+  requestNotificationPermission,
+} from './notifications.js';
+import {
   NewProjectModal,
   EditProjectModal,
   NewBoardModal,
@@ -105,6 +111,11 @@ export const App: React.FC = () => {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [boardActionError, setBoardActionError] = useState<string | null>(null);
+  // MUS-45: card-completion alert for the human operator.
+  const [completionBanner, setCompletionBanner] = useState<{ id: string; heading: string; detail: string } | null>(null);
+  const [notificationState, setNotificationState] = useState<'granted' | 'denied' | 'default' | 'unsupported'>(() =>
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  );
 
   const activeBoardNotDoneCount = useMemo(() => {
     if (!selectedBoardId || !columns.length) return null;
@@ -399,6 +410,55 @@ export const App: React.FC = () => {
     };
   }, [selectedProjectId, loadProjectData]);
 
+  // MUS-45: alert the human when a card lands in the Done lane. Both the SSE
+  // stream and the 3-second polling fallback flow into the `events` state, so
+  // diffing it once covers both transports. The initial load is history and
+  // is seeded into the seen-set without alerting.
+  const seenEventIdsRef = useRef<Set<string> | null>(null);
+
+  const alertForCompletedCard = useCallback((evt: Event) => {
+    if (!shouldAlertOnCompletion(evt, currentUser?.id)) return;
+    const actorName =
+      evt.actor_name ||
+      agents.find((a) => a.id === evt.actor_id)?.name ||
+      users.find((u) => u.id === evt.actor_id)?.display_name ||
+      null;
+    const alert = completionAlert(evt, actorName);
+    setCompletionBanner({ id: evt.id, ...alert });
+    fireBrowserNotification('Card completed', `${alert.heading} — ${alert.detail}`);
+  }, [agents, users, currentUser]);
+
+  useEffect(() => {
+    const seen = seenEventIdsRef.current;
+    if (!seen) {
+      seenEventIdsRef.current = new Set(events.map((e) => e.id));
+      return;
+    }
+    const fresh = events.filter((e) => !seen.has(e.id));
+    if (fresh.length === 0) return;
+    for (const e of fresh) seen.add(e.id);
+    // Keep the seen-set bounded to the sliding events window.
+    if (seen.size > 500) {
+      seen.clear();
+      for (const e of events) seen.add(e.id);
+    }
+    for (const e of fresh) alertForCompletedCard(e);
+  }, [events, alertForCompletedCard]);
+
+  // Auto-dismiss the completion banner after 10 seconds.
+  useEffect(() => {
+    if (!completionBanner) return;
+    const timer = setTimeout(() => setCompletionBanner(null), 10000);
+    return () => clearTimeout(timer);
+  }, [completionBanner]);
+
+  // MUS-45: header bell — request browser-notification permission from a
+  // user gesture so the prompt is reliably shown.
+  const handleNotificationToggle = useCallback(async () => {
+    const permission = await requestNotificationPermission();
+    setNotificationState(permission);
+  }, []);
+
   const handleMoveCard = async (cardId: string, targetColumnId: string, position?: string) => {
     setBoardActionError(null);
     try {
@@ -498,6 +558,8 @@ export const App: React.FC = () => {
           setShowUserAccountModal(true);
         }}
         onOpenShortcutsHelp={() => setShowShortcutsHelpModal(true)}
+        notificationState={notificationState}
+        onNotificationToggle={handleNotificationToggle}
       />
 
       {connectionError && (
@@ -513,6 +575,22 @@ export const App: React.FC = () => {
             type="button"
             className="muster-btn muster-btn-ghost"
             onClick={() => setBoardActionError(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* MUS-45: card completed — alert the human operator */}
+      {completionBanner && (
+        <div role="status" className="flex-none flex items-center justify-between gap-3 bg-success-950 border-b border-success-600/40 text-success-200 text-xs font-sans px-4 py-2">
+          <span className="min-w-0 truncate">
+            <span className="font-semibold">Card completed:</span> {completionBanner.heading} — {completionBanner.detail}
+          </span>
+          <button
+            type="button"
+            className="muster-btn muster-btn-ghost flex-none"
+            onClick={() => setCompletionBanner(null)}
           >
             Dismiss
           </button>

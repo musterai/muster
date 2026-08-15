@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Project, ProjectSummary, AuthMe } from '../types.js';
-import { Bot, Layout, FileText, Activity, Plus, FolderPlus, Layers, Database, UserPlus, Trash2, Edit2, KeyRound, ShieldCheck, UserCircle, HelpCircle } from 'lucide-react';
+import { Bot, Layout, FileText, Activity, Plus, FolderPlus, Layers, Database, UserPlus, Trash2, Edit2, KeyRound, ShieldCheck, UserCircle, HelpCircle, Bell, BellRing, BellOff } from 'lucide-react';
 import { ThemePicker } from './ThemePicker.js';
 import { PrincipalChip } from './PrincipalChip.js';
 
@@ -26,6 +26,9 @@ interface HeaderProps {
   onSetLocalIdentity?: (identity: string | { displayName?: string; userId?: string }) => Promise<void>;
   onOpenUserAccount?: (tab?: 'appearance' | 'tokens' | 'admin' | 'profile') => void;
   onOpenShortcutsHelp?: () => void;
+  /** MUS-45: browser-notification permission for card-completion alerts. */
+  notificationState?: 'granted' | 'denied' | 'default' | 'unsupported';
+  onNotificationToggle?: () => void;
 }
 
 /** Open-mode-only "who are you" control — sits where a signed-in user's chip would go. */
@@ -118,6 +121,8 @@ export const Header: React.FC<HeaderProps> = ({
   onSetLocalIdentity,
   onOpenUserAccount,
   onOpenShortcutsHelp,
+  notificationState,
+  onNotificationToggle,
 }) => {
   const kanbanCount = activeBoardNotDoneCount !== undefined && activeBoardNotDoneCount !== null
     ? activeBoardNotDoneCount
@@ -195,8 +200,29 @@ export const Header: React.FC<HeaderProps> = ({
 
           </div>
 
-          {/* Right Side: Keyboard Shortcuts Help & User Account Button at Top Right */}
+          {/* Right Side: Card-Completion Notifications, Keyboard Shortcuts Help & User Account Button at Top Right */}
           <div className="flex items-center space-x-2 shrink-0">
+            {onNotificationToggle && (() => {
+              const bell =
+                notificationState === 'granted'
+                  ? { Icon: BellRing, title: 'Browser notifications are on for card completions', active: true }
+                  : notificationState === 'denied'
+                    ? { Icon: BellOff, title: 'Browser notifications are blocked — allow them in your browser site settings', active: false }
+                    : notificationState === 'unsupported'
+                      ? { Icon: BellOff, title: 'This browser does not support notifications', active: false }
+                      : { Icon: Bell, title: 'Enable browser notifications when cards reach Done', active: false };
+              return (
+                <button
+                  onClick={onNotificationToggle}
+                  className="inline-flex items-center justify-center w-7 h-7 rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs cursor-pointer transition-colors muster-text-muted hover:muster-text-primary"
+                  title={bell.title}
+                  aria-label={bell.title}
+                >
+                  <bell.Icon className={`w-4 h-4 ${bell.active ? 'muster-accent' : ''}`} />
+                </button>
+              );
+            })()}
+
             {onOpenShortcutsHelp && (
               <button
                 onClick={onOpenShortcutsHelp}
