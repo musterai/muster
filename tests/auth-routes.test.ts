@@ -228,7 +228,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     try {
       const healthRes = await fetch(`${baseUrl}/api/v1/health`);
       expect(healthRes.status).toBe(200);
-      expect((await healthRes.json()).status).toBe('ok');
+      expect(await healthRes.json()).toEqual({ status: 'ready' });
 
       const protectedRes = await fetch(`${baseUrl}/api/v1/projects`);
       expect(protectedRes.status).toBe(401);

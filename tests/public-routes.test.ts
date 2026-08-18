@@ -9,6 +9,8 @@ import { isPublicRoute, PUBLIC_ROUTE_INVENTORY } from '../src/shared/public-rout
 describe('public route inventory', () => {
   it('lists only the approved bootstrap, health, and discovery endpoints', () => {
     expect(PUBLIC_ROUTE_INVENTORY.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      'GET /api/v1/health/live',
+      'GET /api/v1/health/ready',
       'GET /api/v1/health',
       'GET /api/v1/auth/login',
       'GET /api/v1/auth/callback',
@@ -25,6 +27,8 @@ describe('public route inventory', () => {
   });
 
   it('matches exact paths and methods while ignoring query strings', () => {
+    expect(isPublicRoute('GET', '/api/v1/health/live?detail=1')).toBe(true);
+    expect(isPublicRoute('GET', '/api/v1/health/ready')).toBe(true);
     expect(isPublicRoute('GET', '/api/v1/health?detail=1')).toBe(true);
     expect(isPublicRoute('GET', '/.well-known/oauth-authorization-server')).toBe(true);
     expect(isPublicRoute('POST', '/api/v1/oauth/register?client=1')).toBe(true);
@@ -37,4 +41,3 @@ describe('public route inventory', () => {
     expect(isPublicRoute('GET', '/api/v1/projects')).toBe(false);
   });
 });
-
