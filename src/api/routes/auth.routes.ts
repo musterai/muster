@@ -4,7 +4,7 @@
 //
 // GET  /auth/login     — redirect to the IdP's authorization endpoint
 // GET  /auth/callback  — exchange the code, resolve/create the user, admit
-//                        into the workspace if possible, start a session
+//                        into the workspace, then start a session
 // POST /auth/logout    — revoke the session server-side
 // GET  /auth/me        — report the current authenticated/admitted state
 //
@@ -47,6 +47,41 @@ function isSecureRequest(req: Request): boolean {
   return req.protocol === 'https' || config.oidc.publicUrl.startsWith('https');
 }
 
+/**
+ * Admit a bootstrap owner under a database-level lock.  The first-login path
+ * used to check emptiness and insert membership as two independent writes,
+ * allowing two simultaneous callbacks to both observe an empty workspace.
+ * SQLite's BEGIN IMMEDIATE serializes this transaction; PostgreSQL needs the
+ * workspace row lock explicitly because its pool permits genuine concurrency.
+ */
+async function admitBootstrapOwner(
+  db: DatabaseAdapter,
+  workspaceId: string,
+  userId: string,
+  allowExistingMembers: boolean,
+  roleId: string,
+): Promise<boolean> {
+  return db.transaction(async tx => {
+    const workspaceLock = db.dialect === 'postgres'
+      ? 'SELECT id FROM workspace WHERE id = ? FOR UPDATE'
+      : 'SELECT id FROM workspace WHERE id = ?';
+    const workspaces = await tx.query<{ id: string }>(workspaceLock, [workspaceId]);
+    if (!workspaces[0]) return false;
+
+    const existingMembership = await tx.query<{ user_id: string }>(
+      'SELECT user_id FROM workspace_member WHERE workspace_id = ? LIMIT 1',
+      [workspaceId],
+    );
+    if (!allowExistingMembers && existingMembership.length > 0) return false;
+
+    await tx.execute(
+      'INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at, invited_by) VALUES (?, ?, ?, ?, ?)',
+      [workspaceId, userId, roleId, new Date().toISOString(), null],
+    );
+    return true;
+  });
+}
+
 export function createAuthRouter(
   db: DatabaseAdapter,
   oidcService: OidcService,
@@ -85,6 +120,15 @@ export function createAuthRouter(
 
       const { user } = await userService.findOrCreateBySubject(config.oidc.issuer!, result.sub, result.email);
 
+      // OIDC proves control of an external identity, but a suspended local
+      // account is not admitted.  Check this before bootstrap/invitation
+      // logic so no session or cookie is ever issued to a suspended user.
+      if ((user as { status?: string }).status !== 'active') {
+        res.setHeader('Set-Cookie', clearCookieHeader(SESSION_COOKIE_NAME));
+        res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+        return;
+      }
+
       const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
       const workspaceId = wsRows[0]?.id;
 
@@ -93,16 +137,30 @@ export function createAuthRouter(
         admitted = await userService.isWorkspaceMember(workspaceId, user.id);
 
         if (!admitted) {
-          const isFirstUser = await userService.isWorkspaceEmpty(workspaceId);
           const isBootstrapOwner = !!config.oidc.bootstrapOwnerSubject && config.oidc.bootstrapOwnerSubject === result.sub;
 
-          if (isFirstUser || isBootstrapOwner) {
+          // A configured bootstrap subject is authoritative.  Without a pin,
+          // the first successful login is the documented owner bootstrap.
+          // The membership insert and emptiness check share one transaction,
+          // so concurrent callbacks cannot both become the first owner.
+          const canBootstrap = isBootstrapOwner || !config.oidc.bootstrapOwnerSubject;
+          if (canBootstrap) {
             const ownerRole = await roleService.getByKey(workspaceId, 'owner');
             if (ownerRole) {
-              await userService.addWorkspaceMember(workspaceId, user.id, ownerRole.id, null);
-              admitted = true;
+              admitted = await admitBootstrapOwner(
+                db,
+                workspaceId,
+                user.id,
+                isBootstrapOwner,
+                ownerRole.id,
+              );
             }
-          } else if (result.email) {
+          }
+
+          // A non-pinned login that loses the bootstrap race can still be an
+          // invited user.  Keep invitation admission as a fallback whenever
+          // the atomic bootstrap attempt did not admit this identity.
+          if (!admitted && result.email) {
             const invite = await invitationService.findPendingByEmail(workspaceId, result.email);
             if (invite) {
               await invitationService.accept(invite.id, user.id);
@@ -121,9 +179,17 @@ export function createAuthRouter(
         }
       }
 
-      // A session is created regardless of admission — the user IS
-      // authenticated; "admitted" (workspace membership) is a separate gate
-      // enforced by requireRestPermission/requirePermission on every route.
+      // Identity authentication and workspace admission are separate steps.
+      // Do not issue a usable workspace credential to an IdP identity that
+      // has neither bootstrap-owner status nor an invitation/membership.
+      // Keep the response deliberately generic so callback behavior cannot be
+      // used to enumerate workspace members or invitations.
+      if (!admitted) {
+        res.setHeader('Set-Cookie', clearCookieHeader(SESSION_COOKIE_NAME));
+        res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+        return;
+      }
+
       const session = await sessionService.create(user.id, {
         userAgent: req.headers['user-agent'] || null,
         ip: req.ip || null,
@@ -138,8 +204,7 @@ export function createAuthRouter(
       }));
 
       const destination = result.redirectTo || '/';
-      const separator = destination.includes('?') ? '&' : '?';
-      res.redirect(`${destination}${separator}admitted=${admitted}`);
+      res.redirect(destination);
     } catch (err) {
       next(err);
     }
@@ -161,16 +226,22 @@ export function createAuthRouter(
 
   router.get('/auth/me', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const wsRows = await db.query<{ id: string; name: string }>('SELECT id, name FROM workspace LIMIT 1');
-      const workspace = wsRows[0] || null;
-
       const auth = req.authContext;
       if (!auth?.principal || auth.principal.kind !== 'user') {
-        res.json({ authenticated: false, admitted: false, user: null, role: null, workspace, auth_mode: config.auth.mode });
+        // Keep this endpoint useful for login UIs without disclosing whether
+        // a workspace exists or identifying it to anonymous callers.
+        res.json({ authenticated: false, admitted: false, user: null, role: null, workspace: null, auth_mode: config.auth.mode });
         return;
       }
 
-      const admitted = auth.permissions.length > 0 || !!auth.role_name;
+      if (!auth.is_workspace_member) {
+        res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+        return;
+      }
+
+      const admitted = true;
+      const wsRows = await db.query<{ id: string; name: string }>('SELECT id, name FROM workspace LIMIT 1');
+      const workspace = wsRows[0] || null;
       const userRows = await db.query<any>(
         'SELECT id, email, display_name, avatar_url, status FROM app_user WHERE id = ?',
         [auth.principal.id],

@@ -7,9 +7,8 @@
 //
 // Under MUSTER_AUTH_MODE=open, requests without either credential fall
 // through to OPEN_AUTH_CONTEXT (local dev). Under enforced mode, missing or
-// invalid credentials return 401 — except for the auth routes themselves
-// (/api/v1/auth/*), which must be reachable by a not-yet-authenticated
-// browser in order to establish a session in the first place.
+// invalid credentials return 401 — except for the exact bootstrap, health,
+// and protocol-discovery routes in shared/public-routes.ts.
 //
 // The middleware never distinguishes "no such credential" from "wrong
 // credential" in timing, message, or status code.
@@ -23,27 +22,10 @@ import { SessionService } from '../../services/session.service.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { parseCookies } from '../../shared/cookies.js';
+import { isPublicRoute } from '../../shared/public-routes.js';
 import { getRetryAfterMs, recordFailedAttempt, recordSuccessfulAttempt } from './rate-limiter.js';
 
 export const SESSION_COOKIE_NAME = 'muster_session';
-
-const AUTH_ROUTE_PREFIX = '/api/v1/auth/';
-/**
- * Bootstrap endpoints reachable with no credential — the mechanism by which
- * a principal or client is established in the first place, same reasoning
- * as AUTH_ROUTE_PREFIX:
- *   - device/code, token — Device Authorization Grant (MUS-28)
- *   - register — RFC 7591 dynamic client registration (MUS-29)
- *   - authorize (GET only) — validates the request and hands off to the SPA
- *     consent screen, which itself requires a session; authorize/details and
- *     authorize/consent are NOT in this list for exactly that reason.
- */
-const PUBLIC_DEVICE_ROUTES = [
-  '/api/v1/oauth/device/code',
-  '/api/v1/oauth/token',
-  '/api/v1/oauth/register',
-  '/api/v1/oauth/authorize',
-];
 
 /**
  * A 401 to /mcp specifically must look like an OAuth resource-server
@@ -68,14 +50,15 @@ async function resolveUserPermissions(
   if (!workspaceId) return { permissions: [], roleName: null, isWorkspaceMember: false };
 
   const memberRows = await db.query<any>(
-    `SELECT wm.role_id, r.name as role_name, r.permissions_json
+    `SELECT wm.role_id, r.name as role_name, r.permissions_json, u.status
      FROM workspace_member wm
-     JOIN role r ON r.id = wm.role_id
+     JOIN role r ON r.id = wm.role_id AND r.workspace_id = wm.workspace_id
+     JOIN app_user u ON u.id = wm.user_id
      WHERE wm.user_id = ? AND wm.workspace_id = ?`,
     [userId, workspaceId],
   );
 
-  if (memberRows.length === 0) {
+  if (memberRows.length === 0 || memberRows[0].status !== 'active') {
     return { permissions: [], roleName: null, isWorkspaceMember: false };
   }
 
@@ -105,11 +88,14 @@ async function resolveAgentWorkspaceMembership(
   const rows = await db.query<{ id: string }>(
     `SELECT a.id
        FROM agent a
+       JOIN app_user op ON op.id = a.operator_user_id
        JOIN workspace_member wm
          ON wm.user_id = a.operator_user_id
         AND wm.workspace_id = a.workspace_id
       WHERE a.id = ?
         AND a.workspace_id = ?
+        AND a.status = 'active'
+        AND op.status = 'active'
       LIMIT 1`,
     [agentId, workspaceId],
   );
@@ -136,7 +122,7 @@ export function createAuthMiddleware(
 
       const authHeader = req.headers.authorization;
       const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-      const isAuthRoute = req.path.startsWith(AUTH_ROUTE_PREFIX) || PUBLIC_DEVICE_ROUTES.includes(req.path);
+      const isPublic = isPublicRoute(req.method, req.path);
 
       // Locked out from prior failed bearer attempts — refuse before touching the token
       if (authHeader) {
@@ -156,8 +142,8 @@ export function createAuthMiddleware(
         const parts = authHeader.split(' ');
         if (parts.length !== 2 || parts[0] !== 'Bearer') {
           recordFailedAttempt(clientIp);
-          if (config.auth.mode === 'enforced' && !isAuthRoute) {
-            send401(req, _res, { error: 'unauthorized', message: 'Malformed Authorization header. Expected: Bearer <token>' });
+          if (config.auth.mode === 'enforced' && !isPublic) {
+            send401(req, _res, { error: 'unauthorized', message: 'Authentication required.' });
             return;
           }
           (req as any).authContext = OPEN_AUTH_CONTEXT;
@@ -170,8 +156,8 @@ export function createAuthMiddleware(
 
         if (!verification) {
           recordFailedAttempt(clientIp);
-          if (config.auth.mode === 'enforced' && !isAuthRoute) {
-            send401(req, _res, { error: 'unauthorized', message: 'Invalid or expired token.' });
+          if (config.auth.mode === 'enforced' && !isPublic) {
+            send401(req, _res, { error: 'unauthorized', message: 'Authentication required.' });
             return;
           }
           (req as any).authContext = OPEN_AUTH_CONTEXT;
@@ -200,7 +186,12 @@ export function createAuthMiddleware(
             verification.principal_id,
             verification.workspace_id,
           );
-          if (agent?.role_id) {
+          if (!isWorkspaceMember) {
+            // Do not carry a nominal agent role across operator offboarding;
+            // it would both leak stale role metadata and make a future
+            // boundary mistake more dangerous.
+            permissions = [];
+          } else if (agent?.role_id) {
             const role = await roleService.getById(agent.role_id);
             roleName = role?.name || null;
           }
@@ -233,8 +224,8 @@ export function createAuthMiddleware(
 
         if (!verification) {
           recordFailedAttempt(clientIp);
-          if (config.auth.mode === 'enforced' && !isAuthRoute) {
-            send401(req, _res, { error: 'unauthorized', message: 'Session is invalid or has expired.' });
+          if (config.auth.mode === 'enforced' && !isPublic) {
+            send401(req, _res, { error: 'unauthorized', message: 'Authentication required.' });
             return;
           }
           (req as any).authContext = OPEN_AUTH_CONTEXT;
@@ -252,6 +243,15 @@ export function createAuthMiddleware(
           workspaceId,
         );
 
+        // Membership and account status are part of session validity, not a
+        // one-time check at login.  Revoke a stale session immediately so a
+        // removed or suspended user cannot keep presenting it forever.  The
+        // current request still receives a zero-permission context and is
+        // denied by the route/MCP boundary without revealing membership data.
+        if (!isWorkspaceMember) {
+          await sessionService.revokeById(verification.id);
+        }
+
         (req as any).authContext = {
           principal: { kind: 'user', id: verification.user_id },
           workspace_id: workspaceId,
@@ -265,8 +265,8 @@ export function createAuthMiddleware(
       }
 
       // No credential at all — use OPEN_AUTH_CONTEXT in open mode or on the auth routes, 401 in enforced
-      if (config.auth.mode === 'enforced' && !isAuthRoute) {
-        send401(req, _res, { error: 'unauthorized', message: 'Authentication required. Provide a Bearer token or sign in.' });
+      if (config.auth.mode === 'enforced' && !isPublic) {
+        send401(req, _res, { error: 'unauthorized', message: 'Authentication required.' });
         return;
       }
       (req as any).authContext = OPEN_AUTH_CONTEXT;

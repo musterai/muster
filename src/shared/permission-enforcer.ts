@@ -395,9 +395,10 @@ export function requirePermission(
     throw new PermissionDeniedError('(unknown — unmapped tool)', auth.role_name || null);
   }
 
-  // Authentication is not workspace admission. Every MCP operation is
-  // workspace-scoped, including writes whose role permission may otherwise
-  // still be present in a stale or forged context.
+  // Membership is a prerequisite for every workspace operation, not just
+  // implicit reads.  In particular, an agent can retain a nominal role after
+  // its operator is removed; allowing that stale permission set to authorize
+  // a write would turn offboarding into a privilege-retention path.
   if (!auth.is_workspace_member) {
     throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
   }
@@ -439,6 +440,9 @@ export function requireRestPermission(
 
     if (route.public) return;
 
+    // Public routes are returned above; every other mapped operation is
+    // workspace-scoped, including mutations whose role may still contain
+    // permissions after membership removal.
     if (!auth.is_workspace_member) {
       throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
     }
