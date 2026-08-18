@@ -5,6 +5,7 @@ import path from 'node:path';
 import { DatabaseAdapter } from './adapter.js';
 import { deriveKeyPrefix, formatCardKey } from '../shared/card-key.js';
 import { deriveSlug } from '../shared/slug.js';
+import { rebalanceRanks } from '../shared/lexorank.js';
 
 /**
  * The schema is the clean-slate schema described by the approved multi-user
@@ -204,6 +205,7 @@ export class Migrator {
       }
       if (await this.hasTables(tx, ['project', 'board', 'column', 'card'])) {
         await this.backfillCardKeys(tx);
+        await this.repairLegacyRanks(tx);
       }
     });
   }
@@ -487,6 +489,46 @@ export class Migrator {
 
     for (const [projectId, seq] of seqByProject) {
       await db.execute(`UPDATE project SET card_seq = ? WHERE id = ?`, [seq, projectId]);
+    }
+  }
+
+  /**
+   * Repair every lane at startup, not only lanes touched by a new move. The
+   * ordered id tie-break makes duplicate/legacy values stable and the whole
+   * pass runs under the startup transaction/lock, so no reader observes a
+   * partially repaired lane.
+   */
+  private async repairLegacyRanks(db: DatabaseAdapter): Promise<void> {
+    const columns = await db.query<{ id: string; board_id: string; position: string }>(
+      `SELECT id, board_id, position FROM "column" ORDER BY board_id, position, id`,
+    );
+    const columnsByBoard = new Map<string, typeof columns>();
+    for (const column of columns) {
+      const boardColumns = columnsByBoard.get(column.board_id) || [];
+      boardColumns.push(column);
+      columnsByBoard.set(column.board_id, boardColumns);
+    }
+    for (const boardColumns of columnsByBoard.values()) {
+      const ranks = rebalanceRanks(boardColumns.length);
+      for (let index = 0; index < boardColumns.length; index++) {
+        await db.execute('UPDATE "column" SET position = ? WHERE id = ?', [ranks[index], boardColumns[index].id]);
+      }
+    }
+
+    const cards = await db.query<{ id: string; column_id: string; position: string }>(
+      `SELECT id, column_id, position FROM card ORDER BY column_id, position, id`,
+    );
+    const cardsByColumn = new Map<string, typeof cards>();
+    for (const card of cards) {
+      const laneCards = cardsByColumn.get(card.column_id) || [];
+      laneCards.push(card);
+      cardsByColumn.set(card.column_id, laneCards);
+    }
+    for (const laneCards of cardsByColumn.values()) {
+      const ranks = rebalanceRanks(laneCards.length);
+      for (let index = 0; index < laneCards.length; index++) {
+        await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], laneCards[index].id]);
+      }
     }
   }
 }

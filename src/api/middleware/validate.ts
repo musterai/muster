@@ -19,13 +19,14 @@ export const validate = (
     } catch (error) {
       if (error instanceof ZodError) {
         const validationError = new ValidationError('Request validation failed', {
-          // Zod's invalid_enum_value message includes the received value;
-          // never reflect arbitrary request values (which may be credentials)
-          // into a response body.
-          issues: error.issues.map(({ path, code, message }) => ({
-            path,
+          // Zod messages can embed an attempted enum value, an unrecognized
+          // property name, or a parser-specific representation. Keep only a
+          // stable code/path contract; `unrecognized_keys` deliberately has
+          // an empty path so an attacker-chosen key never becomes response
+          // content under another field.
+          issues: error.issues.map(({ path, code }) => ({
+            path: code === 'unrecognized_keys' ? [] : path,
             code,
-            message: code === 'invalid_enum_value' ? 'Invalid enum value' : message,
           })),
         });
         await onFailure?.(req, validationError);

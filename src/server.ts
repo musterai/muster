@@ -103,6 +103,7 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   const agentService = new AgentService(db, eventService);
   const mcpOAuthService = new McpOAuthService(db, tokenService, agentService, auditService);
   const services: Services = {
+    db,
     projectService: new ProjectService(db, eventService, boardService, documentService),
     boardService,
     columnService: new ColumnService(db, eventService),

@@ -1,11 +1,13 @@
 // File: src/api/schemas.ts
 //
-// Strict REST boundary schemas.  MCP keeps its existing public Zod schemas;
-// these schemas cover the REST transport and deliberately reject unknown
-// properties so request composition cannot become mass assignment.
+// Strict REST boundary schemas. Shared operation contracts live in `src/shared`
+// where REST and MCP need identical pre-service validation; transport-specific
+// schemas deliberately reject unknown properties so request composition cannot
+// become mass assignment.
 
 import { z } from 'zod';
 import { sanitizeSameOriginPath } from '../shared/url-security.js';
+import { cardCreateInputSchema } from '../shared/card-input-schema.js';
 
 const MAX_ID = 128;
 const MAX_NAME = 200;
@@ -128,17 +130,10 @@ export const cardListQuerySchema = strictObject({
   label: textSchema(MAX_LABEL).optional(),
   archived: queryBoolean.optional(),
 });
-export const cardCreateSchema = strictObject({
-  title: textSchema(MAX_NAME),
-  description: textSchema(200_000, 0).optional(),
-  priority: priority.optional(),
-  position: textSchema(MAX_ID).optional(),
-  due_date: isoDateSchema.optional(),
-  labels: z.array(id).max(MAX_ARRAY_ITEMS).optional(),
-  assignees: z.array(id).max(MAX_ARRAY_ITEMS).optional(),
-  is_epic: booleanLike.optional(),
-  operator_override: z.boolean().optional(),
-});
+// Shared with MCP through `src/shared/card-input-schema.ts`; REST supplies
+// `column_id` through `columnIdParamsSchema` while MCP includes it in its
+// strict tool-input envelope.
+export const cardCreateSchema = cardCreateInputSchema;
 export const cardUpdateSchema = nonEmptyUpdate(strictObject({
   title: textSchema(MAX_NAME).optional(),
   description: textSchema(200_000, 0).optional(),
@@ -153,7 +148,7 @@ export const cardUpdateSchema = nonEmptyUpdate(strictObject({
 }));
 export const cardMoveSchema = strictObject({
   target_column_id: optionalId,
-  position: textSchema(MAX_ID).optional(),
+  position: textSchema(256).optional(),
   operator_override: z.boolean().optional(),
 }).refine(value => value.target_column_id !== undefined || value.position !== undefined, {
   message: 'target_column_id or position is required',

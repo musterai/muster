@@ -163,8 +163,12 @@ export const OPERATION_PERMISSIONS = {
   create_token: WORKSPACE_READ,
   revoke_token: WORKSPACE_READ,
   lookup_device_authorization: WORKSPACE_READ,
-  approve_device_authorization: 'project.create',
-  deny_device_authorization: 'project.create',
+  // Device approval/denial is self-consent: the route derives the user and
+  // workspace from the authenticated context and accepts no caller-selected
+  // principal. Every admitted member, including an observer, may complete or
+  // reject a login for their own identity.
+  approve_device_authorization: WORKSPACE_READ,
+  deny_device_authorization: WORKSPACE_READ,
   get_oauth_authorization_details: WORKSPACE_READ,
   consent_oauth_authorization: 'agent.register',
   get_audit_log: 'workspace.admin',

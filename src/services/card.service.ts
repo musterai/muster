@@ -2,9 +2,9 @@ import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Card, CardAssignee, CardDetails, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
 import { EventService } from './event.service.js';
-import { rankAfter } from '../shared/lexorank.js';
+import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { formatCardKey } from '../shared/card-key.js';
-import { CardRuleError, NotFoundError, ValidationError } from '../shared/errors.js';
+import { CardRuleError, ConflictError, NotFoundError, ValidationError } from '../shared/errors.js';
 import { config } from '../config/index.js';
 import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.js';
 import { assertHttpUrl } from '../shared/url.js';
@@ -12,6 +12,20 @@ import { canonicalizeCardLink } from './helpers/card-links.helper.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
+const MAX_MOVE_RETRIES = 3;
+const MOVE_RETRY_DELAY_MS = 10;
+
+class MoveRetryError extends Error {
+  constructor() {
+    super('card changed lanes while its move was being serialized');
+    this.name = 'MoveRetryError';
+  }
+}
+
+function isRetryablePostgresError(error: unknown): boolean {
+  const code = (error as { code?: string }).code;
+  return code === '40P01' || code === '40001';
+}
 
 interface ColumnCapacity {
   id: string;
@@ -34,6 +48,80 @@ export class CardService {
     private db: DatabaseAdapter,
     private eventService?: EventService
   ) {}
+
+  /**
+   * Positions are a small, untrusted ordering hint. Digits are accepted only
+   * for the historical `0a` prepend value; every persisted value is replaced
+   * by a canonical lowercase rank during the lane rebalance below.
+   */
+  private assertPosition(position: string | undefined): void {
+    if (position !== undefined && !isValidRankHint(position)) {
+      throw new ValidationError('position must contain only lowercase letters a-z', {
+        field: 'position',
+        code: 'INVALID_RANK',
+      });
+    }
+  }
+
+  /**
+   * A move must carry an explicit lane or rank intent. Without this guard an
+   * omitted target defaults to the current lane and an omitted rank defaults
+   * to append, silently turning an empty request into a reorder.
+   *
+   * REST and MCP reject invalid shapes at their boundaries. Keeping the
+   * invariant here is deliberate: direct service callers and future
+   * transports must not be able to mutate a card with `{}` either.
+   */
+  private assertMoveIntent(data: MoveCard): void {
+    if (data.target_column_id === undefined && data.position === undefined) {
+      throw new ValidationError('target_column_id or position is required', {
+        fields: ['target_column_id', 'position'],
+        code: 'MOVE_INTENT_REQUIRED',
+      });
+    }
+    if (data.target_column_id !== undefined && (typeof data.target_column_id !== 'string' || data.target_column_id.trim().length === 0)) {
+      throw new ValidationError('target_column_id must be a non-empty string', {
+        field: 'target_column_id',
+        code: 'INVALID_TARGET_COLUMN',
+      });
+    }
+    if (data.position !== undefined && typeof data.position !== 'string') {
+      throw new ValidationError('position must be a string', {
+        field: 'position',
+        code: 'INVALID_RANK',
+      });
+    }
+    this.assertPosition(data.position);
+  }
+
+  /** Apply deterministic canonical ranks to an already ordered lane. */
+  private async rebalanceLane(db: DatabaseAdapter, cards: Card[]): Promise<string[]> {
+    const ranks = rebalanceRanks(cards.length);
+    for (let index = 0; index < cards.length; index++) {
+      await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], cards[index].id]);
+    }
+    return ranks;
+  }
+
+  private async orderedLaneCards(columnId: string, db: DatabaseAdapter, excludeId?: string): Promise<Card[]> {
+    const cards = await db.query<Card>(
+      'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC, id ASC',
+      [columnId]
+    );
+    return excludeId ? cards.filter(card => card.id !== excludeId) : cards;
+  }
+
+  /** Insert a card according to its requested hint, repairing duplicate/legacy ranks at the same time. */
+  private orderWithPosition(cards: Card[], card: Card, position?: string): Card[] {
+    const ordered = [...cards];
+    let insertAt = ordered.length;
+    if (position !== undefined) {
+      const index = ordered.findIndex(existing => existing.position > position);
+      insertAt = index === -1 ? ordered.length : index;
+    }
+    ordered.splice(insertAt, 0, card);
+    return ordered;
+  }
 
   private async getColumnCapacity(columnId: string, db: DatabaseAdapter = this.db): Promise<ColumnCapacity> {
     // WIP checks run inside the create/move transaction. Lock the target
@@ -76,6 +164,7 @@ export class CardService {
     actorId: string | undefined,
     operation: string,
     details: Record<string, unknown>,
+    adapter: DatabaseAdapter = this.db,
   ): Promise<void> {
     if (!this.eventService) return;
     await this.eventService.create({
@@ -85,7 +174,7 @@ export class CardService {
       action: 'override',
       actor_id: actorId,
       payload: { operation, ...details },
-    });
+    }, adapter);
   }
 
   async create(data: CreateCard, actorId?: string, options: CardOperationOptions = {}): Promise<Card> {
@@ -118,26 +207,70 @@ export class CardService {
       }
 
       const key = await this.nextCardKey(projectId, tx);
-      let position = data.position;
-      if (!position) {
-        const cards = await tx.query<Card>(
-          'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC',
-          [data.column_id]
-        );
-        const lastPos = cards.length > 0 ? cards[cards.length - 1].position : '';
-        position = rankAfter(lastPos);
-      }
+      this.assertPosition(data.position);
 
       const priority = data.priority || 'medium';
       const description = data.description || null;
       const due_date = data.due_date || null;
       const is_epic = data.is_epic ? 1 : 0;
+      const existingCards = await this.orderedLaneCards(data.column_id, tx);
+      const draftCard: Card = {
+        id,
+        key,
+        column_id: data.column_id,
+        title: data.title,
+        description,
+        position: 'm',
+        priority,
+        due_date,
+        created_at,
+        updated_at,
+        archived: 0,
+        claimed_by: null,
+        claimed_at: null,
+        claim_expires_at: null,
+        is_epic,
+      };
+      const orderedCards = this.orderWithPosition(existingCards, draftCard, data.position);
 
       await tx.execute(
         `INSERT INTO card (id, key, column_id, title, description, position, priority, due_date, created_at, updated_at, archived, is_epic)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-        [id, key, data.column_id, data.title, description, position, priority, due_date, created_at, updated_at, is_epic]
+        [id, key, data.column_id, data.title, description, 'm', priority, due_date, created_at, updated_at, is_epic]
       );
+
+      const ranks = await this.rebalanceLane(tx, orderedCards);
+      const position = ranks[orderedCards.findIndex(card => card.id === id)];
+
+      // Card associations and its domain event are part of the same commit
+      // as the card row. A failure in a label/assignee insert must not leave a
+      // partially-created card behind.
+      for (const labelId of data.labels || []) {
+        await tx.execute('INSERT OR IGNORE INTO card_label (card_id, label_id) VALUES (?, ?)', [id, labelId]);
+      }
+      for (const agentId of data.assignees || []) {
+        await tx.execute('INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)', [id, agentId]);
+      }
+      if (this.eventService) {
+        await this.eventService.create({
+          project_id: projectId,
+          entity_type: 'card',
+          entity_id: id,
+          action: 'created',
+          actor_id: actorId,
+          payload: { title: data.title, column_id: data.column_id },
+        }, tx);
+      }
+
+      if (wipViolation && options.operatorOverride) {
+        await this.recordOverride(projectId, id, actorId, 'create', {
+          rule: 'wip_limit',
+          column_id: wipViolation.id,
+          column_name: wipViolation.name,
+          current_count: wipViolation.card_count,
+          wip_limit: wipViolation.wip_limit,
+        }, tx);
+      }
 
       return {
         card: {
@@ -160,39 +293,6 @@ export class CardService {
         wipViolation,
       };
     });
-
-    if (data.labels && data.labels.length > 0) {
-      for (const labelId of data.labels) {
-        await this.addLabel(id, labelId, actorId);
-      }
-    }
-
-    if (data.assignees && data.assignees.length > 0) {
-      for (const agentId of data.assignees) {
-        await this.assign(id, agentId, actorId);
-      }
-    }
-
-    if (this.eventService) {
-      await this.eventService.create({
-        project_id: projectId,
-        entity_type: 'card',
-        entity_id: id,
-        action: 'created',
-        actor_id: actorId,
-        payload: { title: card.title, column_id: card.column_id },
-      });
-    }
-
-    if (wipViolation && options.operatorOverride) {
-      await this.recordOverride(projectId, id, actorId, 'create', {
-        rule: 'wip_limit',
-        column_id: wipViolation.id,
-        column_name: wipViolation.name,
-        current_count: wipViolation.card_count,
-        wip_limit: wipViolation.wip_limit,
-      });
-    }
 
     return card;
   }
@@ -477,41 +577,48 @@ export class CardService {
 
   async update(id: string, data: UpdateCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
     assertMaxLength(data.description, CARD_TEXT_MAX_CHARS, 'Card description');
-    const existing = await this.getById(id);
-    const cardId = existing.id;
+    return this.db.transaction(async tx => {
+      const existing = await this.getById(id, tx);
+      const cardId = existing.id;
+      const title = data.title !== undefined ? data.title : existing.title;
+      const description = data.description !== undefined ? data.description : existing.description;
+      const priority = data.priority !== undefined ? data.priority : existing.priority;
+      const due_date = data.due_date !== undefined ? data.due_date : existing.due_date;
+      const is_epic = data.is_epic !== undefined ? (data.is_epic ? 1 : 0) : existing.is_epic;
+      const updated_at = new Date().toISOString();
 
-    const title = data.title !== undefined ? data.title : existing.title;
-    const description = data.description !== undefined ? data.description : existing.description;
-    const priority = data.priority !== undefined ? data.priority : existing.priority;
-    const due_date = data.due_date !== undefined ? data.due_date : existing.due_date;
-    const is_epic = data.is_epic !== undefined ? (data.is_epic ? 1 : 0) : existing.is_epic;
-    const updated_at = new Date().toISOString();
+      await tx.execute(
+        `UPDATE card SET title = ?, description = ?, priority = ?, due_date = ?, is_epic = ?, updated_at = ? WHERE id = ?`,
+        [title, description, priority, due_date, is_epic, updated_at, cardId]
+      );
 
-    await this.db.execute(
-      `UPDATE card SET title = ?, description = ?, priority = ?, due_date = ?, is_epic = ?, updated_at = ? WHERE id = ?`,
-      [title, description, priority, due_date, is_epic, updated_at, cardId]
-    );
-
-    if (this.eventService) {
-      const projectId = await this.getProjectIdForColumn(existing.column_id);
-      if (projectId) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'card',
-          entity_id: cardId,
-          action: 'updated',
-          actor_id: actorId,
-          payload: data as Record<string, unknown>,
-        });
+      if (this.eventService) {
+        const projectId = await this.getProjectIdForColumn(existing.column_id, tx);
+        if (projectId) {
+          await this.eventService.create({
+            project_id: projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'updated',
+            actor_id: actorId,
+            payload: data as Record<string, unknown>,
+          }, tx);
+        }
       }
-    }
 
-    return this.getById(cardId);
+      return this.getById(cardId, tx);
+    });
   }
 
   async move(id: string, data: MoveCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
+    // Validate before resolving the card or opening a transaction so an empty
+    // move is observably a no-op across every caller.
+    this.assertMoveIntent(data);
     const cardId = await resolveCardId(this.db, id);
-    const { moveEvent, overrideRules } = await this.db.transaction(async (tx) => {
+    let completed = false;
+    for (let attempt = 0; attempt < MAX_MOVE_RETRIES; attempt++) {
+      try {
+        await this.db.transaction(async (tx) => {
       const overrideRules: Array<Record<string, unknown>> = [];
       let moveEvent: {
         projectId: string;
@@ -524,12 +631,28 @@ export class CardService {
         cardKey: string;
         cardTitle: string;
       } | null = null;
+      // Read the source without locking, acquire every lane lock in canonical
+      // order, then lock the card. Every writer that rewrites lane peers uses
+      // this lane-before-card protocol; it prevents card/column wait cycles.
+      const initialRows = await tx.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
+      const initial = initialRows[0];
+      if (!initial) throw new NotFoundError(`Card with ID ${cardId} not found`);
+      const initialTarget = data.target_column_id ?? initial.column_id;
+      if (tx.dialect === 'postgres') {
+        const laneIds = [...new Set([initial.column_id, initialTarget])].sort();
+        for (const laneId of laneIds) {
+          await tx.query<{ id: string }>('SELECT id FROM "column" WHERE id = ? FOR UPDATE', [laneId]);
+        }
+      }
+
       const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
       const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
       const existing = rows[0];
       if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
+      if (tx.dialect === 'postgres' && existing.column_id !== initial.column_id) throw new MoveRetryError();
 
-      const target_column_id = data.target_column_id || existing.column_id;
+      const target_column_id = data.target_column_id ?? existing.column_id;
+
       const capacity = await this.getColumnCapacity(target_column_id, tx);
       const isColumnChange = target_column_id !== existing.column_id;
 
@@ -572,14 +695,19 @@ export class CardService {
         }
       }
 
-      let position = data.position;
-      if (!position) {
-        const targetCards = await tx.query<Card>(
-          'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC',
-          [target_column_id]
-        );
-        const lastPos = targetCards.length > 0 ? targetCards[targetCards.length - 1].position : '';
-        position = rankAfter(lastPos);
+      const targetCards = await this.orderedLaneCards(target_column_id, tx, cardId);
+      const movedCard: Card = { ...existing, column_id: target_column_id, position: 'm' };
+      const orderedTargetCards = this.orderWithPosition(targetCards, movedCard, data.position);
+      const targetRanks = await this.rebalanceLane(tx, orderedTargetCards);
+      const movedIndex = orderedTargetCards.findIndex(card => card.id === cardId);
+      const position = targetRanks[movedIndex];
+
+      // A cross-lane move repairs the source lane in the same transaction.
+      // The moved card is excluded above, so no association or card row is
+      // lost while both lanes receive deterministic, unique ranks.
+      if (isColumnChange) {
+        const sourceCards = await this.orderedLaneCards(existing.column_id, tx, cardId);
+        await this.rebalanceLane(tx, sourceCards);
       }
 
       const updated_at = new Date().toISOString();
@@ -602,72 +730,91 @@ export class CardService {
         cardTitle: existing.title,
       };
 
-      return { moveEvent, overrideRules };
-    });
-
-    if (this.eventService && moveEvent) {
-      await this.eventService.create({
-        project_id: moveEvent.projectId,
-        entity_type: 'card',
-        entity_id: cardId,
-        action: 'moved',
-        actor_id: actorId,
-        payload: {
-          from_column_id: moveEvent.fromColumnId,
-          to_column_id: moveEvent.toColumnId,
-          position: moveEvent.position,
-        },
-      });
-
-      // MUS-45: a card landing in a terminal (Done) lane is a completion —
-      // emit a dedicated event so the human operator can be alerted about it
-      // without the client having to interpret column semantics.
-      if (moveEvent.isColumnChange && moveEvent.toTerminal) {
+      if (this.eventService) {
         await this.eventService.create({
-          project_id: moveEvent.projectId,
+          project_id: projectId,
           entity_type: 'card',
           entity_id: cardId,
-          action: 'completed',
+          action: 'moved',
           actor_id: actorId,
           payload: {
-            card_key: moveEvent.cardKey,
-            card_title: moveEvent.cardTitle,
             from_column_id: moveEvent.fromColumnId,
             to_column_id: moveEvent.toColumnId,
-            to_column_name: moveEvent.toColumnName,
+            position: moveEvent.position,
           },
+        }, tx);
+
+        // MUS-45: a card landing in a terminal (Done) lane is a completion.
+        // Keep this event in the same transaction as the card move so a
+        // failed completion insert cannot leave a durable move without its
+        // corresponding audit trail.
+        if (moveEvent.isColumnChange && moveEvent.toTerminal) {
+          await this.eventService.create({
+            project_id: moveEvent.projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'completed',
+            actor_id: actorId,
+            payload: {
+              card_key: moveEvent.cardKey,
+              card_title: moveEvent.cardTitle,
+              from_column_id: moveEvent.fromColumnId,
+              to_column_id: moveEvent.toColumnId,
+              to_column_name: moveEvent.toColumnName,
+            },
+          }, tx);
+        }
+      }
+
+      if (overrideRules.length > 0) {
+        await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules }, tx);
+      }
+
         });
+        completed = true;
+        break;
+      } catch (error) {
+        const retryable = this.db.dialect === 'postgres' && (error instanceof MoveRetryError || isRetryablePostgresError(error));
+        if (!retryable || attempt === MAX_MOVE_RETRIES - 1) {
+          if (retryable) {
+            throw new ConflictError('Card move conflicted with concurrent lane changes; retry the move.', {
+              operation: 'move',
+              retryable: true,
+            });
+          }
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, MOVE_RETRY_DELAY_MS * (attempt + 1)));
       }
     }
-
-    if (overrideRules.length > 0 && moveEvent) {
-      await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules });
-    }
+    if (!completed) throw new ConflictError('Card move could not be serialized; retry the move.', { retryable: true });
 
     return this.getById(cardId);
   }
 
   async assign(idOrKey: string, agentId: string, actorId?: string): Promise<void> {
-    const cardId = await resolveCardId(this.db, idOrKey);
-    await this.db.execute(
-      `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
-      [cardId, agentId]
-    );
+    await this.db.transaction(async tx => {
+      const cardId = await resolveCardId(tx, idOrKey);
+      const result = await tx.execute(
+        `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
+        [cardId, agentId]
+      );
 
-    if (this.eventService) {
-      const card = await this.getById(cardId);
-      const projectId = await this.getProjectIdForColumn(card.column_id);
-      if (projectId) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'card',
-          entity_id: cardId,
-          action: 'assigned',
-          actor_id: actorId,
-          payload: { agent_id: agentId },
-        });
+      if (this.eventService && result.changes > 0) {
+        const card = await this.getById(cardId, tx);
+        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
+        if (projectId) {
+          await this.eventService.create({
+            project_id: projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'assigned',
+            actor_id: actorId,
+            payload: { agent_id: agentId },
+          }, tx);
+        }
       }
-    }
+    });
   }
 
   async unassign(idOrKey: string, agentId: string, actorId?: string): Promise<void> {
@@ -691,7 +838,6 @@ export class CardService {
     options: CardOperationOptions = {},
   ): Promise<CardDetails | ClaimRefusal> {
     const canonicalCardId = await resolveCardId(this.db, cardId);
-    let overrideProjectId: string | null = null;
     let overrideBlockers: UnresolvedBlocker[] = [];
 
     const result = await this.db.transaction(async (tx) => {
@@ -745,7 +891,6 @@ export class CardService {
             },
           );
         }
-        overrideProjectId = await this.getProjectIdForColumn(card.column_id, tx);
         overrideBlockers = blockers;
       }
 
@@ -769,19 +914,18 @@ export class CardService {
             action: 'claimed',
             actor_id: agentId,
             payload: { claim_expires_at: expiresIso },
-          });
+          }, tx);
+          if (overrideBlockers.length > 0) {
+            await this.recordOverride(projectId, canonicalCardId, actorId || agentId, 'claim', {
+              rule: 'blocked_by',
+              blockers: overrideBlockers.map(blocker => ({ ...blocker })),
+            }, tx);
+          }
         }
       }
 
       return this.getById(canonicalCardId, tx);
     });
-
-    if (overrideProjectId && overrideBlockers.length > 0) {
-      await this.recordOverride(overrideProjectId, canonicalCardId, actorId || agentId, 'claim', {
-        rule: 'blocked_by',
-        blockers: overrideBlockers.map(blocker => ({ ...blocker })),
-      });
-    }
 
     return result;
   }
@@ -796,22 +940,35 @@ export class CardService {
   }
 
   /** Release leases past their expiry so the board doesn't hold a card forever for a dead agent. */
-  async releaseExpiredLeases(): Promise<string[]> {
+  async releaseExpiredLeases(adapter?: DatabaseAdapter): Promise<string[]> {
+    if (!adapter) return this.db.transaction(tx => this.releaseExpiredLeases(tx));
+
     const nowIso = new Date().toISOString();
-    const expired = await this.db.query<Card>(
-      `SELECT * FROM card WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
+    // The transaction boundary serializes SQLite sweepers (BEGIN IMMEDIATE).
+    // PostgreSQL needs row locks because independent pool clients can sweep
+    // concurrently; the expiry predicate is re-evaluated after any waiter is
+    // released, so a second sweeper sees the first one's conditional update.
+    const lockClause = adapter.dialect === 'postgres' ? ' FOR UPDATE' : '';
+    const expired = await adapter.query<Card>(
+      `SELECT * FROM card WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?${lockClause}`,
       [nowIso]
     );
+    const released: string[] = [];
 
     for (const card of expired) {
       const updated_at = new Date().toISOString();
-      await this.db.execute(
-        `UPDATE card SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, updated_at = ? WHERE id = ?`,
-        [updated_at, card.id]
+      const result = await adapter.execute(
+        `UPDATE card SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, updated_at = ?
+         WHERE id = ? AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
+        [updated_at, card.id, nowIso]
       );
+      // Keep the event and the state transition in this transaction. A
+      // concurrent sweeper that lost the conditional update emits nothing.
+      if (result.changes !== 1) continue;
+      released.push(card.id);
 
       if (this.eventService) {
-        const projectId = await this.getProjectIdForColumn(card.column_id);
+        const projectId = await this.getProjectIdForColumn(card.column_id, adapter);
         if (projectId) {
           await this.eventService.create({
             project_id: projectId,
@@ -819,12 +976,12 @@ export class CardService {
             entity_id: card.id,
             action: 'claim_expired',
             payload: { previously_claimed_by: card.claimed_by },
-          });
+          }, adapter);
         }
       }
     }
 
-    return expired.map(c => c.id);
+    return released;
   }
 
   async addLabel(idOrKey: string, labelId: string, actorId?: string): Promise<void> {
@@ -844,27 +1001,29 @@ export class CardService {
   }
 
   async linkDocument(idOrKey: string, documentId: string, actorId?: string): Promise<void> {
-    const cardId = await resolveCardId(this.db, idOrKey);
-    const linked_at = new Date().toISOString();
-    await this.db.execute(
-      `INSERT OR IGNORE INTO card_document (card_id, document_id, linked_at) VALUES (?, ?, ?)`,
-      [cardId, documentId, linked_at]
-    );
+    await this.db.transaction(async tx => {
+      const cardId = await resolveCardId(tx, idOrKey);
+      const linked_at = new Date().toISOString();
+      const result = await tx.execute(
+        `INSERT OR IGNORE INTO card_document (card_id, document_id, linked_at) VALUES (?, ?, ?)`,
+        [cardId, documentId, linked_at]
+      );
 
-    if (this.eventService) {
-      const card = await this.getById(cardId);
-      const projectId = await this.getProjectIdForColumn(card.column_id);
-      if (projectId) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'card',
-          entity_id: cardId,
-          action: 'document_linked',
-          actor_id: actorId,
-          payload: { document_id: documentId },
-        });
+      if (this.eventService && result.changes > 0) {
+        const card = await this.getById(cardId, tx);
+        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
+        if (projectId) {
+          await this.eventService.create({
+            project_id: projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'document_linked',
+            actor_id: actorId,
+            payload: { document_id: documentId },
+          }, tx);
+        }
       }
-    }
+    });
   }
 
   async unlinkDocument(idOrKey: string, documentId: string, actorId?: string): Promise<void> {
@@ -876,33 +1035,35 @@ export class CardService {
   }
 
   async linkCard(idOrKey: string, targetIdOrKey: string, relationType: CardLinkRelationType, actorId?: string): Promise<void> {
-    const [cardId, targetCardId] = await Promise.all([
-      resolveCardId(this.db, idOrKey),
-      resolveCardId(this.db, targetIdOrKey),
-    ]);
-    const { sourceCardId, destCardId, storedType } = canonicalizeCardLink(cardId, targetCardId, relationType);
+    await this.db.transaction(async tx => {
+      const [cardId, targetCardId] = await Promise.all([
+        resolveCardId(tx, idOrKey),
+        resolveCardId(tx, targetIdOrKey),
+      ]);
+      const { sourceCardId, destCardId, storedType } = canonicalizeCardLink(cardId, targetCardId, relationType);
 
-    const id = ulid();
-    const created_at = new Date().toISOString();
-    await this.db.execute(
-      `INSERT OR IGNORE INTO card_link (id, source_card_id, target_card_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)`,
-      [id, sourceCardId, destCardId, storedType, created_at]
-    );
+      const id = ulid();
+      const created_at = new Date().toISOString();
+      const result = await tx.execute(
+        `INSERT OR IGNORE INTO card_link (id, source_card_id, target_card_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)`,
+        [id, sourceCardId, destCardId, storedType, created_at]
+      );
 
-    if (this.eventService) {
-      const card = await this.getById(cardId);
-      const projectId = await this.getProjectIdForColumn(card.column_id);
-      if (projectId) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'card',
-          entity_id: cardId,
-          action: 'card_linked',
-          actor_id: actorId,
-          payload: { target_card_id: targetCardId, relation_type: relationType },
-        });
+      if (this.eventService && result.changes > 0) {
+        const card = await this.getById(cardId, tx);
+        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
+        if (projectId) {
+          await this.eventService.create({
+            project_id: projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'card_linked',
+            actor_id: actorId,
+            payload: { target_card_id: targetCardId, relation_type: relationType },
+          }, tx);
+        }
       }
-    }
+    });
   }
 
   async unlinkCard(idOrKey: string, linkId: string, actorId?: string): Promise<void> {
@@ -914,60 +1075,63 @@ export class CardService {
   }
 
   async addWorkLink(idOrKey: string, data: CreateCardWorkLink, actorId?: string): Promise<CardWorkLink> {
-    const cardId = await resolveCardId(this.db, idOrKey);
     assertHttpUrl(data.url);
+    return this.db.transaction(async tx => {
+      const cardId = await resolveCardId(tx, idOrKey);
+      const id = ulid();
+      const created_at = new Date().toISOString();
+      const external_ref = data.external_ref ?? null;
+      const title = data.title ?? null;
+      const status = data.status ?? null;
 
-    const id = ulid();
-    const created_at = new Date().toISOString();
-    const external_ref = data.external_ref ?? null;
-    const title = data.title ?? null;
-    const status = data.status ?? null;
+      await tx.execute(
+        `INSERT INTO card_work_link (id, card_id, kind, provider, url, external_ref, title, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, cardId, data.kind, data.provider, data.url, external_ref, title, status, created_at]
+      );
 
-    await this.db.execute(
-      `INSERT INTO card_work_link (id, card_id, kind, provider, url, external_ref, title, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, cardId, data.kind, data.provider, data.url, external_ref, title, status, created_at]
-    );
-
-    if (this.eventService) {
-      const card = await this.getById(cardId);
-      const projectId = await this.getProjectIdForColumn(card.column_id);
-      if (projectId) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'card',
-          entity_id: cardId,
-          action: 'work_link_added',
-          actor_id: actorId,
-          payload: { kind: data.kind, provider: data.provider, url: data.url },
-        });
+      if (this.eventService) {
+        const card = await this.getById(cardId, tx);
+        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
+        if (projectId) {
+          await this.eventService.create({
+            project_id: projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'work_link_added',
+            actor_id: actorId,
+            payload: { kind: data.kind, provider: data.provider, url: data.url },
+          }, tx);
+        }
       }
-    }
 
-    return { id, card_id: cardId, kind: data.kind, provider: data.provider, url: data.url, external_ref, title, status, created_at };
+      return { id, card_id: cardId, kind: data.kind, provider: data.provider, url: data.url, external_ref, title, status, created_at };
+    });
   }
 
   async removeWorkLink(idOrKey: string, linkId: string, actorId?: string): Promise<void> {
-    const cardId = await resolveCardId(this.db, idOrKey);
-    await this.db.execute(
-      `DELETE FROM card_work_link WHERE id = ? AND card_id = ?`,
-      [linkId, cardId]
-    );
+    await this.db.transaction(async tx => {
+      const cardId = await resolveCardId(tx, idOrKey);
+      const result = await tx.execute(
+        `DELETE FROM card_work_link WHERE id = ? AND card_id = ?`,
+        [linkId, cardId]
+      );
 
-    if (this.eventService) {
-      const card = await this.getById(cardId);
-      const projectId = await this.getProjectIdForColumn(card.column_id);
-      if (projectId) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'card',
-          entity_id: cardId,
-          action: 'work_link_removed',
-          actor_id: actorId,
-          payload: { link_id: linkId },
-        });
+      if (this.eventService && result.changes > 0) {
+        const card = await this.getById(cardId, tx);
+        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
+        if (projectId) {
+          await this.eventService.create({
+            project_id: projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'work_link_removed',
+            actor_id: actorId,
+            payload: { link_id: linkId },
+          }, tx);
+        }
       }
-    }
+    });
   }
 
   async listWorkLinks(idOrKey: string, db: DatabaseAdapter = this.db): Promise<CardWorkLink[]> {
@@ -1014,29 +1178,30 @@ export class CardService {
   }
 
   async delete(cardId: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(cardId);
-    const canonicalCardId = existing.id;
+    await this.db.transaction(async tx => {
+      const existing = await this.getById(cardId, tx);
+      const canonicalCardId = existing.id;
+      const projectId = await this.getProjectIdForColumn(existing.column_id, tx);
 
-    const projectId = await this.getProjectIdForColumn(existing.column_id);
+      await tx.execute('DELETE FROM card_assignee WHERE card_id = ?', [canonicalCardId]);
+      await tx.execute('DELETE FROM card_label WHERE card_id = ?', [canonicalCardId]);
+      await tx.execute('DELETE FROM card_document WHERE card_id = ?', [canonicalCardId]);
+      await tx.execute('DELETE FROM card_link WHERE source_card_id = ? OR target_card_id = ?', [canonicalCardId, canonicalCardId]);
+      await tx.execute('DELETE FROM card_work_link WHERE card_id = ?', [canonicalCardId]);
+      await tx.execute('DELETE FROM comment WHERE card_id = ?', [canonicalCardId]);
+      await tx.execute('DELETE FROM card WHERE id = ?', [canonicalCardId]);
 
-    await this.db.execute('DELETE FROM card_assignee WHERE card_id = ?', [canonicalCardId]);
-    await this.db.execute('DELETE FROM card_label WHERE card_id = ?', [canonicalCardId]);
-    await this.db.execute('DELETE FROM card_document WHERE card_id = ?', [canonicalCardId]);
-    await this.db.execute('DELETE FROM card_link WHERE source_card_id = ? OR target_card_id = ?', [canonicalCardId, canonicalCardId]);
-    await this.db.execute('DELETE FROM card_work_link WHERE card_id = ?', [canonicalCardId]);
-    await this.db.execute('DELETE FROM comment WHERE card_id = ?', [canonicalCardId]);
-    await this.db.execute('DELETE FROM card WHERE id = ?', [canonicalCardId]);
-
-    if (this.eventService && projectId) {
-      await this.eventService.create({
-        project_id: projectId,
-        entity_type: 'card',
-        entity_id: canonicalCardId,
-        action: 'deleted',
-        actor_id: actorId,
-        payload: { title: existing.title },
-      });
-    }
+      if (this.eventService && projectId) {
+        await this.eventService.create({
+          project_id: projectId,
+          entity_type: 'card',
+          entity_id: canonicalCardId,
+          action: 'deleted',
+          actor_id: actorId,
+          payload: { title: existing.title },
+        }, tx);
+      }
+    });
   }
 
   private async getProjectIdForColumn(columnId: string, db: DatabaseAdapter = this.db): Promise<string | null> {
