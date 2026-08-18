@@ -5,6 +5,7 @@
 // properties so request composition cannot become mass assignment.
 
 import { z } from 'zod';
+import { sanitizeSameOriginPath } from '../shared/url-security.js';
 
 const MAX_ID = 128;
 const MAX_NAME = 200;
@@ -335,7 +336,7 @@ export const eventQuerySchema = strictObject({
 
 // OIDC, device authorization, and MCP-native OAuth.
 export const authLoginQuerySchema = strictObject({
-  redirect_to: z.string().trim().max(MAX_URL).refine(value => value.startsWith('/') && !value.startsWith('//'), {
+  redirect_to: z.string().trim().max(MAX_URL).refine(value => sanitizeSameOriginPath(value) !== null, {
     message: 'redirect_to must be an absolute same-origin path',
   }).optional(),
 });
@@ -383,6 +384,8 @@ export const oauthRegisterSchema = strictObject({
   client_name: textSchema(MAX_NAME).optional(),
   redirect_uris: z.array(urlSchema).min(1).max(20),
   token_endpoint_auth_method: z.enum(['none']).optional(),
+  grant_types: z.array(z.enum(['authorization_code', 'refresh_token'])).min(1).max(2).optional(),
+  response_types: z.array(z.literal('code')).min(1).max(1).optional(),
 });
 export const oauthAuthorizeQuerySchema = strictObject({
   response_type: z.literal('code'),

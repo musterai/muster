@@ -248,4 +248,33 @@ describe('MUS-29: MCP OAuth over real HTTP', () => {
     const res = await fetch(`${baseUrl}/api/v1/oauth/authorize?${qs.toString()}`, { redirect: 'manual' });
     expect(res.status).toBe(400);
   });
+
+  it('preserves registered redirect query parameters when returning consent errors', async () => {
+    const redirectUri = 'http://127.0.0.1:5555/callback?channel=stable';
+    const registerRes = await fetch(`${baseUrl}/api/v1/oauth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Query Client', redirect_uris: [redirectUri] }),
+    });
+    const client = await registerRes.json();
+    const response = await fetch(`${baseUrl}/api/v1/oauth/authorize/consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${approverToken}` },
+      body: JSON.stringify({
+        client_id: client.client_id,
+        redirect_uri: redirectUri,
+        code_challenge: 'challenge',
+        code_challenge_method: 'S256',
+        resource: `${baseUrl}/mcp`,
+        state: 'state-value',
+        decision: 'deny',
+      }),
+    });
+    expect(response.status).toBe(200);
+    const location = new URL((await response.json()).redirect_uri);
+    expect(location.searchParams.get('channel')).toBe('stable');
+    expect(location.searchParams.get('error')).toBe('access_denied');
+    expect(location.searchParams.get('state')).toBe('state-value');
+    expect(location.search).not.toContain('stable?error');
+  });
 });
