@@ -21,6 +21,14 @@ export class EventService {
     this.listeners.push(callback);
   }
 
+  async getProjectWorkspaceId(projectId: string): Promise<string | null> {
+    const rows = await this.db.query<{ workspace_id: string | null }>(
+      'SELECT workspace_id FROM project WHERE id = ?',
+      [projectId],
+    );
+    return rows[0]?.workspace_id || null;
+  }
+
   async create(data: CreateEvent): Promise<Event> {
     const id = ulid();
     const created_at = new Date().toISOString();

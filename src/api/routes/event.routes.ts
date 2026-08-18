@@ -22,9 +22,37 @@ export function createEventRouter(eventService: EventService, sseManager: SSEMan
     }
   });
 
-  router.get('/projects/:projectId/events/stream', ...validateRequest({ params: projectIdParamsSchema }), (req: Request, res: Response) => {
-    const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    sseManager.addClient(req.params.projectId, clientId, res);
+  router.get('/projects/:projectId/events/stream', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const auth = req.authContext;
+      const workspaceId = await eventService.getProjectWorkspaceId(req.params.projectId);
+
+      // Permission middleware establishes membership, but it cannot know
+      // which project identifier is being streamed. Refuse a project from a
+      // different workspace without confirming that it exists.
+      if (auth?.is_workspace_member && (!auth.workspace_id || auth.workspace_id !== workspaceId)) {
+        res.status(404).json({ error: 'not_found', message: 'Project not found.' });
+        return;
+      }
+
+      const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      const result = sseManager.addClient(req.params.projectId, clientId, res, {
+        principalId: auth?.principal?.id,
+        ip: req.ip || req.socket.remoteAddress,
+        workspaceId,
+      });
+      if (!result.accepted) {
+        res.setHeader('Retry-After', result.retryAfterSeconds.toString());
+        res.status(429).json({
+          error: 'sse_capacity_exceeded',
+          message: 'SSE connection limit reached. Retry later.',
+          scope: result.scope,
+          retry_after_seconds: result.retryAfterSeconds,
+        });
+      }
+    } catch (err) {
+      next(err);
+    }
   });
 
   return router;

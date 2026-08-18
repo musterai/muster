@@ -83,6 +83,9 @@ sets `MUSTER_HOST=0.0.0.0`; that non-loopback bind automatically selects
 
 ```caddyfile
 muster.example.com {
+    # Muster sends `X-Accel-Buffering: no` and periodic SSE keep-alives. Keep
+    # the response streaming so browser EventSource clients receive updates
+    # promptly instead of waiting for a proxy buffer to fill.
     reverse_proxy 127.0.0.1:6878
 }
 ```
@@ -117,6 +120,7 @@ server {
         # optional for either to work.
         proxy_buffering off;
         proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 
@@ -129,6 +133,18 @@ server {
 
 Obtain the certificate with `certbot --nginx -d muster.example.com` (or your
 existing ACME tooling) before starting nginx with this config.
+
+### SSE connection and queue policy
+
+The server bounds each process to 100 live SSE clients, with per-principal,
+per-IP, and per-workspace limits of 4, 20, and 50 respectively. A client that
+does not drain writes is allowed at most 100 queued events or 256 KiB and is
+disconnected after 30 seconds without a `drain` notification. Capacity
+refusals return HTTP 429 with `error: "sse_capacity_exceeded"` and a
+`Retry-After` header. The broadcaster's counters (`activeClients`, sent and
+dropped events, dropped clients, backpressure drops, and capacity rejections)
+are available through its process-local `getStats()` observability hook; event
+bodies are never included in logs or those counters.
 
 ## Environment variables
 
