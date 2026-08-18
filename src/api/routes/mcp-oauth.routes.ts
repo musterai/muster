@@ -94,6 +94,8 @@ export function createMcpOAuthRouter(
         client_name: req.body?.client_name,
         redirect_uris: req.body?.redirect_uris,
         token_endpoint_auth_method: req.body?.token_endpoint_auth_method,
+        grant_types: req.body?.grant_types,
+        response_types: req.body?.response_types,
       });
       res.status(201).json({
         client_id: client.client_id,

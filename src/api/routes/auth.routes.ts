@@ -33,15 +33,12 @@ import {
   invitationCreateBodySchema,
   workspaceIdParamsSchema,
 } from '../schemas.js';
+import { sanitizeSameOriginPath } from '../../shared/url-security.js';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Only same-origin, absolute-path redirect targets are honored — never a full URL (open-redirect risk). */
-function sanitizeRedirectTo(raw: unknown): string | null {
-  if (typeof raw !== 'string' || !raw) return null;
-  if (!raw.startsWith('/') || raw.startsWith('//')) return null;
-  return raw;
-}
+export const sanitizeRedirectTo = sanitizeSameOriginPath;
 
 function isSecureRequest(req: Request): boolean {
   return req.protocol === 'https' || config.oidc.publicUrl.startsWith('https');
@@ -102,7 +99,7 @@ export function createAuthRouter(
               await userService.addWorkspaceMember(workspaceId, user.id, ownerRole.id, null);
               admitted = true;
             }
-          } else if (result.email) {
+          } else if (result.email && result.emailVerified) {
             const invite = await invitationService.findPendingByEmail(workspaceId, result.email);
             if (invite) {
               await invitationService.accept(invite.id, user.id);

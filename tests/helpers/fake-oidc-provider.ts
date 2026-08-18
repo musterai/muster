@@ -17,6 +17,7 @@ interface PendingAuthorization {
   state: string;
   sub: string;
   email: string | null;
+  emailVerified: unknown;
 }
 
 export class FakeOidcProvider {
@@ -30,6 +31,7 @@ export class FakeOidcProvider {
   private codes = new Map<string, PendingAuthorization>();
   private nextSub = 'user-1';
   private nextEmail: string | null = 'user@example.com';
+  private nextEmailVerified: unknown = true;
   /** When set, the next issued ID token's nonce is overridden (simulates a replayed/stale token). */
   overrideNonce: string | null = null;
   /** When set, sign the next ID token with this key instead of the provider's own (simulates an unknown-key attack). */
@@ -60,9 +62,10 @@ export class FakeOidcProvider {
     return provider;
   }
 
-  setNextIdentity(sub: string, email: string | null): void {
+  setNextIdentity(sub: string, email: string | null, emailVerified?: unknown): void {
     this.nextSub = sub;
     this.nextEmail = email;
+    this.nextEmailVerified = arguments.length >= 3 ? emailVerified : true;
   }
 
   async stop(): Promise<void> {
@@ -79,6 +82,7 @@ export class FakeOidcProvider {
     const code = crypto.randomBytes(16).toString('hex');
     this.codes.set(code, {
       codeChallenge, redirectUri, nonce, state, sub: this.nextSub, email: this.nextEmail,
+      emailVerified: this.nextEmailVerified,
     });
 
     const url = new URL(redirectUri);
@@ -139,6 +143,7 @@ export class FakeOidcProvider {
       const idToken = await new jose.SignJWT({
         sub: pending.sub,
         email: pending.email || undefined,
+        email_verified: pending.emailVerified,
         nonce: nonceToUse || undefined,
       })
         .setProtectedHeader({ alg: 'RS256', kid: this.useForeignKeyForNextToken ? 'foreign-key' : this.kid })
