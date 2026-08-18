@@ -150,6 +150,13 @@ existing ACME tooling) before starting nginx with this config.
 OIDC is required for a public deployment: without it, `/auth/login` returns
 `503 oidc_not_configured` and nobody can sign in at all.
 
+OIDC authentication and workspace admission remain separate. A local account
+must be active and either be a member, match a pending invitation, or be the
+configured bootstrap owner. When no bootstrap subject is pinned, the
+first-user membership check and owner insert run in one database transaction,
+so concurrent first logins cannot both become owners. Anonymous `/auth/me`
+responses retain the login-state shape but do not disclose workspace metadata.
+
 ## Backing up and restoring the SQLite database
 
 Muster runs SQLite in WAL mode, so a plain file copy of `muster.db` while the

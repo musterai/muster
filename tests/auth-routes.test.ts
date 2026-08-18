@@ -165,6 +165,30 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     expect(await meRes.json()).toMatchObject({ authenticated: false, admitted: false, user: null, role: null });
   });
 
+  it('does not admit a suspended OIDC user or issue a session cookie', async () => {
+    const first = await signIn('sub-suspended', 'suspended@example.com');
+    expect(first.callbackRes.status).toBe(302);
+    const users = await db.query<{ id: string }>(
+      `SELECT u.id FROM app_user u JOIN identity i ON i.user_id = u.id WHERE i.subject = ?`,
+      ['sub-suspended'],
+    );
+    await db.execute('UPDATE app_user SET status = ? WHERE id = ?', ['suspended', users[0].id]);
+
+    const suspended = await signIn('sub-suspended', 'suspended@example.com');
+    expect(suspended.callbackRes.status).toBe(403);
+    expect(await suspended.callbackRes.json()).toEqual({ error: 'forbidden', message: 'Access denied.' });
+    expect(extractCookieValue(suspended.setCookie!, 'muster_session')).toBeNull();
+  });
+
+  it('does not disclose workspace metadata in anonymous auth/me responses', async () => {
+    const response = await fetch(`${baseUrl}/api/v1/auth/me`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ authenticated: false, admitted: false, workspace: null });
+    expect(JSON.stringify(body)).not.toContain(workspaceId);
+    expect(JSON.stringify(body)).not.toContain('Test WS');
+  });
+
   it('honors a configured bootstrap owner instead of admitting an arbitrary first user', async () => {
     (config.oidc as any).bootstrapOwnerSubject = 'sub-pinned-owner';
 
@@ -175,6 +199,27 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     const pinned = await signIn('sub-pinned-owner', 'pinned-owner@example.com');
     expect(pinned.callbackRes.status).toBe(302);
     expect(extractCookieValue(pinned.setCookie!, 'muster_session')).toBeTruthy();
+  });
+
+  it('serializes concurrent unpinned first-user callbacks', async () => {
+    provider.setNextIdentity('sub-race-a', 'race-a@example.com');
+    const loginA = await fetch(`${baseUrl}/api/v1/auth/login`, { redirect: 'manual' });
+    const authorizeA = provider.authorize(new URL(loginA.headers.get('location')!).searchParams);
+
+    provider.setNextIdentity('sub-race-b', 'race-b@example.com');
+    const loginB = await fetch(`${baseUrl}/api/v1/auth/login`, { redirect: 'manual' });
+    const authorizeB = provider.authorize(new URL(loginB.headers.get('location')!).searchParams);
+
+    const [callbackA, callbackB] = await Promise.all([
+      fetch(authorizeA.href.replace(authorizeA.origin, baseUrl), { redirect: 'manual' }),
+      fetch(authorizeB.href.replace(authorizeB.origin, baseUrl), { redirect: 'manual' }),
+    ]);
+    expect([callbackA.status, callbackB.status].sort()).toEqual([302, 403]);
+    const members = await db.query<{ count: number }>(
+      'SELECT COUNT(*) as count FROM workspace_member WHERE workspace_id = ?',
+      [workspaceId],
+    );
+    expect(members[0].count).toBe(1);
   });
 
   it('keeps health public while protected reads require admission', async () => {
@@ -192,6 +237,40 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
       const futureAuthRoute = await fetch(`${baseUrl}/api/v1/auth/future`, { redirect: 'manual' });
       expect(futureAuthRoute.status).toBe(401);
       expect(await futureAuthRoute.json()).toEqual({ error: 'unauthorized', message: 'Authentication required.' });
+    } finally {
+      (config.auth as any).mode = priorMode;
+    }
+  });
+
+  it('rejects a credential scoped to a different workspace', async () => {
+    await signIn('sub-wrong-workspace', 'wrong-workspace@example.com');
+    const users = await db.query<{ id: string }>(
+      `SELECT u.id FROM app_user u JOIN identity i ON i.user_id = u.id WHERE i.subject = ?`,
+      ['sub-wrong-workspace'],
+    );
+    const wrongWorkspaceId = 'ws-wrong-workspace';
+    const now = new Date().toISOString();
+    await db.execute(
+      'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [wrongWorkspaceId, 'Other WS', 'other-ws-auth', now, now],
+    );
+    const credential = await tokenService.create({
+      principal_id: users[0].id,
+      workspace_id: wrongWorkspaceId,
+      name: 'wrong workspace test',
+    });
+
+    const priorMode = config.auth.mode;
+    (config.auth as any).mode = 'enforced';
+    try {
+      const response = await fetch(`${baseUrl}/api/v1/projects`, {
+        headers: { Authorization: `Bearer ${credential.token}` },
+      });
+      expect(response.status).toBe(403);
+      const body = await response.json();
+      expect(body).toEqual(expect.objectContaining({ error: 'forbidden', required_permission: 'workspace.read' }));
+      expect(JSON.stringify(body)).not.toContain(wrongWorkspaceId);
+      expect(JSON.stringify(body)).not.toContain('Other WS');
     } finally {
       (config.auth as any).mode = priorMode;
     }
