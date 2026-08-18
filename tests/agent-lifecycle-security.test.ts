@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import express, { NextFunction, Request, Response } from 'express';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { createDatabaseAdapter } from '../src/db/factory.js';
 import { DatabaseAdapter } from '../src/db/adapter.js';
 import { Migrator } from '../src/db/migrator.js';
@@ -10,6 +12,14 @@ import { RoleService } from '../src/services/role.service.js';
 import { SessionService } from '../src/services/session.service.js';
 import { TokenService } from '../src/services/token.service.js';
 import { UserService } from '../src/services/user.service.js';
+import { config } from '../src/config/index.js';
+import { createMcpServer } from '../src/mcp/server.js';
+import type { Services } from '../src/shared/services.js';
+import type { AuthContext } from '../src/shared/auth-context.js';
+import { CardService } from '../src/services/card.service.js';
+import { AuditService } from '../src/services/audit.service.js';
+import { createAgentRouter } from '../src/api/routes/agent.routes.js';
+import { createUserRouter } from '../src/api/routes/user.routes.js';
 
 describe('MUS-57: fail-closed agent lifecycle and atomic offboarding', () => {
   let db: DatabaseAdapter;
@@ -267,5 +277,152 @@ describe('MUS-57: fail-closed agent lifecycle and atomic offboarding', () => {
       .toEqual([{ id: commentId, author_id: agentId }]);
     expect(await db.query('SELECT id FROM principal WHERE id = ?', [agentId])).toHaveLength(1);
     expect(await roleService.getEffectivePermissions(agentId, workspaceId)).toEqual([]);
+  });
+
+  it('prevents authenticated agents from re-binding or creating another agent identity', async () => {
+    const role = await roleService.getByKey(workspaceId, 'junior_engineer');
+    const otherAgentId = 'other-lifecycle-agent';
+    const now = new Date().toISOString();
+    await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [otherAgentId, 'agent', now]);
+    await db.execute(
+      `INSERT INTO agent
+       (id, name, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [otherAgentId, 'Other Agent', 'active', now, ownerId, role!.id, workspaceId, now],
+    );
+
+    await expect(agentService.register(
+      { agent_id: otherAgentId, name: 'Hijacked' },
+      undefined,
+      undefined,
+      workspaceId,
+      { kind: 'agent', id: agentId },
+    )).rejects.toThrow('outside the authenticated agent scope');
+
+    await expect(agentService.register(
+      { agent_id: 'invented-agent', name: 'Invented' },
+      undefined,
+      undefined,
+      workspaceId,
+      { kind: 'agent', id: agentId },
+    )).rejects.toThrow('cannot create agent identities');
+
+    const rebound = await agentService.register(
+      { agent_id: agentId, name: 'Lifecycle Agent Rebound' },
+      undefined,
+      undefined,
+      workspaceId,
+      { kind: 'agent', id: agentId },
+    );
+    expect(rebound.name).toBe('Lifecycle Agent Rebound');
+  });
+
+  it('rejects ownership checks when the target agent is outside the authenticated workspace', async () => {
+    await expect(agentService.validateAgentOwnership(agentId, memberId, otherWorkspaceId))
+      .rejects.toThrow('different workspace');
+    expect(await agentService.validateAgentOwnership(agentId, memberId, workspaceId)).toBe(memberId);
+  });
+
+  it('enforces workspace scope before MCP admin and self-agent bypasses', async () => {
+    const originalMode = config.auth.mode;
+    (config.auth as any).mode = 'enforced';
+    try {
+      // Only agentService is reached by these MCP handlers; the cast keeps the
+      // regression focused without constructing unrelated transport services.
+      const services = { agentService } as unknown as Services;
+      const ownerRole = await roleService.getByKey(otherWorkspaceId, 'owner');
+      const now = new Date().toISOString();
+      const otherAgentId = 'other-workspace-agent';
+      await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [otherAgentId, 'agent', now]);
+      await db.execute(
+        `INSERT INTO agent
+         (id, name, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [otherAgentId, 'Other Workspace Agent', 'active', now, ownerId, ownerRole!.id, otherWorkspaceId, now],
+      );
+
+      const adminAuth: AuthContext = {
+        principal: { kind: 'user', id: ownerId },
+        workspace_id: workspaceId,
+        is_workspace_member: true,
+        permissions: ['agent.manage_others'],
+        is_operator_override: false,
+        role_name: 'owner',
+      };
+      const adminServer = createMcpServer(services, { headers: {} } as any, adminAuth) as any;
+      await expect(adminServer._registeredTools.heartbeat.handler({ agent_id: otherAgentId }, {}))
+        .rejects.toThrow('outside the authenticated workspace scope');
+
+      const selfAuth: AuthContext = {
+        ...adminAuth,
+        principal: { kind: 'agent', id: otherAgentId },
+        permissions: [],
+      };
+      const selfServer = createMcpServer(services, { headers: {} } as any, selfAuth) as any;
+      await expect(selfServer._registeredTools.heartbeat.handler({ agent_id: otherAgentId }, {}))
+        .rejects.toThrow('outside the authenticated workspace scope');
+    } finally {
+      (config.auth as any).mode = originalMode;
+    }
+  });
+
+  it('binds REST agent and member mutations to the authenticated workspace, even for admins', async () => {
+    const originalMode = config.auth.mode;
+    (config.auth as any).mode = 'enforced';
+    const otherUserId = 'other-workspace-member';
+    const otherAgentId = 'other-workspace-rest-agent';
+    let server: ReturnType<typeof express.application.listen> | undefined;
+    try {
+      await addUser(otherUserId, 'Other Member', 'senior_engineer', otherWorkspaceId);
+      const otherRole = await roleService.getByKey(otherWorkspaceId, 'junior_engineer');
+      const now = new Date().toISOString();
+      await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [otherAgentId, 'agent', now]);
+      await db.execute(
+        `INSERT INTO agent
+         (id, name, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [otherAgentId, 'Other REST Agent', 'active', now, otherUserId, otherRole!.id, otherWorkspaceId, now],
+      );
+
+      const auth: AuthContext = {
+        principal: { kind: 'user', id: ownerId },
+        workspace_id: workspaceId,
+        is_workspace_member: true,
+        permissions: ['workspace.admin', 'agent.manage_others'],
+        is_operator_override: false,
+        role_name: 'owner',
+      };
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.authContext = auth;
+        next();
+      });
+      app.use(createAgentRouter(agentService, new CardService(db)));
+      app.use(createUserRouter(db, userService, roleService, new AuditService(db)));
+      app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+        res.status(err.refusal ? 403 : 500).json(err.refusal || { error: err.message });
+      });
+
+      server = app.listen(0);
+      await new Promise<void>((resolve, reject) => {
+        server!.once('listening', resolve);
+        server!.once('error', reject);
+      });
+      const port = (server.address() as AddressInfo).port;
+      const agentResponse = await fetch(`http://127.0.0.1:${port}/agents/${otherAgentId}`, { method: 'DELETE' });
+      const memberResponse = await fetch(
+        `http://127.0.0.1:${port}/workspaces/${otherWorkspaceId}/members/${otherUserId}`,
+        { method: 'DELETE' },
+      );
+
+      expect(agentResponse.status).toBe(403);
+      expect(memberResponse.status).toBe(403);
+      expect(await agentService.getById(otherAgentId)).not.toBeNull();
+      expect(await userService.isWorkspaceMember(otherWorkspaceId, otherUserId)).toBe(true);
+    } finally {
+      if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+      (config.auth as any).mode = originalMode;
+    }
   });
 });

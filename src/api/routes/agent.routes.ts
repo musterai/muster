@@ -18,8 +18,14 @@ function getOperatorUserId(req: Request): string | undefined {
 async function requireAgentScope(agentService: AgentService, req: Request, agentId: string): Promise<void> {
   if (config.auth.mode === 'open') return;
   const auth = getAuth(req);
-  if (!auth?.principal || !auth.is_workspace_member) {
+  if (!auth?.principal || !auth.is_workspace_member || !auth.workspace_id) {
     throw new PermissionDeniedError('workspace.read', auth?.role_name || null);
+  }
+  const target = await agentService.getById(agentId);
+  if (!target || target.workspace_id !== auth.workspace_id) {
+    // Resolve the target workspace before any admin/self bypass. This keeps
+    // cross-workspace and missing targets deliberately indistinguishable.
+    throw new PermissionDeniedError('agent.manage_others', auth.role_name);
   }
   if (auth.permissions.includes('workspace.admin')) return;
   if (auth.principal.kind === 'agent' && auth.principal.id === agentId) return;
@@ -27,7 +33,7 @@ async function requireAgentScope(agentService: AgentService, req: Request, agent
     throw new PermissionDeniedError('agent.manage_others', auth.role_name);
   }
   try {
-    const ownerId = await agentService.validateAgentOwnership(agentId, auth.principal.id);
+    const ownerId = await agentService.validateAgentOwnership(agentId, auth.principal.id, auth.workspace_id);
     if (!ownerId) throw new Error('Agent is not in scope');
   } catch {
     // Deliberately do not distinguish missing, cross-workspace, unassigned,
@@ -58,6 +64,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
         getOperatorUserId(req),
         undefined,
         auth?.workspace_id || undefined,
+        auth?.principal,
       );
       res.status(201).json(agent);
     } catch (err) {

@@ -4,6 +4,7 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { Agent, RegisterAgent, UpdateAgent } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { ValidationError } from '../shared/errors.js';
+import type { PrincipalRef } from '../shared/auth-context.js';
 
 export class AgentService {
   constructor(
@@ -26,6 +27,7 @@ export class AgentService {
     operatorUserId?: string,
     restrictToRoleId?: string,
     workspaceId?: string | null,
+    actor?: PrincipalRef | null,
   ): Promise<Agent> {
     const id = data.agent_id || data.id || ulid();
     const now = new Date().toISOString();
@@ -40,6 +42,11 @@ export class AgentService {
     // Check if re-binding an existing agent
     const existing = await this.getById(id);
     if (existing) {
+      if (actor?.kind === 'agent') {
+        if (existing.id !== actor.id || !existing.workspace_id || existing.workspace_id !== resolvedWorkspaceId) {
+          throw new ValidationError('Agent registration is outside the authenticated agent scope');
+        }
+      }
       if (operatorUserId) {
         if (!existing.operator_user_id) {
           throw new ValidationError('Unassigned agents require an administrator adoption flow');
@@ -75,6 +82,13 @@ export class AgentService {
       );
 
       return (await this.getById(id))!;
+    }
+
+    // An agent credential identifies an already-registered principal. It may
+    // refresh that same registration above, but it cannot manufacture another
+    // agent identity (or recreate a deleted one) through the rebind endpoint.
+    if (actor?.kind === 'agent') {
+      throw new ValidationError('Authenticated agents cannot create agent identities');
     }
 
     // Create a new agent — requires a principal row first
@@ -261,7 +275,10 @@ export class AgentService {
       return;
     }
 
-    // Passive update: set agents to 'idle' if >5m, 'offline' if >15m
+    // Passive update: set agents to 'idle' if >5m, 'offline' if >15m.
+    // These values are presence telemetry, not an authorization state machine:
+    // a delayed heartbeat must not destroy long-lived credentials. Explicit
+    // lifecycle mutations through update()/unregister() perform revocation.
     const now = new Date().getTime();
     const agents = await this.db.query<any>('SELECT id, status, last_seen_at FROM agent');
 
@@ -288,10 +305,17 @@ export class AgentService {
    * Returns the agent's operator_user_id if found, null if agent doesn't exist.
    * Throws if the agent exists but does NOT belong to the principal.
    */
-  async validateAgentOwnership(agentId: string, principalId: string): Promise<string | null> {
+  async validateAgentOwnership(
+    agentId: string,
+    principalId: string,
+    workspaceId?: string | null,
+  ): Promise<string | null> {
     const agent = await this.getById(agentId);
     if (!agent) return null;
 
+    if (workspaceId && agent.workspace_id !== workspaceId) {
+      throw new Error(`Agent "${agentId}" belongs to a different workspace.`);
+    }
     if (!agent.operator_user_id || agent.operator_user_id !== principalId) {
       throw new Error(
         `Agent "${agentId}" belongs to a different operator or is unassigned and cannot be used by principal "${principalId}".`,
