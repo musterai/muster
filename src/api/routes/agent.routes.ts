@@ -64,7 +64,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
         getOperatorUserId(req),
         undefined,
         auth?.workspace_id || undefined,
-        auth?.principal,
+        config.auth.mode === 'enforced' ? auth?.principal : null,
       );
       res.status(201).json(agent);
     } catch (err) {

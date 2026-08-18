@@ -593,7 +593,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       operatorUserId,
       undefined,
       auth.workspace_id || undefined,
-      auth.principal,
+      config.auth.mode === 'enforced' ? auth.principal : null,
     );
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
