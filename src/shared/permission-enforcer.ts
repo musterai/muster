@@ -164,7 +164,7 @@ export const OPERATION_PERMISSIONS = {
   approve_device_authorization: 'project.create',
   deny_device_authorization: 'project.create',
   get_oauth_authorization_details: WORKSPACE_READ,
-  consent_oauth_authorization: 'project.create',
+  consent_oauth_authorization: 'agent.register',
   get_audit_log: 'workspace.admin',
   list_invitations: 'member.invite',
   create_invitation: 'member.invite',

@@ -549,6 +549,22 @@ describe('MUS-22: Permission enforcement', () => {
     expect(() => requireRestPermission('POST', '/api/v1/projects', auth)).not.toThrow();
   });
 
+  it('uses agent registration authority for MCP OAuth consent instead of project creation', () => {
+    (config.auth as any).mode = 'enforced';
+    expect(() => requireRestPermission(
+      'POST',
+      '/api/v1/oauth/authorize/consent',
+      makeAuth(['project.create']),
+    )).toThrowError(expect.objectContaining({
+      refusal: expect.objectContaining({ required_permission: 'agent.register' }),
+    }));
+    expect(() => requireRestPermission(
+      'POST',
+      '/api/v1/oauth/authorize/consent',
+      makeAuth(['agent.register']),
+    )).not.toThrow();
+  });
+
   it('requireRestPermission allows workspace.admin through everything', () => {
     (config.auth as any).mode = 'enforced';
     const auth = makeAuth(['workspace.admin']);
