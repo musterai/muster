@@ -2,7 +2,7 @@ import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Card, CardAssignee, CardDetails, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
 import { EventService } from './event.service.js';
-import { rankAfter } from '../shared/lexorank.js';
+import { rebalanceRanks } from '../shared/lexorank.js';
 import { formatCardKey } from '../shared/card-key.js';
 import { CardRuleError, NotFoundError, ValidationError } from '../shared/errors.js';
 import { config } from '../config/index.js';
@@ -34,6 +34,49 @@ export class CardService {
     private db: DatabaseAdapter,
     private eventService?: EventService
   ) {}
+
+  /**
+   * Positions are a small, untrusted ordering hint. Digits are accepted only
+   * for the historical `0a` prepend value; every persisted value is replaced
+   * by a canonical lowercase rank during the lane rebalance below.
+   */
+  private assertPosition(position: string | undefined): void {
+    if (position !== undefined && (!position || position.length > 256 || !/^(?:[a-z]+|0[a-z]+)$/.test(position))) {
+      throw new ValidationError('position must contain only lowercase letters a-z', {
+        field: 'position',
+        code: 'INVALID_RANK',
+      });
+    }
+  }
+
+  /** Apply deterministic canonical ranks to an already ordered lane. */
+  private async rebalanceLane(db: DatabaseAdapter, cards: Card[]): Promise<string[]> {
+    const ranks = rebalanceRanks(cards.length);
+    for (let index = 0; index < cards.length; index++) {
+      await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], cards[index].id]);
+    }
+    return ranks;
+  }
+
+  private async orderedLaneCards(columnId: string, db: DatabaseAdapter, excludeId?: string): Promise<Card[]> {
+    const cards = await db.query<Card>(
+      'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC, id ASC',
+      [columnId]
+    );
+    return excludeId ? cards.filter(card => card.id !== excludeId) : cards;
+  }
+
+  /** Insert a card according to its requested hint, repairing duplicate/legacy ranks at the same time. */
+  private orderWithPosition(cards: Card[], card: Card, position?: string): Card[] {
+    const ordered = [...cards];
+    let insertAt = ordered.length;
+    if (position !== undefined) {
+      const index = ordered.findIndex(existing => existing.position > position);
+      insertAt = index === -1 ? ordered.length : index;
+    }
+    ordered.splice(insertAt, 0, card);
+    return ordered;
+  }
 
   private async getColumnCapacity(columnId: string, db: DatabaseAdapter = this.db): Promise<ColumnCapacity> {
     // WIP checks run inside the create/move transaction. Lock the target
@@ -118,26 +161,40 @@ export class CardService {
       }
 
       const key = await this.nextCardKey(projectId, tx);
-      let position = data.position;
-      if (!position) {
-        const cards = await tx.query<Card>(
-          'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC',
-          [data.column_id]
-        );
-        const lastPos = cards.length > 0 ? cards[cards.length - 1].position : '';
-        position = rankAfter(lastPos);
-      }
+      this.assertPosition(data.position);
 
       const priority = data.priority || 'medium';
       const description = data.description || null;
       const due_date = data.due_date || null;
       const is_epic = data.is_epic ? 1 : 0;
+      const existingCards = await this.orderedLaneCards(data.column_id, tx);
+      const draftCard: Card = {
+        id,
+        key,
+        column_id: data.column_id,
+        title: data.title,
+        description,
+        position: 'm',
+        priority,
+        due_date,
+        created_at,
+        updated_at,
+        archived: 0,
+        claimed_by: null,
+        claimed_at: null,
+        claim_expires_at: null,
+        is_epic,
+      };
+      const orderedCards = this.orderWithPosition(existingCards, draftCard, data.position);
 
       await tx.execute(
         `INSERT INTO card (id, key, column_id, title, description, position, priority, due_date, created_at, updated_at, archived, is_epic)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-        [id, key, data.column_id, data.title, description, position, priority, due_date, created_at, updated_at, is_epic]
+        [id, key, data.column_id, data.title, description, 'm', priority, due_date, created_at, updated_at, is_epic]
       );
+
+      const ranks = await this.rebalanceLane(tx, orderedCards);
+      const position = ranks[orderedCards.findIndex(card => card.id === id)];
 
       return {
         card: {
@@ -572,14 +629,20 @@ export class CardService {
         }
       }
 
-      let position = data.position;
-      if (!position) {
-        const targetCards = await tx.query<Card>(
-          'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC',
-          [target_column_id]
-        );
-        const lastPos = targetCards.length > 0 ? targetCards[targetCards.length - 1].position : '';
-        position = rankAfter(lastPos);
+      this.assertPosition(data.position);
+      const targetCards = await this.orderedLaneCards(target_column_id, tx, cardId);
+      const movedCard: Card = { ...existing, column_id: target_column_id, position: 'm' };
+      const orderedTargetCards = this.orderWithPosition(targetCards, movedCard, data.position);
+      const targetRanks = await this.rebalanceLane(tx, orderedTargetCards);
+      const movedIndex = orderedTargetCards.findIndex(card => card.id === cardId);
+      const position = targetRanks[movedIndex];
+
+      // A cross-lane move repairs the source lane in the same transaction.
+      // The moved card is excluded above, so no association or card row is
+      // lost while both lanes receive deterministic, unique ranks.
+      if (isColumnChange) {
+        const sourceCards = await this.orderedLaneCards(existing.column_id, tx, cardId);
+        await this.rebalanceLane(tx, sourceCards);
       }
 
       const updated_at = new Date().toISOString();
