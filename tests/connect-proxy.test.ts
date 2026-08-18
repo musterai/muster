@@ -86,15 +86,88 @@ describe('MUS-27: muster connect proxy', () => {
   });
 
   it('accepts the loopback token via ?local_token= for EventSource, which cannot set headers', async () => {
+    let receivedUrl = '';
     const upstream = express();
-    upstream.get('/api/v1/health', (_req, res) => res.json({ status: 'ok' }));
+    upstream.get('/api/v1/health', (req, res) => {
+      receivedUrl = req.originalUrl;
+      res.json({ status: 'ok' });
+    });
     const up = await listen(upstream);
     upstreamServer = up.server;
     upstreamUrl = up.baseUrl;
     await startProxy(upstreamUrl);
 
-    const res = await fetch(`${proxyUrl}/api/v1/health?local_token=${LOCAL_TOKEN}`);
+    const res = await fetch(`${proxyUrl}/api/v1/health?keep=yes&local_token=${LOCAL_TOKEN}`);
     expect(res.status).toBe(200);
+    expect(receivedUrl).toBe('/api/v1/health?keep=yes');
+  });
+
+  it('fails closed when the loopback query credential is repeated', async () => {
+    const upstream = express();
+    upstream.get('/api/v1/health', (_req, res) => res.json({ status: 'ok' }));
+    const up = await listen(upstream);
+    upstreamServer = up.server;
+    await startProxy(up.baseUrl);
+
+    const res = await fetch(`${proxyUrl}/api/v1/health?local_token=${LOCAL_TOKEN}&local_token=${LOCAL_TOKEN}`);
+    expect(res.status).toBe(401);
+  });
+
+  it('forwards only allowlisted request headers and injects only the intended bearer token', async () => {
+    let receivedHeaders: Record<string, string | string[] | undefined> = {};
+    const upstream = express();
+    upstream.post('/api/v1/capture', (req, res) => {
+      receivedHeaders = req.headers;
+      req.resume();
+      res.json({ ok: true });
+    });
+    const up = await listen(upstream);
+    upstreamServer = up.server;
+    await startProxy(up.baseUrl);
+
+    const res = await fetch(`${proxyUrl}/api/v1/capture`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${LOCAL_TOKEN}`,
+        Cookie: 'muster_session=local-cookie',
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '203.0.113.8',
+        'Proxy-Authorization': 'Basic should-not-cross',
+        'X-Local-Secret': 'should-not-cross',
+      },
+      body: JSON.stringify({ ok: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(receivedHeaders.authorization).toBe(`Bearer ${UPSTREAM_TOKEN}`);
+    expect(receivedHeaders['content-type']).toBe('application/json');
+    expect(receivedHeaders.cookie).toBeUndefined();
+    expect(receivedHeaders['x-forwarded-for']).toBeUndefined();
+    expect(receivedHeaders['proxy-authorization']).toBeUndefined();
+    expect(receivedHeaders['x-local-secret']).toBeUndefined();
+  });
+
+  it('does not reflect upstream cookies, redirects, or arbitrary headers onto loopback', async () => {
+    const upstream = express();
+    upstream.get('/api/v1/redirect', (_req, res) => {
+      res.status(302)
+        .set('Set-Cookie', 'remote_session=secret; Secure; HttpOnly')
+        .set('Location', 'https://evil.example/collect')
+        .set('X-Upstream-Secret', 'not-for-loopback')
+        .end();
+    });
+    const up = await listen(upstream);
+    upstreamServer = up.server;
+    await startProxy(up.baseUrl);
+
+    const res = await fetch(`${proxyUrl}/api/v1/redirect`, {
+      redirect: 'manual',
+      headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.get('location')).toBeNull();
+    expect(res.headers.get('x-upstream-secret')).toBeNull();
   });
 
   it('streams an SSE response without buffering — chunks arrive as the upstream writes them, not all at once at the end', async () => {

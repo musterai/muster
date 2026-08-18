@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 export interface StoredCredential {
   token: string;
@@ -46,28 +47,99 @@ export function credentialsPath(homeDir = os.homedir()): string {
   return path.join(homeDir, '.muster', 'credentials.json');
 }
 
-/** Canonical form used as the lookup key — strips a trailing slash so "https://x.com" and "https://x.com/" collide. */
+/** Canonical, non-secret server URL used as the lookup key. */
 export function normalizeServerUrl(server: string): string {
-  return server.trim().replace(/\/+$/, '');
+  let parsed: URL;
+  try {
+    parsed = new URL(server.trim());
+  } catch {
+    throw new Error('Server URL must be an absolute HTTP(S) URL');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Server URL must use HTTP or HTTPS');
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('Server URL must not contain credentials, a query string, or a fragment');
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+  return parsed.pathname === '/' ? parsed.origin : `${parsed.origin}${parsed.pathname}`;
 }
 
 function readFile(file: string): CredentialsFile {
   if (!fs.existsSync(file)) return { servers: {} };
   try {
+    assertSafeExistingFile(file);
     const raw = fs.readFileSync(file, 'utf-8');
     const parsed = JSON.parse(raw);
     return { servers: parsed.servers || {} };
-  } catch {
+  } catch (error) {
+    if (error instanceof UnsafeCredentialPathError) throw error;
     return { servers: {} };
   }
 }
 
-/** Writes the file with mode 0600 regardless of umask or the file's prior mode. */
-function writeFile(file: string, data: CredentialsFile): void {
-  const dir = path.dirname(file);
+export class UnsafeCredentialPathError extends Error {}
+
+function assertOwned(stat: fs.Stats, target: string): void {
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new UnsafeCredentialPathError(`Refusing credential path not owned by the current user: ${target}`);
+  }
+}
+
+function assertSafeExistingFile(file: string): void {
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new UnsafeCredentialPathError(`Refusing unsafe credential file: ${file}`);
+  }
+  assertOwned(stat, file);
+  if ((stat.mode & 0o077) !== 0) {
+    throw new UnsafeCredentialPathError(`Refusing credential file accessible by other users: ${file}`);
+  }
+}
+
+function ensurePrivateDirectory(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  const stat = fs.lstatSync(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new UnsafeCredentialPathError(`Refusing unsafe credential directory: ${dir}`);
+  }
+  assertOwned(stat, dir);
+  if ((stat.mode & 0o077) !== 0) {
+    throw new UnsafeCredentialPathError(`Refusing credential directory accessible by other users: ${dir}`);
+  }
+}
+
+/** Atomically replaces a user-secret file through a same-directory 0600 temp file. */
+export function writePrivateFileAtomic(file: string, contents: string): void {
+  const dir = path.dirname(file);
+  ensurePrivateDirectory(dir);
+  if (fs.existsSync(file)) assertSafeExistingFile(file);
+
+  const temp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(temp, 'wx', 0o600);
+    fs.writeFileSync(fd, contents, { encoding: 'utf8' });
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(temp, file);
+    fs.chmodSync(file, 0o600);
+    // Best-effort directory sync makes the rename durable on platforms that
+    // allow directories to be opened as file descriptors.
+    try {
+      const dirFd = fs.openSync(dir, 'r');
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    } catch {}
+  } catch (error) {
+    if (fd !== null) fs.closeSync(fd);
+    try { fs.unlinkSync(temp); } catch {}
+    throw error;
+  }
+}
+
+function writeFile(file: string, data: CredentialsFile): void {
+  writePrivateFileAtomic(file, JSON.stringify(data, null, 2));
 }
 
 /**

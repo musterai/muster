@@ -30,6 +30,54 @@ export interface ConnectProxyOptions {
   publicDir?: string;
 }
 
+const FORWARDED_REQUEST_HEADERS = new Set([
+  'accept',
+  'accept-encoding',
+  'accept-language',
+  'cache-control',
+  'content-length',
+  'content-type',
+  'if-match',
+  'if-modified-since',
+  'if-none-match',
+  'last-event-id',
+  'mcp-protocol-version',
+  'mcp-session-id',
+  'user-agent',
+]);
+
+const FORWARDED_RESPONSE_HEADERS = new Set([
+  'cache-control',
+  'content-encoding',
+  'content-length',
+  'content-type',
+  'etag',
+  'expires',
+  'last-modified',
+  'mcp-protocol-version',
+  'mcp-session-id',
+  'retry-after',
+  'vary',
+]);
+
+function selectHeaders(
+  source: http.IncomingHttpHeaders,
+  allowed: Set<string>,
+): http.OutgoingHttpHeaders {
+  const selected: http.OutgoingHttpHeaders = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (allowed.has(name.toLowerCase()) && value !== undefined) selected[name] = value;
+  }
+  return selected;
+}
+
+/** Consume the loopback-only query credential before crossing the trust boundary. */
+function upstreamPath(basePath: string, originalUrl: string): string {
+  const local = new URL(originalUrl, 'http://muster-loopback.invalid');
+  local.searchParams.delete('local_token');
+  return `${basePath}${local.pathname}${local.search}`;
+}
+
 /** Refuses any local request that doesn't carry the local token — via header (fetch/MCP clients) or query string (native EventSource can't set headers). */
 export function requireLocalToken(localToken: string) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -63,8 +111,7 @@ export function proxyToUpstream(upstreamUrl: string, upstreamToken: string) {
   const basePath = target.pathname === '/' ? '' : target.pathname.replace(/\/$/, '');
 
   return (req: Request, res: Response) => {
-    const headers: http.OutgoingHttpHeaders = { ...req.headers };
-    delete headers['host'];
+    const headers = selectHeaders(req.headers, FORWARDED_REQUEST_HEADERS);
     // The local token gated access to *this* proxy — it is never the
     // upstream's credential and must not leak past this hop.
     headers['authorization'] = `Bearer ${upstreamToken}`;
@@ -74,11 +121,16 @@ export function proxyToUpstream(upstreamUrl: string, upstreamToken: string) {
       protocol: target.protocol,
       hostname: target.hostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
-      path: basePath + req.originalUrl,
+      path: upstreamPath(basePath, req.originalUrl),
       method: req.method,
       headers,
     }, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+      // Cookies, redirects, forwarding metadata and hop-by-hop headers from a
+      // remote origin must never acquire authority on the loopback origin.
+      res.writeHead(
+        proxyRes.statusCode || 502,
+        selectHeaders(proxyRes.headers, FORWARDED_RESPONSE_HEADERS),
+      );
       proxyRes.pipe(res, { end: true });
     });
 
@@ -94,6 +146,9 @@ export function proxyToUpstream(upstreamUrl: string, upstreamToken: string) {
     });
 
     req.on('aborted', () => proxyReq.destroy());
+    res.on('close', () => {
+      if (!proxyReq.destroyed) proxyReq.destroy();
+    });
     req.pipe(proxyReq, { end: true });
   };
 }
