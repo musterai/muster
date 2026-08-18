@@ -1,21 +1,124 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '../../');
 
-function detectAuthMode(): 'open' | 'enforced' {
-  const envMode = process.env.MUSTER_AUTH_MODE;
-  if (envMode === 'open' || envMode === 'enforced') return envMode;
+export type AuthMode = 'open' | 'enforced';
 
-  // Default: enforced when binding to anything other than 127.0.0.1 / localhost
-  const host = process.env.MUSTER_HOST || 'localhost';
-  if (host === 'localhost' || host === '127.0.0.1') return 'open';
-  return 'enforced';
+export interface ListenerConfig {
+  /** The validated address passed to `app.listen()`. */
+  host: string;
+  /** Whether the address is a loopback address. */
+  isLoopback: boolean;
+  /** The effective request-authentication posture. */
+  authMode: AuthMode;
+  /** The explicitly requested mode, if one was supplied. */
+  requestedAuthMode: AuthMode | null;
 }
+
+function validateHost(host: string): string {
+  if (!host || /\s|\0/.test(host)) {
+    throw new Error('MUSTER_HOST must be a non-empty hostname or IP address without whitespace');
+  }
+
+  // An IPv6 address is sometimes supplied in URL-style brackets. Node's
+  // `listen()` API expects the bare address, so remove them before binding.
+  if (host.startsWith('[') || host.endsWith(']')) {
+    if (!(host.startsWith('[') && host.endsWith(']'))) {
+      throw new Error(`Invalid MUSTER_HOST "${host}"`);
+    }
+    host = host.slice(1, -1);
+  }
+
+  if (!host || host.length > 253) {
+    throw new Error(`Invalid MUSTER_HOST "${host}"`);
+  }
+
+  return host.toLowerCase();
+}
+
+/**
+ * Normalize the supported loopback spellings to deterministic listen values.
+ * In particular, `localhost` is mapped to IPv4 loopback so a default launch
+ * cannot depend on the machine's hostname/DNS preference for IPv4 vs IPv6.
+ */
+export function normalizeListenHost(value?: string): string {
+  // Preserve the documented zero-config default when an environment file
+  // contains an explicitly empty MUSTER_HOST, while still rejecting a value
+  // made only of whitespace as a likely configuration mistake.
+  const raw = value === undefined || value === '' ? 'localhost' : value.trim();
+  const candidate = validateHost(raw);
+
+  if (candidate === 'localhost' || candidate === '127.0.0.1') {
+    return '127.0.0.1';
+  }
+  if (candidate === '::1') {
+    return '::1';
+  }
+
+  // IPv4-mapped IPv6 loopback is still loopback, but normalizing it avoids
+  // platform-dependent dual-stack behaviour when it is supplied explicitly.
+  if (candidate === '::ffff:127.0.0.1') {
+    return '127.0.0.1';
+  }
+
+  return candidate;
+}
+
+export function isLoopbackHost(value?: string): boolean {
+  const host = normalizeListenHost(value);
+  return host === '127.0.0.1' || host === '::1';
+}
+
+/**
+ * Resolve the listener address and authentication posture together. Keeping
+ * this decision in one pure function prevents the socket and auth middleware
+ * from drifting apart.
+ *
+ * A public/non-loopback address defaults to enforced auth. An explicit
+ * `MUSTER_AUTH_MODE=open` with such an address is rejected before the server
+ * opens its database or socket: silently starting in an unsafe posture is not
+ * an acceptable recovery path.
+ */
+export function resolveListenerConfig(env: NodeJS.ProcessEnv = process.env): ListenerConfig {
+  const host = normalizeListenHost(env.MUSTER_HOST);
+  const isLoopback = isLoopbackHost(host);
+  const rawMode = env.MUSTER_AUTH_MODE?.trim().toLowerCase();
+  let requestedAuthMode: AuthMode | null = null;
+
+  if (rawMode) {
+    if (rawMode !== 'open' && rawMode !== 'enforced') {
+      throw new Error(`MUSTER_AUTH_MODE must be "open" or "enforced", received "${env.MUSTER_AUTH_MODE}"`);
+    }
+    requestedAuthMode = rawMode;
+  }
+
+  if (!isLoopback && requestedAuthMode === 'open') {
+    throw new Error(
+      `Unsafe listener configuration: MUSTER_AUTH_MODE=open cannot bind non-loopback host "${host}". ` +
+      'Set MUSTER_AUTH_MODE=enforced or bind to loopback.'
+    );
+  }
+
+  return {
+    host,
+    isLoopback,
+    requestedAuthMode,
+    authMode: requestedAuthMode ?? (isLoopback ? 'open' : 'enforced'),
+  };
+}
+
+/** Render an address safely inside an HTTP URL for startup guidance. */
+export function formatHostForUrl(host: string): string {
+  return net.isIP(host) === 6 && !host.startsWith('[') ? `[${host}]` : host;
+}
+
+const listener = resolveListenerConfig();
 
 function getDefaultDbDir(): string {
   if (process.env.MUSTER_DB_DIR) {
@@ -90,9 +193,9 @@ const initialDb = resolveDbPath();
 
 export const config = {
   port,
-  host: process.env.MUSTER_HOST || 'localhost',
+  host: listener.host,
   auth: {
-    mode: detectAuthMode() as 'open' | 'enforced',
+    mode: listener.authMode,
   },
   db: {
     /** 'sqlite' (default, zero-config) or 'postgres' — see docs/deployment.md. */

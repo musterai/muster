@@ -17,32 +17,34 @@ from conflating these. They are independent:
 
 | | What it is | What it does *not* do |
 | :--- | :--- | :--- |
-| **`MUSTER_HOST`** | Advisory only. Picks the `MUSTER_AUTH_MODE` default and labels the startup banner. | Does **not** change what the server binds to. |
-| **The listen socket** | Always `0.0.0.0:MUSTER_PORT`. Not configurable. | Does **not** follow `MUSTER_HOST`. |
+| **`MUSTER_HOST`** | The validated address the Muster process binds to. Defaults to IPv4 loopback (`127.0.0.1`; `localhost` is accepted). | Does **not** make an explicit `MUSTER_AUTH_MODE=open` safe on a public address. |
+| **The listen socket** | Binds to `MUSTER_HOST:MUSTER_PORT`. Loopback spellings (`localhost`, `127.0.0.1`, `::1`) are normalized before binding. | Does **not** bypass authentication policy. |
 | **Docker's `ports:` mapping** | The *host-side* address the container's port is published on. This is what actually controls reachability. | Does **not** touch `MUSTER_HOST`, and so does **not** change the auth mode. |
 
 The rule for auth mode itself ([src/config/index.ts](../src/config/index.ts)):
 
-1. If `MUSTER_AUTH_MODE` is set to `open` or `enforced`, that wins, always.
-2. Otherwise it is `open` when `MUSTER_HOST` is unset, `localhost`, or
-   `127.0.0.1` — and `enforced` for any other value.
+1. If `MUSTER_AUTH_MODE=enforced` is set, it is honored for any bind address.
+2. If `MUSTER_AUTH_MODE=open` is set for a non-loopback address, startup fails
+   closed with an actionable error. Muster never opens a public socket in
+   open mode.
+3. When `MUSTER_AUTH_MODE` is omitted, it is `open` for loopback and `enforced`
+   for every other address, including `0.0.0.0` and `::`.
 
 **The Docker image always starts in `enforced` mode.** The Dockerfile hardcodes
-`ENV MUSTER_HOST=0.0.0.0` and `docker-compose.yml` sets it again, so rule 2
+`ENV MUSTER_HOST=0.0.0.0` and `docker-compose.yml` sets it again, so rule 3
 lands on `enforced` for every container. Nothing in the reverse-proxy setup
-below changes that. The only way a container runs in `open` mode is if someone
-explicitly sets `MUSTER_AUTH_MODE=open` — don't.
+below changes that. An explicit `MUSTER_AUTH_MODE=open` would contradict the
+public container bind and is rejected at startup.
 
 You therefore do not need to set `MUSTER_AUTH_MODE` by hand for a public
 deployment; the default is already correct. Setting it explicitly to `enforced`
 in your deployment config is still reasonable as documentation-in-place, and
-costs nothing. What matters is that you do everything *else* below — security
-that requires a deliberate action to turn on does not get turned on.
+costs nothing. Never set it to `open` while `MUSTER_HOST` is public: Muster will
+refuse to start rather than silently weaken the boundary.
 
-Confirm the result rather than trusting it: the startup banner prints
-`• Auth:     enforced`. If it says `open`, stop and fix that before exposing
-the port. Muster also logs a loud warning at boot if it finds itself in `open`
-mode with a non-loopback `MUSTER_HOST`.
+Confirm the result rather than trusting it: the startup banner prints the
+effective `• Bind:` address and `• Auth:` mode. If it reports a public address,
+make sure the mode is `enforced` before exposing the port.
 
 ## Do not publish port 6878 directly
 
@@ -69,10 +71,11 @@ ports:
 or drop the `ports:` mapping entirely and put the reverse proxy in the same
 Docker network, reaching Muster by its service name.
 
-Either way, **this is a reachability change, not an auth change.** Inside the
-container Muster still binds `0.0.0.0:6878` and `MUSTER_HOST` is still
-`0.0.0.0`, so the container stays in `enforced` mode exactly as before. The
-`127.0.0.1` here is an address on the *host*, not a value Muster ever reads.
+Either way, **this is a reachability change in addition to Muster's own bind
+policy.** Inside the container Muster binds `0.0.0.0:6878` because the image
+sets `MUSTER_HOST=0.0.0.0`; that non-loopback bind automatically selects
+`enforced` mode. The `127.0.0.1` in the port mapping is an address on the
+*host*, not a value Muster reads.
 
 ## Reverse proxy
 
@@ -132,8 +135,8 @@ existing ACME tooling) before starting nginx with this config.
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `MUSTER_PORT` | `6878` | The port the server listens on, inside the container. Restricting *who can reach* it is the reverse proxy's and Docker's job, not this variable's. |
-| `MUSTER_HOST` | `localhost` (`0.0.0.0` in Docker) | Advisory only — picks the `open`/`enforced` default and labels the startup banner. The server always binds `0.0.0.0`; use your firewall or Docker's port mapping to actually restrict reachability. |
-| `MUSTER_AUTH_MODE` | derived from `MUSTER_HOST` | `open` or `enforced`; an explicit value always overrides the derived one. Already `enforced` in Docker — see [Three knobs that are easy to confuse](#three-knobs-that-are-easy-to-confuse). Never set this to `open` on a public host. |
+| `MUSTER_HOST` | `localhost` (normalized to `127.0.0.1`; `0.0.0.0` in Docker) | Validated listener address. `localhost`, `127.0.0.1`, and `::1` are loopback; `0.0.0.0`, `::`, and other addresses are non-loopback. |
+| `MUSTER_AUTH_MODE` | derived from `MUSTER_HOST` | `open` or `enforced`. Omitted means open on loopback and enforced elsewhere. Explicit `open` + non-loopback is rejected; explicit `enforced` always works. |
 | `MUSTER_DB_PATH` | `data/muster.db` | SQLite database file path. |
 | `MUSTER_DB_TYPE` | `sqlite` | Database backend — `sqlite` or `postgres` (see [PostgreSQL, and migrating an existing SQLite install to it](#postgresql-and-migrating-an-existing-sqlite-install-to-it)). |
 | `MUSTER_DATABASE_URL` | — | PostgreSQL connection string, e.g. `postgres://user:pass@host:5432/muster`. Required when `MUSTER_DB_TYPE=postgres`; ignored otherwise. |
@@ -307,8 +310,8 @@ environment variables above:
 
 ## Checklist before going live
 
-- [ ] Startup banner reads `Auth:     enforced`. (Don't infer this from the
-      `ports:` mapping — they're unrelated.)
+- [ ] Startup banner reads the expected `Bind:` address and `Auth:     enforced`.
+      (Don't infer either value from the `ports:` mapping — they're unrelated.)
 - [ ] `MUSTER_PUBLIC_URL` set to the exact HTTPS origin end users will use.
 - [ ] `MUSTER_OIDC_*` configured and a test login completes end-to-end.
 - [ ] Reverse proxy terminates TLS, and Muster is not reachable except through
