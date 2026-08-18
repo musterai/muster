@@ -134,10 +134,11 @@ export class AgentService {
     };
   }
 
-  async unregister(id: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(id);
+  async unregister(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.unregister(id, actorId, tx));
+    const existing = await this.getById(id, adapter);
     if (!existing) throw new Error(`Agent with ID ${id} not found`);
-    await this.db.transaction(async tx => {
+    await (async tx => {
       const now = new Date().toISOString();
       await tx.execute(
         'UPDATE api_token SET revoked_at = ? WHERE principal_id = ? AND revoked_at IS NULL',
@@ -158,7 +159,7 @@ export class AgentService {
          WHERE id = ?`,
         [id],
       );
-    });
+    })(adapter);
   }
 
   async update(

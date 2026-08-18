@@ -12,6 +12,8 @@ export class SQLiteAdapter implements DatabaseAdapter {
   // transaction() calls through this queue so concurrent callers serialize
   // instead of crashing on a nested transaction.
   private txQueue: Promise<unknown> = Promise.resolve();
+  private commitCallbacks: Array<() => void | Promise<void>> = [];
+  private inTransaction = false;
 
   constructor(filepath: string) {
     if (filepath !== ':memory:') {
@@ -45,12 +47,22 @@ export class SQLiteAdapter implements DatabaseAdapter {
 
   async transaction<T>(fn: (adapter: DatabaseAdapter) => Promise<T>): Promise<T> {
     const run = async (): Promise<T> => {
+      this.commitCallbacks = [];
       await this.beginImmediate();
+      this.inTransaction = true;
       try {
         const result = await fn(this);
         this.db.exec('COMMIT');
+        this.inTransaction = false;
+        const callbacks = this.commitCallbacks;
+        this.commitCallbacks = [];
+        for (const callback of callbacks) {
+          try { await callback(); } catch (error) { console.error('Error in after-commit callback:', error); }
+        }
         return result;
       } catch (error) {
+        this.inTransaction = false;
+        this.commitCallbacks = [];
         try {
           this.db.exec('ROLLBACK');
         } catch {
@@ -63,6 +75,13 @@ export class SQLiteAdapter implements DatabaseAdapter {
     const scheduled = this.txQueue.then(run, run);
     this.txQueue = scheduled.catch(() => undefined);
     return scheduled;
+  }
+
+  afterCommit(callback: () => void | Promise<void>): void | Promise<void> {
+    if (!this.inTransaction) {
+      return callback();
+    }
+    this.commitCallbacks.push(callback);
   }
 
   private async beginImmediate(): Promise<void> {

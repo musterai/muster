@@ -12,6 +12,9 @@ import { InvitationService } from '../src/services/invitation.service.js';
 import { RoleService } from '../src/services/role.service.js';
 import { CardService } from '../src/services/card.service.js';
 import { KBService } from '../src/services/kb.service.js';
+import { AuditService } from '../src/services/audit.service.js';
+import { TokenService } from '../src/services/token.service.js';
+import type { AuthContext } from '../src/shared/auth-context.js';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-domain-transactions.db');
 
@@ -45,6 +48,9 @@ class FailingAdapter implements DatabaseAdapter {
 
   migrate(sql: string): Promise<void> { return this.inner.migrate(sql); }
   close(): Promise<void> { return this.inner.close(); }
+  afterCommit(callback: () => void | Promise<void>): void | Promise<void> {
+    return this.inner.afterCommit?.(callback);
+  }
 }
 
 describe('MUS-65: multi-write transaction rollback boundaries', () => {
@@ -74,7 +80,8 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
 
   it('rolls back project, board, protocol document, and events together', async () => {
     const failing = new FailingAdapter(db, sql => /INSERT INTO document_version/i.test(sql));
-    const events = new EventService(failing);
+    const published: unknown[] = [];
+    const events = new EventService(failing, event => { published.push(event); });
     const boards = new BoardService(failing, events);
     const documents = new DocumentService(failing, events);
     const projects = new ProjectService(failing, events, boards, documents);
@@ -84,6 +91,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     expect((await db.query('SELECT id FROM board')).length).toBe(0);
     expect((await db.query('SELECT id FROM document')).length).toBe(0);
     expect((await db.query('SELECT id FROM event')).length).toBe(0);
+    expect(published).toHaveLength(0);
   });
 
   it('rolls back document content/version/event as one unit', async () => {
@@ -157,5 +165,109 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     expect((await db.query('SELECT * FROM kb_fact')).length).toBe(0);
     expect((await db.query('SELECT * FROM kb_entity')).length).toBe(0);
     expect((await db.query("SELECT * FROM event WHERE entity_type = 'knowledge_base'")).length).toBe(0);
+  });
+
+  it('rolls back a committed mutation when its privileged audit insert fails', async () => {
+    const projects = new ProjectService(db);
+    const project = await projects.create({ name: 'Audit rollback' });
+    const failing = new FailingAdapter(db, sql => /INSERT INTO audit_log/i.test(sql));
+    const audit = new AuditService(failing);
+
+    await expect(failing.transaction(async tx => {
+      await projects.delete(project.id, 'actor-audit', tx);
+      await audit.log({
+        workspace_id: workspaceId,
+        actor: { id: 'actor-audit', kind: 'user' },
+        action: 'project.delete',
+        target_type: 'project',
+        target_id: project.id,
+      }, tx);
+    })).rejects.toThrow('injected failure');
+
+    expect(await projects.getById(project.id)).not.toBeNull();
+    expect((await db.query('SELECT id FROM audit_log WHERE target_id = ?', [project.id])).length).toBe(0);
+  });
+
+  it('rolls back token issuance and revocation with their audit records', async () => {
+    const roles = new RoleService(db);
+    const owner = (await roles.seedPreset(workspaceId)).find(role => role.key === 'owner')!;
+    const userId = 'audit-token-user';
+    const now = new Date().toISOString();
+    await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
+    await db.execute('INSERT INTO app_user (id, email, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)', [userId, 'audit-token@example.com', 'Audit Token', 'active', now]);
+    await db.execute('INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at) VALUES (?, ?, ?, ?)', [workspaceId, userId, owner.id, now]);
+    const auth: AuthContext = { principal: { id: userId, kind: 'user' }, workspace_id: workspaceId, is_workspace_member: true, permissions: owner.permissions, is_operator_override: false, role_name: owner.name };
+    const tokenService = new TokenService(db);
+    const created = await tokenService.create({ principal_id: userId, workspace_id: workspaceId, name: 'rollback target' });
+    const failing = new FailingAdapter(db, sql => /INSERT INTO audit_log/i.test(sql));
+    const failingTokens = new TokenService(failing);
+    const audit = new AuditService(failing);
+
+    await expect(failing.transaction(async tx => {
+      const issued = await failingTokens.issue(auth, { name: 'should roll back' }, tx);
+      await audit.log({ workspace_id: workspaceId, actor: auth.principal, action: 'token.create', target_type: 'api_token', target_id: issued.id }, tx);
+    })).rejects.toThrow('injected failure');
+    expect((await db.query('SELECT id FROM api_token WHERE name = ?', ['should roll back'])).length).toBe(0);
+
+    const failingRevoke = new FailingAdapter(db, sql => /INSERT INTO audit_log/i.test(sql));
+    const revokeTokens = new TokenService(failingRevoke);
+    const revokeAudit = new AuditService(failingRevoke);
+    await expect(failingRevoke.transaction(async tx => {
+      await revokeTokens.revoke(created.id, tx);
+      await revokeAudit.log({ workspace_id: workspaceId, actor: auth.principal, action: 'token.revoke', target_type: 'api_token', target_id: created.id }, tx);
+    })).rejects.toThrow('injected failure');
+    expect((await db.query<{ revoked_at: string | null }>('SELECT revoked_at FROM api_token WHERE id = ?', [created.id]))[0].revoked_at).toBeNull();
+  });
+
+  it('serializes duplicate invitation acceptance and concurrent bootstrap writes', async () => {
+    const roles = new RoleService(db);
+    const owner = (await roles.seedPreset(workspaceId)).find(role => role.key === 'owner')!;
+    const invitations = new InvitationService(db);
+    const invite = await invitations.create({ workspace_id: workspaceId, email: 'race@example.com', role_id: owner.id });
+    const now = new Date().toISOString();
+    for (const userId of ['race-user-a', 'race-user-b']) {
+      await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
+      await db.execute('INSERT INTO app_user (id, email, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)', [userId, `${userId}@example.com`, userId, 'active', now]);
+    }
+    const accepted = await Promise.allSettled([
+      invitations.accept(invite.id, 'race-user-a'),
+      invitations.accept(invite.id, 'race-user-b'),
+    ]);
+    expect(accepted.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect((await db.query('SELECT user_id FROM workspace_member WHERE workspace_id = ?', [workspaceId])).length).toBe(1);
+
+    const events = new EventService(db);
+    const boards = new BoardService(db, events);
+    const documents = new DocumentService(db, events);
+    const projects = new ProjectService(db, events, boards, documents);
+    const createdProjects = await Promise.all([
+      projects.create({ name: 'Concurrent bootstrap A' }),
+      projects.create({ name: 'Concurrent bootstrap B' }),
+    ]);
+    expect(new Set(createdProjects.map(project => project.id)).size).toBe(2);
+    expect((await db.query('SELECT id FROM board WHERE project_id IN (?, ?)', createdProjects.map(project => project.id))).length).toBe(2);
+  });
+
+  it('serializes document versions and emits one event for duplicate association retries', async () => {
+    const events = new EventService(db);
+    const boards = new BoardService(db, events);
+    const documents = new DocumentService(db, events);
+    const projects = new ProjectService(db, events, boards, documents);
+    const project = await projects.create({ name: 'Concurrent document' });
+    const document = await documents.create({ project_id: project.id, title: 'Versioned', content: 'v1' });
+    await Promise.all([
+      documents.update(document.id, { content: 'v2', change_summary: 'first' }),
+      documents.update(document.id, { content: 'v3', change_summary: 'second' }),
+    ]);
+    expect((await db.query<{ version: number }>('SELECT version FROM document WHERE id = ?', [document.id]))[0].version).toBe(3);
+    expect((await db.query('SELECT id FROM document_version WHERE document_id = ?', [document.id])).length).toBe(3);
+
+    const board = (await boards.list(project.id))[0];
+    const column = (await db.query<{ id: string }>('SELECT id FROM "column" WHERE board_id = ? LIMIT 1', [board.id]))[0];
+    const cards = new CardService(db, events);
+    const card = await cards.create({ column_id: column.id, title: 'Association retry' });
+    await Promise.all([cards.linkDocument(card.id, document.id), cards.linkDocument(card.id, document.id)]);
+    expect((await db.query('SELECT card_id FROM card_document WHERE card_id = ?', [card.id])).length).toBe(1);
+    expect((await db.query("SELECT id FROM event WHERE entity_id = ? AND action = 'document_linked'", [card.id])).length).toBe(1);
   });
 });

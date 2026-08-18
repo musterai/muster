@@ -48,13 +48,17 @@ export class EventService {
       created_at,
     };
 
-    for (const listener of this.listeners) {
-      try {
-        await listener(event);
-      } catch (err) {
-        console.error('Error in event listener:', err);
+    const notify = async (): Promise<void> => {
+      for (const listener of this.listeners) {
+        try {
+          await listener(event);
+        } catch (err) {
+          console.error('Error in event listener:', err);
+        }
       }
-    }
+    };
+    if (adapter.afterCommit) await adapter.afterCommit(notify);
+    else await notify();
 
     return event;
   }

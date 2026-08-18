@@ -6,8 +6,18 @@ import { OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
 import { assertPermissionsGrantable } from '../../shared/permission-enforcer.js';
 import { validateRequest } from '../middleware/validate.js';
 import { idParamsSchema, roleCloneSchema, roleCreateSchema, roleIdParamsSchema, roleUpdateSchema, workspaceIdParamsSchema } from '../schemas.js';
+import { DatabaseAdapter } from '../../db/adapter.js';
 
-export function createRoleRouter(roleService: RoleService, auditService: AuditService): Router {
+export function createRoleRouter(
+  dbOrService: DatabaseAdapter | RoleService,
+  serviceOrAudit: RoleService | AuditService,
+  maybeAudit?: AuditService,
+): Router {
+  // Keep the two-argument factory form used by embedders while production
+  // passes the explicit adapter needed to bind mutation + audit.
+  const db = (maybeAudit ? dbOrService : (dbOrService as any).db) as DatabaseAdapter;
+  const roleService = (maybeAudit ? serviceOrAudit : dbOrService) as RoleService;
+  const auditService = (maybeAudit || serviceOrAudit) as AuditService;
   const router = Router();
 
   router.get('/workspaces/:workspaceId/roles', ...validateRequest({ params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
@@ -33,14 +43,17 @@ export function createRoleRouter(roleService: RoleService, auditService: AuditSe
     try {
       const auth = req.authContext || OPEN_AUTH_CONTEXT;
       assertPermissionsGrantable(auth, req.body.permissions || []);
-      const role = await roleService.create({ ...req.body, workspace_id: req.params.workspaceId });
-      await auditService.logAs(auth, {
-        workspace_id: req.params.workspaceId,
-        action: 'role.create',
-        target_type: 'role',
-        target_id: role.id,
-        payload: { key: role.key, name: role.name, permissions: role.permissions },
-        ip: req.ip,
+      let role;
+      await db.transaction(async tx => {
+        role = await roleService.create({ ...req.body, workspace_id: req.params.workspaceId }, tx);
+        await auditService.logAs(auth, {
+          workspace_id: req.params.workspaceId,
+          action: 'role.create',
+          target_type: 'role',
+          target_id: role.id,
+          payload: { key: role.key, name: role.name, permissions: role.permissions },
+          ip: req.ip,
+        }, tx);
       });
       res.status(201).json(role);
     } catch (err) {
@@ -52,14 +65,17 @@ export function createRoleRouter(roleService: RoleService, auditService: AuditSe
     try {
       const auth = req.authContext || OPEN_AUTH_CONTEXT;
       if (req.body.permissions) assertPermissionsGrantable(auth, req.body.permissions);
-      const role = await roleService.update(req.params.id, req.body);
-      await auditService.logAs(auth, {
-        workspace_id: role.workspace_id,
-        action: 'role.update',
-        target_type: 'role',
-        target_id: role.id,
-        payload: { name: role.name, permissions: role.permissions },
-        ip: req.ip,
+      let role;
+      await db.transaction(async tx => {
+        role = await roleService.update(req.params.id, req.body, tx);
+        await auditService.logAs(auth, {
+          workspace_id: role.workspace_id,
+          action: 'role.update',
+          target_type: 'role',
+          target_id: role.id,
+          payload: { name: role.name, permissions: role.permissions },
+          ip: req.ip,
+        }, tx);
       });
       res.json(role);
     } catch (err) {
@@ -70,14 +86,16 @@ export function createRoleRouter(roleService: RoleService, auditService: AuditSe
   router.delete('/roles/:id', ...validateRequest({ params: roleIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const role = await roleService.getById(req.params.id);
-      await roleService.delete(req.params.id);
-      await auditService.logAs(req.authContext, {
-        workspace_id: role?.workspace_id || null,
-        action: 'role.delete',
-        target_type: 'role',
-        target_id: req.params.id,
-        payload: role ? { key: role.key, name: role.name } : undefined,
-        ip: req.ip,
+      await db.transaction(async tx => {
+        await roleService.delete(req.params.id, tx);
+        await auditService.logAs(req.authContext, {
+          workspace_id: role?.workspace_id || null,
+          action: 'role.delete',
+          target_type: 'role',
+          target_id: req.params.id,
+          payload: role ? { key: role.key, name: role.name } : undefined,
+          ip: req.ip,
+        }, tx);
       });
       res.status(204).send();
     } catch (err) {
@@ -87,14 +105,17 @@ export function createRoleRouter(roleService: RoleService, auditService: AuditSe
 
   router.post('/roles/:id/clone', ...validateRequest({ body: roleCloneSchema, params: roleIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const role = await roleService.clone(req.params.id, req.body.new_key, req.body.new_name);
-      await auditService.logAs(req.authContext, {
-        workspace_id: role.workspace_id,
-        action: 'role.clone',
-        target_type: 'role',
-        target_id: role.id,
-        payload: { from: req.params.id, key: role.key, name: role.name },
-        ip: req.ip,
+      let role;
+      await db.transaction(async tx => {
+        role = await roleService.clone(req.params.id, req.body.new_key, req.body.new_name, tx);
+        await auditService.logAs(req.authContext, {
+          workspace_id: role.workspace_id,
+          action: 'role.clone',
+          target_type: 'role',
+          target_id: role.id,
+          payload: { from: req.params.id, key: role.key, name: role.name },
+          ip: req.ip,
+        }, tx);
       });
       res.status(201).json(role);
     } catch (err) {

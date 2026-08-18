@@ -79,6 +79,8 @@ abstract class BasePostgresAdapter implements DatabaseAdapter {
 
 /** Bound to one already-checked-out client for the lifetime of an open transaction — every call inside must run on this same connection to see uncommitted writes and hold the same locks. */
 class PostgresTransactionAdapter extends BasePostgresAdapter {
+  private commitCallbacks: Array<() => void | Promise<void>> = [];
+
   constructor(private readonly client: pg.PoolClient) {
     super();
   }
@@ -93,6 +95,18 @@ class PostgresTransactionAdapter extends BasePostgresAdapter {
     // callback against the already-open transaction is the correct
     // "join, don't nest" behaviour here.
     return fn(this);
+  }
+
+  afterCommit(callback: () => void | Promise<void>): void {
+    this.commitCallbacks.push(callback);
+  }
+
+  async runAfterCommit(): Promise<void> {
+    const callbacks = this.commitCallbacks;
+    this.commitCallbacks = [];
+    for (const callback of callbacks) {
+      try { await callback(); } catch (error) { console.error('Error in after-commit callback:', error); }
+    }
   }
 
   async migrate(sql: string): Promise<void> {
@@ -126,6 +140,7 @@ export class PostgresAdapter extends BasePostgresAdapter {
       const txAdapter = new PostgresTransactionAdapter(client);
       const result = await fn(txAdapter);
       await client.query('COMMIT');
+      await txAdapter.runAfterCommit();
       return result;
     } catch (err) {
       try {

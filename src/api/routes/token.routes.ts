@@ -14,6 +14,7 @@ import { ValidationError } from '../../shared/errors.js';
 import { PermissionDeniedError } from '../../shared/permission-enforcer.js';
 import { validateRequest } from '../middleware/validate.js';
 import { idParamsSchema, tokenCreateSchema } from '../schemas.js';
+import { DatabaseAdapter } from '../../db/adapter.js';
 
 async function auditIssuanceRefusal(
   auditService: AuditService,
@@ -41,7 +42,14 @@ async function auditIssuanceRefusal(
   }
 }
 
-export function createTokenRouter(tokenService: TokenService, auditService: AuditService): Router {
+export function createTokenRouter(
+  dbOrService: DatabaseAdapter | TokenService,
+  serviceOrAudit: TokenService | AuditService,
+  maybeAudit?: AuditService,
+): Router {
+  const db = (maybeAudit ? dbOrService : (dbOrService as any).db) as DatabaseAdapter;
+  const tokenService = (maybeAudit ? serviceOrAudit : dbOrService) as TokenService;
+  const auditService = (maybeAudit || serviceOrAudit) as AuditService;
   const router = Router();
 
   // List tokens for the authenticated principal
@@ -73,20 +81,21 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
       }
 
       const body = req.body || {};
-      const created = await tokenService.issue(auth, {
-        principal_id: body.target_principal_id,
-        workspace_id: auth.workspace_id,
-        name: body.name,
-        expires_at: body.expires_at,
-      });
-      await auditService.logAs(auth, {
-        action: 'token.create',
-        target_type: 'api_token',
-        target_id: created.id,
-        // The plaintext token is intentionally absent; only the one-time
-        // response below contains it.  Do not echo the caller's name either.
-        payload: { principal_id: created.principal_id, via: 'rest' },
-        ip: req.ip,
+      let created;
+      await db.transaction(async tx => {
+        created = await tokenService.issue(auth, {
+          principal_id: body.target_principal_id,
+          workspace_id: auth.workspace_id,
+          name: body.name,
+          expires_at: body.expires_at,
+        }, tx);
+        await auditService.logAs(auth, {
+          action: 'token.create',
+          target_type: 'api_token',
+          target_id: created.id,
+          payload: { principal_id: created.principal_id, via: 'rest' },
+          ip: req.ip,
+        }, tx);
       });
 
       res.status(201).json(created);
@@ -123,13 +132,15 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
         return;
       }
 
-      await tokenService.revoke(req.params.id);
-      await auditService.logAs(auth, {
-        action: 'token.revoke',
-        target_type: 'api_token',
-        target_id: req.params.id,
-        payload: { name: token.name },
-        ip: req.ip,
+      await db.transaction(async tx => {
+        await tokenService.revoke(req.params.id, tx);
+        await auditService.logAs(auth, {
+          action: 'token.revoke',
+          target_type: 'api_token',
+          target_id: req.params.id,
+          payload: { name: token.name },
+          ip: req.ip,
+        }, tx);
       });
       res.status(200).json({ message: 'Token revoked', id: req.params.id });
     } catch (err) {

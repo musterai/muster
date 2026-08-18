@@ -123,17 +123,17 @@ export class UserService {
     return rows.length === 0;
   }
 
-  async isWorkspaceMember(workspaceId: string, userId: string): Promise<boolean> {
-    const rows = await this.db.query<any>(
+  async isWorkspaceMember(workspaceId: string, userId: string, adapter: DatabaseAdapter = this.db): Promise<boolean> {
+    const rows = await adapter.query<any>(
       'SELECT 1 FROM workspace_member WHERE workspace_id = ? AND user_id = ? LIMIT 1',
       [workspaceId, userId],
     );
     return rows.length > 0;
   }
 
-  async addWorkspaceMember(workspaceId: string, userId: string, roleId: string, invitedBy?: string | null): Promise<void> {
+  async addWorkspaceMember(workspaceId: string, userId: string, roleId: string, invitedBy?: string | null, adapter: DatabaseAdapter = this.db): Promise<void> {
     const now = new Date().toISOString();
-    await this.db.execute(
+    await adapter.execute(
       'INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at, invited_by) VALUES (?, ?, ?, ?, ?)',
       [workspaceId, userId, roleId, now, invitedBy || null],
     );
@@ -235,8 +235,9 @@ export class UserService {
   }
 
   /** Change a member's role. Refuses to demote the last remaining admin — a workspace must always keep an owner. */
-  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string): Promise<void> {
-    await this.db.transaction(async tx => {
+  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.changeMemberRole(workspaceId, userId, newRoleId, tx));
+    await (async tx => {
       const memberRows = await tx.query<{ role_id: string }>(
         'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
         [workspaceId, userId],
@@ -263,7 +264,7 @@ export class UserService {
       );
       const agentIds = await this.operatedAgentIds(tx, workspaceId, userId);
       await this.revokeWorkspaceCredentials(tx, workspaceId, userId, agentIds);
-    });
+    })(adapter);
   }
 
   /**
@@ -273,8 +274,9 @@ export class UserService {
    * "Unassigned" group rather than being deleted or left pointing at a
    * principal no longer in the workspace.
    */
-  async removeMember(workspaceId: string, userId: string): Promise<void> {
-    await this.db.transaction(async tx => {
+  async removeMember(workspaceId: string, userId: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.removeMember(workspaceId, userId, tx));
+    await (async tx => {
       const memberRows = await tx.query<{ role_id: string }>(
         'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
         [workspaceId, userId],
@@ -318,6 +320,6 @@ export class UserService {
       // to other workspaces, and historical comments require the principal FK
       // to remain intact. With no membership or live credentials, this
       // workspace becomes inaccessible immediately.
-    });
+    })(adapter);
   }
 }

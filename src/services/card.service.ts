@@ -644,12 +644,12 @@ export class CardService {
   async assign(idOrKey: string, agentId: string, actorId?: string): Promise<void> {
     await this.db.transaction(async tx => {
       const cardId = await resolveCardId(tx, idOrKey);
-      await tx.execute(
+      const result = await tx.execute(
         `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
         [cardId, agentId]
       );
 
-      if (this.eventService) {
+      if (this.eventService && result.changes > 0) {
         const card = await this.getById(cardId, tx);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
@@ -840,12 +840,12 @@ export class CardService {
     await this.db.transaction(async tx => {
       const cardId = await resolveCardId(tx, idOrKey);
       const linked_at = new Date().toISOString();
-      await tx.execute(
+      const result = await tx.execute(
         `INSERT OR IGNORE INTO card_document (card_id, document_id, linked_at) VALUES (?, ?, ?)`,
         [cardId, documentId, linked_at]
       );
 
-      if (this.eventService) {
+      if (this.eventService && result.changes > 0) {
         const card = await this.getById(cardId, tx);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
@@ -880,12 +880,12 @@ export class CardService {
 
       const id = ulid();
       const created_at = new Date().toISOString();
-      await tx.execute(
+      const result = await tx.execute(
         `INSERT OR IGNORE INTO card_link (id, source_card_id, target_card_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)`,
         [id, sourceCardId, destCardId, storedType, created_at]
       );
 
-      if (this.eventService) {
+      if (this.eventService && result.changes > 0) {
         const card = await this.getById(cardId, tx);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
@@ -948,12 +948,12 @@ export class CardService {
   async removeWorkLink(idOrKey: string, linkId: string, actorId?: string): Promise<void> {
     await this.db.transaction(async tx => {
       const cardId = await resolveCardId(tx, idOrKey);
-      await tx.execute(
+      const result = await tx.execute(
         `DELETE FROM card_work_link WHERE id = ? AND card_id = ?`,
         [linkId, cardId]
       );
 
-      if (this.eventService) {
+      if (this.eventService && result.changes > 0) {
         const card = await this.getById(cardId, tx);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {

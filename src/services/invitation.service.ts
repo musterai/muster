@@ -43,14 +43,15 @@ export class InvitationService {
     role_id: string;
     created_by?: string | null;
     ttlMs?: number;
-  }): Promise<CreatedInvitation> {
+  }, adapter?: DatabaseAdapter): Promise<CreatedInvitation> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, tx));
     const id = ulid();
     const token = crypto.randomBytes(24).toString('hex');
     const tokenHash = hashInvitationToken(token);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + (data.ttlMs ?? DEFAULT_INVITATION_TTL_MS));
 
-    await this.db.execute(
+    await adapter.execute(
       `INSERT INTO invitation (id, workspace_id, email, role_id, token_hash, expires_at, accepted_at, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
       [id, data.workspace_id, data.email.toLowerCase(), data.role_id, tokenHash, expiresAt.toISOString(), data.created_by || null, now.toISOString()],
@@ -88,8 +89,9 @@ export class InvitationService {
   }
 
   /** Revoking deletes the row outright — a revoked invitation can never be replayed or accepted. */
-  async revoke(id: string): Promise<void> {
-    await this.db.execute('DELETE FROM invitation WHERE id = ?', [id]);
+  async revoke(id: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.revoke(id, tx));
+    await adapter.execute('DELETE FROM invitation WHERE id = ?', [id]);
   }
 
   /** The most recent pending (unaccepted, unexpired) invitation for this email in this workspace, if any. */
