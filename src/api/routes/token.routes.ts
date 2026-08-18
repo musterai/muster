@@ -12,6 +12,8 @@ import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
 import { ValidationError } from '../../shared/errors.js';
 import { PermissionDeniedError } from '../../shared/permission-enforcer.js';
+import { validateRequest } from '../middleware/validate.js';
+import { idParamsSchema, tokenCreateSchema } from '../schemas.js';
 
 async function auditIssuanceRefusal(
   auditService: AuditService,
@@ -43,7 +45,7 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   const router = Router();
 
   // List tokens for the authenticated principal
-  router.get('/tokens', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/tokens', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = (req as any).authContext;
       if (!auth?.principal?.id) {
@@ -59,7 +61,10 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   });
 
   // Create a new token
-  router.post('/tokens', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/tokens', ...validateRequest(
+    { body: tokenCreateSchema },
+    async (req, error) => auditIssuanceRefusal(auditService, req.authContext, error, req.ip),
+  ), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {
@@ -93,7 +98,7 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   });
 
   // Revoke a token
-  router.delete('/tokens/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/tokens/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {

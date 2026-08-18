@@ -1,12 +1,13 @@
 // File: src/api/routes/health.routes.ts
 import { Router, Request, Response } from 'express';
 import { DatabaseAdapter } from '../../db/adapter.js';
+import { validateRequest } from '../middleware/validate.js';
 
 export function createHealthRouter(db: DatabaseAdapter): Router {
   const router = Router();
   const startTime = Date.now();
 
-  router.get('/health', async (_req: Request, res: Response) => {
+  router.get('/health', ...validateRequest(), async (_req: Request, res: Response) => {
     try {
       // Test DB query latency
       const t0 = Date.now();

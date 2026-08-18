@@ -21,6 +21,13 @@ import { RoleService } from '../../services/role.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { createRateLimiter } from '../middleware/generic-rate-limiter.js';
+import { validateRequest } from '../middleware/validate.js';
+import {
+  oauthAuthorizeDetailsQuerySchema,
+  oauthAuthorizeQuerySchema,
+  oauthConsentSchema,
+  oauthRegisterSchema,
+} from '../schemas.js';
 
 // Registration is cheap but unauthenticated — a flat per-IP cap keeps it
 // from being used to fill the oauth_client table.
@@ -37,14 +44,14 @@ function protectedResourceMetadataUrl(): string {
 export function createWellKnownRouter(): Router {
   const router = Router();
 
-  router.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
+  router.get('/.well-known/oauth-protected-resource', ...validateRequest(), (_req: Request, res: Response) => {
     res.json({
       resource: canonicalMcpResource(),
       authorization_servers: [config.oidc.publicUrl],
     });
   });
 
-  router.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response) => {
+  router.get('/.well-known/oauth-authorization-server', ...validateRequest(), (_req: Request, res: Response) => {
     const base = config.oidc.publicUrl;
     res.json({
       issuer: base,
@@ -81,7 +88,7 @@ export function createMcpOAuthRouter(
   const router = Router();
 
   // ── RFC 7591 Dynamic Client Registration ──
-  router.post('/oauth/register', registerRateLimiter, async (req: Request, res: Response) => {
+  router.post('/oauth/register', registerRateLimiter, ...validateRequest({ body: oauthRegisterSchema }), async (req: Request, res: Response) => {
     try {
       const client = await oauthService.registerClient({
         client_name: req.body?.client_name,
@@ -103,7 +110,7 @@ export function createMcpOAuthRouter(
 
   // ── Authorization request — validates what it safely can before ever
   //    redirecting anywhere, then hands off to the SPA consent screen ──
-  router.get('/oauth/authorize', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/oauth/authorize', ...validateRequest({ query: oauthAuthorizeQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { response_type, client_id, code_challenge, code_challenge_method, resource } = req.query;
       const redirectUri = parseRedirectUri(req.query.redirect_uri);
@@ -152,7 +159,7 @@ export function createMcpOAuthRouter(
   });
 
   // ── Consent screen data ──
-  router.get('/oauth/authorize/details', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/oauth/authorize/details', ...validateRequest({ query: oauthAuthorizeDetailsQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = req.authContext;
       if (!auth?.principal || auth.principal.kind !== 'user' || !auth.workspace_id) {
@@ -187,7 +194,7 @@ export function createMcpOAuthRouter(
   });
 
   // ── Consent decision ──
-  router.post('/oauth/authorize/consent', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/oauth/authorize/consent', ...validateRequest({ body: oauthConsentSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = req.authContext;
       if (!auth?.principal || auth.principal.kind !== 'user' || !auth.workspace_id) {

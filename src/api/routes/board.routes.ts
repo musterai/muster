@@ -3,6 +3,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { BoardService } from '../../services/board.service.js';
 import { ColumnService } from '../../services/column.service.js';
 import { CardService } from '../../services/card.service.js';
+import { validateRequest } from '../middleware/validate.js';
+import { boardCreateSchema, boardUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
 
 export function createBoardRouter(
   boardService: BoardService,
@@ -11,7 +13,7 @@ export function createBoardRouter(
 ): Router {
   const router = Router();
 
-  router.get('/projects/:projectId/boards', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/boards', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const boards = await boardService.list(req.params.projectId);
       res.json(boards);
@@ -20,7 +22,7 @@ export function createBoardRouter(
     }
   });
 
-  router.get('/projects/:projectId/all-boards', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/all-boards', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const boards = await boardService.list(req.params.projectId);
       const cards = await cardService.list({ project_id: req.params.projectId });
@@ -43,7 +45,7 @@ export function createBoardRouter(
     }
   });
 
-  router.post('/projects/:projectId/boards', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/projects/:projectId/boards', ...validateRequest({ body: boardCreateSchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const board = await boardService.create({ ...req.body, project_id: req.params.projectId });
       res.status(201).json(board);
@@ -52,7 +54,7 @@ export function createBoardRouter(
     }
   });
 
-  router.get('/boards/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/boards/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const board = await boardService.getById(req.params.id);
       if (!board) return res.status(404).json({ error: 'Board not found' });
@@ -64,7 +66,7 @@ export function createBoardRouter(
     }
   });
 
-  router.put('/boards/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.put('/boards/:id', ...validateRequest({ body: boardUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const board = await boardService.update(req.params.id, req.body);
       res.json(board);
@@ -73,7 +75,7 @@ export function createBoardRouter(
     }
   });
 
-  router.delete('/boards/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/boards/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       await boardService.delete(req.params.id);
       res.status(204).end();

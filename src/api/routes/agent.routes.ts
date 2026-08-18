@@ -3,6 +3,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { AgentService } from '../../services/agent.service.js';
 import { CardService } from '../../services/card.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { validateRequest } from '../middleware/validate.js';
+import { agentRegisterSchema, agentUpdateSchema, idParamsSchema } from '../schemas.js';
 
 function getActorId(req: Request): string | undefined {
   const auth: AuthContext | undefined = (req as any).authContext;
@@ -13,7 +15,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
   const router = Router();
 
   // Global agent list
-  router.get('/agents', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/agents', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const agents = await agentService.list();
       res.json(agents);
@@ -23,7 +25,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
   });
 
   // Register a new global agent (or re-bind existing session)
-  router.post('/agents', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/agents', ...validateRequest({ body: agentRegisterSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const agent = await agentService.register(req.body, getActorId(req));
       res.status(201).json(agent);
@@ -32,7 +34,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
     }
   });
 
-  router.post('/agents/:id/heartbeat', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/agents/:id/heartbeat', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const agent = await agentService.heartbeat(req.params.id);
       await cardService.renewClaims(req.params.id);
@@ -43,7 +45,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
   });
 
   // Update agent attributes
-  router.put('/agents/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.put('/agents/:id', ...validateRequest({ body: agentUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const agent = await agentService.update(req.params.id, req.body);
       res.json(agent);
@@ -52,7 +54,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
     }
   });
 
-  router.delete('/agents/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/agents/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       await agentService.unregister(req.params.id);
       res.status(204).send();

@@ -28,8 +28,8 @@ export class ConflictError extends AppError {
 }
 
 export class ValidationError extends AppError {
-  constructor(message: string) {
-    super(message, 400, 'VALIDATION_ERROR');
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 400, 'VALIDATION_ERROR', details);
   }
 }
 
