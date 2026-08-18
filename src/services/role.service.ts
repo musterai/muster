@@ -158,9 +158,9 @@ export class RoleService {
    * Get effective permissions for an agent.
    * effective = agent.role.permissions ∩ operator.role.permissions
    */
-  async getEffectivePermissions(agentId: string): Promise<string[]> {
+  async getEffectivePermissions(agentId: string, workspaceId?: string): Promise<string[]> {
     const agentRows = await this.db.query<any>(
-      `SELECT a.role_id, a.operator_user_id FROM agent a WHERE a.id = ?`,
+      `SELECT a.role_id, a.operator_user_id, a.workspace_id FROM agent a WHERE a.id = ?`,
       [agentId],
     );
     if (agentRows.length === 0) return [];
@@ -168,28 +168,26 @@ export class RoleService {
     const agent = agentRows[0];
     if (!agent.role_id) return [];
 
-    const agentRole = await this.getById(agent.role_id);
-    if (!agentRole) return [];
-    if (agent.workspace_id && agentRole.workspace_id !== agent.workspace_id) return [];
+    if (!agent.workspace_id || (workspaceId && agent.workspace_id !== workspaceId)) return [];
 
-    // No operator means the agent is unbound — return its role's permissions as-is
-    if (!agent.operator_user_id) return agentRole.permissions;
+    const agentRole = await this.getById(agent.role_id);
+    if (!agentRole || agentRole.workspace_id !== agent.workspace_id) return [];
+
+    // An unbound agent has no human authority to inherit. Returning the
+    // nominal role here would make offboarding a privilege escalation.
+    if (!agent.operator_user_id) return [];
 
     // Look up the operator's role
     const opRows = await this.db.query<any>(
       `SELECT wm.role_id
-         FROM workspace_member wm
-         JOIN agent a
-           ON a.operator_user_id = wm.user_id
-          AND a.workspace_id = wm.workspace_id
-        WHERE a.id = ?
-        LIMIT 1`,
-      [agentId],
+       FROM workspace_member wm
+       WHERE wm.workspace_id = ? AND wm.user_id = ?`,
+      [agent.workspace_id, agent.operator_user_id],
     );
-    if (opRows.length === 0 || !opRows[0].role_id) return agentRole.permissions;
+    if (opRows.length === 0 || !opRows[0].role_id) return [];
 
     const opRole = await this.getById(opRows[0].role_id);
-    if (!opRole) return agentRole.permissions;
+    if (!opRole || opRole.workspace_id !== agent.workspace_id) return [];
 
     // Intersection
     const opSet = new Set(opRole.permissions);

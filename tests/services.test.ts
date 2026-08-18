@@ -231,7 +231,7 @@ describe('Domain Services Integration Tests', () => {
     await expect(commentService.delete('nonexistent')).rejects.toThrow('not found');
   });
 
-  it('registers and unregisters an agent cleanly', async () => {
+  it('unregistering an agent preserves an inert attribution tombstone', async () => {
     const project = await projectService.create({ name: 'P' });
     const agent = await agentService.register({
       name: 'Agent To Remove',
@@ -244,7 +244,13 @@ describe('Domain Services Integration Tests', () => {
     await agentService.unregister(agent.id);
 
     agents = await agentService.list();
-    expect(agents.some(a => a.id === agent.id)).toBe(false);
+    const tombstone = agents.find(a => a.id === agent.id);
+    expect(tombstone).toMatchObject({
+      status: 'offline',
+      operator_user_id: null,
+      role_id: null,
+      capabilities: [],
+    });
   });
 
   it('Bug 1.4: document creation and update succeed without version title error', async () => {

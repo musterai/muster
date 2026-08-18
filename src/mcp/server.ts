@@ -79,11 +79,19 @@ async function validateAgentOwnershipOrAdmin(
   bypassPermission: string,
 ): Promise<void> {
   if (config.auth.mode === 'open') return;
-  if (auth.permissions.includes(bypassPermission)) return;
-  if (!auth.principal) {
+  if (!auth.principal || !auth.is_workspace_member || !auth.workspace_id) {
     throw new Error('Forbidden: requires an authenticated principal to operate on an agent.');
   }
-  await agentService.validateAgentOwnership(agentId, auth.principal.id);
+  const target = await agentService.getById(agentId);
+  if (!target || target.workspace_id !== auth.workspace_id) {
+    throw new Error('Forbidden: agent is outside the authenticated workspace scope.');
+  }
+  if (auth.permissions.includes(bypassPermission)) return;
+  if (auth.principal.kind === 'agent' && auth.principal.id === agentId) return;
+  if (auth.principal.kind !== 'user') {
+    throw new Error('Forbidden: requires authority to manage another agent.');
+  }
+  await agentService.validateAgentOwnership(agentId, auth.principal.id, auth.workspace_id);
 }
 
 /**
@@ -579,8 +587,14 @@ All AI agents and human operators collaborating within Muster must follow this p
     status: z.enum(['active', 'idle', 'offline']).optional()
   }, withPermission('register_agent', auth, async (args) => {
     // MUS-23: bind agent to the authenticated operator
-    const operatorUserId = resolveActor(auth);
-    const result = await services.agentService.register(args, operatorUserId, undefined, auth.workspace_id);
+    const operatorUserId = auth.principal?.kind === 'user' ? auth.principal.id : undefined;
+    const result = await services.agentService.register(
+      args,
+      operatorUserId,
+      undefined,
+      auth.workspace_id || undefined,
+      config.auth.mode === 'enforced' ? auth.principal : null,
+    );
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 

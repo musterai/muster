@@ -157,8 +157,8 @@ export class UserService {
    * the "owner" rank, regardless of whether that role is still named/keyed
    * "owner" after editing. Used to refuse leaving a workspace ownerless.
    */
-  async countAdmins(workspaceId: string): Promise<number> {
-    const rows = await this.db.query<{ count: number }>(
+  async countAdmins(workspaceId: string, adapter: DatabaseAdapter = this.db): Promise<number> {
+    const rows = await adapter.query<{ count: number }>(
       `SELECT COUNT(*) as count
        FROM workspace_member wm
        JOIN role r ON r.id = wm.role_id
@@ -168,30 +168,98 @@ export class UserService {
     return rows[0]?.count ?? 0;
   }
 
-  private async isSoleAdmin(workspaceId: string, userId: string, roleId: string): Promise<boolean> {
-    const roleRows = await this.db.query<{ permissions_json: string }>('SELECT permissions_json FROM role WHERE id = ?', [roleId]);
+  private async isSoleAdmin(
+    workspaceId: string,
+    userId: string,
+    roleId: string,
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<boolean> {
+    const roleRows = await adapter.query<{ permissions_json: string }>('SELECT permissions_json FROM role WHERE id = ?', [roleId]);
     const permissions: string[] = roleRows[0] ? JSON.parse(roleRows[0].permissions_json) : [];
     if (!permissions.includes('workspace.admin')) return false;
-    return (await this.countAdmins(workspaceId)) <= 1;
+    return (await this.countAdmins(workspaceId, adapter)) <= 1;
+  }
+
+  private async operatedAgentIds(
+    adapter: DatabaseAdapter,
+    workspaceId: string,
+    userId: string,
+  ): Promise<string[]> {
+    const rows = await adapter.query<{ id: string }>(
+      'SELECT id FROM agent WHERE workspace_id = ? AND operator_user_id = ?',
+      [workspaceId, userId],
+    );
+    return rows.map(row => row.id);
+  }
+
+  private async revokeWorkspaceCredentials(
+    adapter: DatabaseAdapter,
+    workspaceId: string,
+    userId: string,
+    agentIds: string[],
+  ): Promise<void> {
+    const principalIds = [userId, ...agentIds];
+    const placeholders = principalIds.map(() => '?').join(', ');
+    const now = new Date().toISOString();
+
+    await adapter.execute(
+      `UPDATE api_token SET revoked_at = ?
+       WHERE workspace_id = ? AND principal_id IN (${placeholders}) AND revoked_at IS NULL`,
+      [now, workspaceId, ...principalIds],
+    );
+    // Browser sessions are not workspace-bound. Force a fresh admission and
+    // role lookup on the next sign-in instead of retaining a stale session.
+    await adapter.execute('DELETE FROM session WHERE user_id = ?', [userId]);
+    await adapter.execute(
+      `DELETE FROM device_grant
+       WHERE workspace_id = ? AND principal_id IN (${placeholders})`,
+      [workspaceId, ...principalIds],
+    );
+
+    if (agentIds.length === 0) return;
+    const agentPlaceholders = agentIds.map(() => '?').join(', ');
+    await adapter.execute(
+      `DELETE FROM oauth_authorization_code
+       WHERE workspace_id = ? AND agent_principal_id IN (${agentPlaceholders})`,
+      [workspaceId, ...agentIds],
+    );
+    await adapter.execute(
+      `UPDATE oauth_refresh_token SET revoked = 1
+       WHERE workspace_id = ? AND agent_principal_id IN (${agentPlaceholders})`,
+      [workspaceId, ...agentIds],
+    );
   }
 
   /** Change a member's role. Refuses to demote the last remaining admin — a workspace must always keep an owner. */
   async changeMemberRole(workspaceId: string, userId: string, newRoleId: string): Promise<void> {
-    const memberRows = await this.db.query<{ role_id: string }>(
-      'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
-      [workspaceId, userId],
-    );
-    if (memberRows.length === 0) throw new ValidationError('User is not a member of this workspace');
-    const currentRoleId = memberRows[0].role_id;
+    await this.db.transaction(async tx => {
+      const memberRows = await tx.query<{ role_id: string }>(
+        'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+        [workspaceId, userId],
+      );
+      if (memberRows.length === 0) throw new ValidationError('User is not a member of this workspace');
+      const currentRoleId = memberRows[0].role_id;
 
-    if (currentRoleId !== newRoleId && await this.isSoleAdmin(workspaceId, userId, currentRoleId)) {
-      throw new ValidationError('Cannot change the role of the last owner — promote another member first');
-    }
+      const targetRoles = await tx.query<{ workspace_id: string }>(
+        'SELECT workspace_id FROM role WHERE id = ?',
+        [newRoleId],
+      );
+      if (targetRoles.length === 0 || targetRoles[0].workspace_id !== workspaceId) {
+        throw new ValidationError('Target role does not belong to this workspace');
+      }
 
-    await this.db.execute(
-      'UPDATE workspace_member SET role_id = ? WHERE workspace_id = ? AND user_id = ?',
-      [newRoleId, workspaceId, userId],
-    );
+      if (currentRoleId !== newRoleId && await this.isSoleAdmin(workspaceId, userId, currentRoleId, tx)) {
+        throw new ValidationError('Cannot change the role of the last owner — promote another member first');
+      }
+      if (currentRoleId === newRoleId) return;
+
+      await tx.execute(
+        'UPDATE workspace_member SET role_id = ? WHERE workspace_id = ? AND user_id = ?',
+        [newRoleId, workspaceId, userId],
+      );
+      const agentIds = await this.operatedAgentIds(tx, workspaceId, userId);
+      await this.revokeWorkspaceCredentials(tx, workspaceId, userId, agentIds);
+    });
   }
 
   /**
@@ -202,27 +270,50 @@ export class UserService {
    * principal no longer in the workspace.
    */
   async removeMember(workspaceId: string, userId: string): Promise<void> {
-    const memberRows = await this.db.query<{ role_id: string }>(
-      'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
-      [workspaceId, userId],
-    );
+    await this.db.transaction(async tx => {
+      const memberRows = await tx.query<{ role_id: string }>(
+        'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+        [workspaceId, userId],
+      );
+      if (memberRows.length === 0) {
+        throw new ValidationError('User is not a member of this workspace');
+      }
+      if (await this.isSoleAdmin(workspaceId, userId, memberRows[0].role_id, tx)) {
+        throw new ValidationError('Cannot remove the last owner — promote another member first');
+      }
 
-    const userRows = await this.db.query<{ id: string }>('SELECT id FROM app_user WHERE id = ?', [userId]);
+      const agentIds = await this.operatedAgentIds(tx, workspaceId, userId);
+      await this.revokeWorkspaceCredentials(tx, workspaceId, userId, agentIds);
 
-    if (memberRows.length === 0 && userRows.length === 0) {
-      throw new ValidationError('User is not a member of this workspace');
-    }
+      if (agentIds.length > 0) {
+        const placeholders = agentIds.map(() => '?').join(', ');
+        await tx.execute(
+          `UPDATE card SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL
+           WHERE claimed_by IN (${placeholders})
+             AND column_id IN (
+               SELECT c.id FROM "column" c
+               JOIN board b ON b.id = c.board_id
+               JOIN project p ON p.id = b.project_id
+               WHERE p.workspace_id = ?
+             )`,
+          [...agentIds, workspaceId],
+        );
+        await tx.execute(
+          `UPDATE agent
+           SET status = 'offline', operator_user_id = NULL, role_id = NULL
+           WHERE id IN (${placeholders})`,
+          agentIds,
+        );
+      }
 
-    if (memberRows.length > 0 && await this.isSoleAdmin(workspaceId, userId, memberRows[0].role_id)) {
-      throw new ValidationError('Cannot remove the last owner — promote another member first');
-    }
-
-    await this.db.execute('UPDATE agent SET operator_user_id = NULL WHERE operator_user_id = ?', [userId]);
-    await this.db.execute('DELETE FROM workspace_member WHERE workspace_id = ? AND user_id = ?', [workspaceId, userId]);
-    await this.db.execute('DELETE FROM session WHERE user_id = ?', [userId]);
-    await this.db.execute('DELETE FROM identity WHERE user_id = ?', [userId]);
-    await this.db.execute('DELETE FROM device_grant WHERE principal_id = ?', [userId]);
-    await this.db.execute('DELETE FROM app_user WHERE id = ?', [userId]);
-    await this.db.execute('DELETE FROM principal WHERE id = ?', [userId]);
+      await tx.execute(
+        'DELETE FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+        [workspaceId, userId],
+      );
+      // Keep the global principal, app_user and identity rows. They may belong
+      // to other workspaces, and historical comments require the principal FK
+      // to remain intact. With no membership or live credentials, this
+      // workspace becomes inaccessible immediately.
+    });
   }
 }
