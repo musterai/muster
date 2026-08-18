@@ -9,9 +9,6 @@ import { startServer } from './server.js';
 
 function exitFatal(message: string): never {
   console.error(message);
-  try {
-    process.kill(process.ppid, 'SIGINT');
-  } catch {}
   process.exit(1);
 }
 

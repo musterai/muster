@@ -33,15 +33,12 @@ import {
   invitationCreateBodySchema,
   workspaceIdParamsSchema,
 } from '../schemas.js';
+import { sanitizeSameOriginPath } from '../../shared/url-security.js';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Only same-origin, absolute-path redirect targets are honored — never a full URL (open-redirect risk). */
-function sanitizeRedirectTo(raw: unknown): string | null {
-  if (typeof raw !== 'string' || !raw) return null;
-  if (!raw.startsWith('/') || raw.startsWith('//')) return null;
-  return raw;
-}
+export const sanitizeRedirectTo = sanitizeSameOriginPath;
 
 function isSecureRequest(req: Request): boolean {
   return req.protocol === 'https' || config.oidc.publicUrl.startsWith('https');
@@ -160,7 +157,7 @@ export function createAuthRouter(
           // A non-pinned login that loses the bootstrap race can still be an
           // invited user.  Keep invitation admission as a fallback whenever
           // the atomic bootstrap attempt did not admit this identity.
-          if (!admitted && result.email) {
+          if (!admitted && result.email && result.emailVerified) {
             const invite = await invitationService.findPendingByEmail(workspaceId, result.email);
             if (invite) {
               await db.transaction(async tx => {

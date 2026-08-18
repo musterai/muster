@@ -5,7 +5,7 @@
 // injects its credential path instead of changing HOME or cleaning up the
 // process-wide default path.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,8 @@ import {
   createCredentialStore,
   credentialsPath,
   normalizeServerUrl,
+  writePrivateFileAtomic,
+  UnsafeCredentialPathError,
   type CredentialStore,
 } from '../src/connect/credentials.js';
 
@@ -100,6 +102,7 @@ describe('MUS-27: credentials.json', () => {
     scope!.store.setCredential('https://muster.example.com', credential('token-a'));
     const stat = fs.statSync(scope!.credentialFile);
     expect(stat.mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.dirname(scope!.credentialFile)).mode & 0o777).toBe(0o700);
   });
 
   it('round-trips a credential by server URL', () => {
@@ -111,6 +114,12 @@ describe('MUS-27: credentials.json', () => {
     scope!.store.setCredential('https://muster.example.com', credential('token-a'));
     expect(scope!.store.getCredential('https://muster.example.com/')?.token).toBe('token-a');
     expect(normalizeServerUrl('https://muster.example.com/')).toBe('https://muster.example.com');
+  });
+
+  it('rejects secret-bearing and non-HTTP server URLs', () => {
+    expect(() => normalizeServerUrl('https://user:secret@muster.example.com')).toThrow(/must not contain credentials/);
+    expect(() => normalizeServerUrl('https://muster.example.com/?token=secret')).toThrow(/query string/);
+    expect(() => normalizeServerUrl('file:///tmp/muster')).toThrow(/HTTP or HTTPS/);
   });
 
   it('keeps credentials for more than one server independently', () => {
@@ -164,5 +173,51 @@ describe('MUS-27: credentials.json', () => {
     const injectedHome = path.join(scope!.root, 'fake-home');
     expect(credentialsPath(injectedHome)).toBe(path.join(injectedHome, '.muster', 'credentials.json'));
     expect(process.env.HOME).toBe(originalHome);
+  });
+
+  it('atomically replaces private files without leaving temporary secret copies', () => {
+    writePrivateFileAtomic(scope!.credentialFile, 'first\n');
+    writePrivateFileAtomic(scope!.credentialFile, 'second\n');
+    expect(fs.readFileSync(scope!.credentialFile, 'utf8')).toBe('second\n');
+    expect(fs.statSync(scope!.credentialFile).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(scope!.root).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('keeps the previous credential intact when replacement is interrupted before rename', () => {
+    scope!.store.setCredential('https://muster.example.com', credential('token-before'));
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw new Error('injected rename interruption');
+    });
+    try {
+      expect(() => scope!.store.setCredential('https://muster.example.com', credential('token-after')))
+        .toThrow(/injected rename interruption/);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(scope!.store.getCredential('https://muster.example.com')?.token).toBe('token-before');
+    expect(fs.readdirSync(scope!.root).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses a symlink credential target without changing its destination', () => {
+    const destination = path.join(scope!.root, 'destination.json');
+    scope!.trackedPaths.add(path.resolve(destination));
+    fs.writeFileSync(destination, 'sentinel', { mode: 0o600 });
+    fs.symlinkSync(destination, scope!.credentialFile);
+
+    expect(() => scope!.store.setCredential('https://muster.example.com', credential('secret')))
+      .toThrow(UnsafeCredentialPathError);
+    expect(fs.readFileSync(destination, 'utf8')).toBe('sentinel');
+  });
+
+  it.runIf(process.platform !== 'win32')('rejects a shared directory without silently changing its permissions', () => {
+    const sharedDir = path.join(scope!.root, 'shared');
+    fs.mkdirSync(sharedDir, { mode: 0o755 });
+    fs.chmodSync(sharedDir, 0o755);
+    const target = path.join(sharedDir, 'config.json');
+
+    expect(() => writePrivateFileAtomic(target, 'secret')).toThrow(UnsafeCredentialPathError);
+    expect(fs.statSync(sharedDir).mode & 0o777).toBe(0o755);
+    expect(fs.existsSync(target)).toBe(false);
   });
 });

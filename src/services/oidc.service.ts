@@ -17,6 +17,7 @@ const TRANSACTION_TTL_MS = 10 * 60 * 1000;
 export interface OidcCallbackResult {
   sub: string;
   email: string | null;
+  emailVerified: boolean;
   redirectTo: string | null;
 }
 
@@ -135,6 +136,9 @@ export class OidcService {
     return {
       sub: claims.sub,
       email: typeof claims.email === 'string' ? claims.email : null,
+      // OIDC defines email_verified as a JSON boolean. Fail closed for
+      // missing or string/number lookalikes supplied by non-conforming IdPs.
+      emailVerified: claims.email_verified === true,
       redirectTo: txn.redirect_to || null,
     };
   }

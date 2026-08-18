@@ -27,6 +27,14 @@ export interface OAuthClient {
   token_endpoint_auth_method: string;
 }
 
+export interface OAuthClientRegistration {
+  client_name?: string;
+  redirect_uris: string[];
+  token_endpoint_auth_method?: string;
+  grant_types?: string[];
+  response_types?: string[];
+}
+
 export interface AuthorizeParams {
   clientId: string;
   redirectUri: string;
@@ -44,16 +52,33 @@ export type TokenResult =
 
 /** Loopback redirect URIs (RFC 8252 §7.3) may vary in port even if not pre-registered with that exact port. */
 function isLoopbackHost(host: string): boolean {
-  return host === '127.0.0.1' || host === '[::1]' || host === 'localhost';
+  if (host === '::1' || host === '[::1]') return true;
+  const parts = host.split('.');
+  return parts.length === 4 && parts[0] === '127' && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
+export function isSecureOAuthRedirectUri(raw: string): boolean {
+  if (raw.length === 0 || raw.length > 2048 || /[\u0000-\u001F\u007F\\]/.test(raw)) return false;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username || parsed.password || parsed.hash) return false;
+    if (parsed.protocol === 'https:') return true;
+    return parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function redirectUriMatches(registered: string, requested: string): boolean {
+  // Revalidate stored metadata so a legacy unsafe registration cannot remain
+  // usable after upgrading to the hardened policy.
+  if (!isSecureOAuthRedirectUri(registered) || !isSecureOAuthRedirectUri(requested)) return false;
   if (registered === requested) return true;
   try {
     const r = new URL(registered);
     const q = new URL(requested);
     if (!isLoopbackHost(r.hostname) || !isLoopbackHost(q.hostname)) return false;
-    return r.protocol === q.protocol && r.pathname === q.pathname && r.search === q.search;
+    return r.protocol === q.protocol && r.hostname === q.hostname && r.pathname === q.pathname && r.search === q.search;
   } catch {
     return false;
   }
@@ -78,19 +103,35 @@ export class McpOAuthService {
     private auditService?: AuditService,
   ) {}
 
-  async registerClient(data: { client_name?: string; redirect_uris: string[]; token_endpoint_auth_method?: string }): Promise<OAuthClient> {
-    if (!Array.isArray(data.redirect_uris) || data.redirect_uris.length === 0) {
-      throw new Error('redirect_uris is required and must be a non-empty array');
+  async registerClient(data: OAuthClientRegistration): Promise<OAuthClient> {
+    if (data.client_name !== undefined && (typeof data.client_name !== 'string' || data.client_name.length > 200)) {
+      throw new Error('client_name must be 200 characters or fewer');
+    }
+    if (!Array.isArray(data.redirect_uris) || data.redirect_uris.length === 0 || data.redirect_uris.length > 20) {
+      throw new Error('redirect_uris is required and must contain between 1 and 20 entries');
+    }
+    if (new Set(data.redirect_uris).size !== data.redirect_uris.length) {
+      throw new Error('redirect_uris must not contain duplicates');
     }
     for (const uri of data.redirect_uris) {
-      try {
-        const parsed = new URL(uri);
-        if (parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname) && parsed.protocol !== 'http:') {
-          throw new Error(`Invalid redirect_uri: ${uri}`);
-        }
-      } catch {
+      if (typeof uri !== 'string' || !isSecureOAuthRedirectUri(uri)) {
         throw new Error(`Invalid redirect_uri: ${uri}`);
       }
+    }
+    if (data.token_endpoint_auth_method !== undefined && data.token_endpoint_auth_method !== 'none') {
+      throw new Error('Only token_endpoint_auth_method "none" is supported');
+    }
+    if (data.grant_types && (
+      data.grant_types.length === 0 ||
+      new Set(data.grant_types).size !== data.grant_types.length ||
+      data.grant_types.some(value => value !== 'authorization_code' && value !== 'refresh_token')
+    )) {
+      throw new Error('grant_types may contain only authorization_code and refresh_token');
+    }
+    if (data.response_types && (
+      data.response_types.length !== 1 || data.response_types[0] !== 'code'
+    )) {
+      throw new Error('response_types must be ["code"]');
     }
 
     const clientId = `mcp_${crypto.randomBytes(16).toString('hex')}`;
@@ -109,8 +150,8 @@ export class McpOAuthService {
     };
   }
 
-  async getClient(clientId: string): Promise<OAuthClient | null> {
-    const rows = await this.db.query<any>('SELECT * FROM oauth_client WHERE client_id = ?', [clientId]);
+  async getClient(clientId: string, db: DatabaseAdapter = this.db): Promise<OAuthClient | null> {
+    const rows = await db.query<any>('SELECT * FROM oauth_client WHERE client_id = ?', [clientId]);
     if (rows.length === 0) return null;
     return {
       client_id: rows[0].client_id,
@@ -155,94 +196,130 @@ export class McpOAuthService {
     codeVerifier: string;
     resource: string;
   }): Promise<TokenResult> {
-    const rows = await this.db.query<any>('SELECT * FROM oauth_authorization_code WHERE code_hash = ?', [hashToken(params.code)]);
-    const row = rows[0];
-    if (!row) return { ok: false, error: 'invalid_grant', error_description: 'Unknown or already-used authorization code' };
+    const codeHash = hashToken(params.code);
+    return this.db.transaction(async tx => {
+      const rows = await tx.query<any>('SELECT * FROM oauth_authorization_code WHERE code_hash = ?', [codeHash]);
+      const row = rows[0];
+      if (!row) return { ok: false, error: 'invalid_grant', error_description: 'Unknown or already-used authorization code' };
 
-    // Single-use regardless of outcome — a code that fails validation must not be retryable.
-    await this.db.execute('DELETE FROM oauth_authorization_code WHERE code_hash = ?', [hashToken(params.code)]);
+      // Claim before validation. Expected validation/policy failures return
+      // normally and commit this one-time consumption; unexpected storage or
+      // audit failures throw and restore the code with the rest of the tx.
+      const consumed = await tx.execute('DELETE FROM oauth_authorization_code WHERE code_hash = ?', [codeHash]);
+      if (consumed.changes !== 1) {
+        return { ok: false, error: 'invalid_grant', error_description: 'Unknown or already-used authorization code' };
+      }
 
-    if (new Date(row.expires_at).getTime() <= Date.now()) {
-      return { ok: false, error: 'invalid_grant', error_description: 'Authorization code expired' };
-    }
-    if (row.client_id !== params.clientId) {
-      return { ok: false, error: 'invalid_grant', error_description: 'client_id mismatch' };
-    }
-    if (row.redirect_uri !== params.redirectUri) {
-      return { ok: false, error: 'invalid_grant', error_description: 'redirect_uri mismatch' };
-    }
-    if (row.resource !== params.resource) {
-      return { ok: false, error: 'invalid_target', error_description: 'resource mismatch' };
-    }
-    if (!verifyPkce(params.codeVerifier, row.code_challenge)) {
-      return { ok: false, error: 'invalid_grant', error_description: 'PKCE verification failed' };
-    }
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        return { ok: false, error: 'invalid_grant', error_description: 'Authorization code expired' };
+      }
+      if (row.client_id !== params.clientId) {
+        return { ok: false, error: 'invalid_grant', error_description: 'client_id mismatch' };
+      }
+      if (row.redirect_uri !== params.redirectUri) {
+        return { ok: false, error: 'invalid_grant', error_description: 'redirect_uri mismatch' };
+      }
+      if (row.resource !== params.resource) {
+        return { ok: false, error: 'invalid_target', error_description: 'resource mismatch' };
+      }
+      if (!verifyPkce(params.codeVerifier, row.code_challenge)) {
+        return { ok: false, error: 'invalid_grant', error_description: 'PKCE verification failed' };
+      }
 
-    try {
-      return await this.issueTokenFamily({
-        clientId: row.client_id,
-        agentPrincipalId: row.agent_principal_id,
-        operatorUserId: row.operator_user_id,
-        workspaceId: row.workspace_id,
-        resource: row.resource,
-        familyId: ulid(),
-      });
-    } catch (error) {
-      if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) throw error;
-      await this.auditIssuanceRefusal(row.workspace_id, row.operator_user_id, 'mcp_oauth');
-      return { ok: false, error: 'invalid_grant', error_description: 'Authorization could not be completed' };
-    }
+      try {
+        return await this.issueTokenFamily({
+          clientId: row.client_id,
+          agentPrincipalId: row.agent_principal_id,
+          operatorUserId: row.operator_user_id,
+          workspaceId: row.workspace_id,
+          resource: row.resource,
+          familyId: ulid(),
+        }, tx);
+      } catch (error) {
+        if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) throw error;
+        await this.auditIssuanceRefusal(row.workspace_id, row.operator_user_id, 'mcp_oauth', tx);
+        return { ok: false, error: 'invalid_grant', error_description: 'Authorization could not be completed' };
+      }
+    });
   }
 
   /** Refresh Token grant — rotates on every use; a replayed (already-used) token revokes the whole family. */
   async refreshToken(params: { refreshToken: string; clientId: string; resource: string }): Promise<TokenResult> {
     const hash = hashToken(params.refreshToken);
-    const rows = await this.db.query<any>('SELECT * FROM oauth_refresh_token WHERE token_hash = ?', [hash]);
-    const row = rows[0];
-    if (!row) return { ok: false, error: 'invalid_grant', error_description: 'Unknown refresh token' };
+    return this.db.transaction(async tx => {
+      let rows = await tx.query<any>('SELECT * FROM oauth_refresh_token WHERE token_hash = ?', [hash]);
+      let row = rows[0];
+      if (!row) return { ok: false, error: 'invalid_grant', error_description: 'Unknown refresh token' };
 
-    if (row.revoked || row.used) {
-      // Reuse of an already-rotated-away token is a signal of theft —
-      // revoke the entire family, including the access token it minted.
-      await this.revokeFamily(row.family_id);
-      return { ok: false, error: 'invalid_grant', error_description: 'Refresh token reuse detected; the token family has been revoked' };
-    }
-    if (row.client_id !== params.clientId) {
-      return { ok: false, error: 'invalid_grant', error_description: 'client_id mismatch' };
-    }
-    if (row.resource !== params.resource) {
-      return { ok: false, error: 'invalid_target', error_description: 'resource mismatch' };
-    }
+      // Validate caller-controlled bindings before replay handling: a client
+      // that does not own this token must not be able to revoke its family.
+      if (row.client_id !== params.clientId) {
+        return { ok: false, error: 'invalid_grant', error_description: 'client_id mismatch' };
+      }
+      if (row.resource !== params.resource) {
+        return { ok: false, error: 'invalid_target', error_description: 'resource mismatch' };
+      }
 
-    await this.db.execute('UPDATE oauth_refresh_token SET used = 1 WHERE token_hash = ?', [hash]);
-    if (row.current_api_token_id) {
-      await this.tokenService.revoke(row.current_api_token_id);
-    }
+      await this.lockRefreshFamily(tx, row.family_id);
+      rows = await tx.query<any>('SELECT * FROM oauth_refresh_token WHERE token_hash = ?', [hash]);
+      row = rows[0];
+      if (!row) return { ok: false, error: 'invalid_grant', error_description: 'Unknown refresh token' };
 
-    try {
-      return await this.issueTokenFamily({
-        clientId: row.client_id,
-        agentPrincipalId: row.agent_principal_id,
-        workspaceId: row.workspace_id,
-        resource: row.resource,
-        familyId: row.family_id,
-      });
-    } catch (error) {
-      if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) throw error;
-      await this.auditIssuanceRefusalForAgent(row.workspace_id, row.agent_principal_id, 'mcp_oauth');
-      return { ok: false, error: 'invalid_grant', error_description: 'Authorization could not be completed' };
-    }
+      if (row.revoked || row.used) {
+        await this.revokeFamilyInTransaction(tx, row.family_id);
+        return { ok: false, error: 'invalid_grant', error_description: 'Refresh token reuse detected; the token family has been revoked' };
+      }
+
+      const claimed = await tx.execute(
+        `UPDATE oauth_refresh_token
+            SET used = 1
+          WHERE token_hash = ? AND used = 0 AND revoked = 0`,
+        [hash],
+      );
+      if (claimed.changes !== 1) {
+        await this.revokeFamilyInTransaction(tx, row.family_id);
+        return { ok: false, error: 'invalid_grant', error_description: 'Refresh token reuse detected; the token family has been revoked' };
+      }
+
+      const tokenService = this.tokenServiceFor(tx);
+      if (row.current_api_token_id) {
+        await tokenService.revoke(row.current_api_token_id);
+      }
+
+      try {
+        return await this.issueTokenFamily({
+          clientId: row.client_id,
+          agentPrincipalId: row.agent_principal_id,
+          workspaceId: row.workspace_id,
+          resource: row.resource,
+          familyId: row.family_id,
+        }, tx);
+      } catch (error) {
+        if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) throw error;
+        await this.auditIssuanceRefusalForAgent(row.workspace_id, row.agent_principal_id, 'mcp_oauth', tx);
+        return { ok: false, error: 'invalid_grant', error_description: 'Authorization could not be completed' };
+      }
+    });
   }
 
   async revokeFamily(familyId: string): Promise<void> {
-    const rows = await this.db.query<{ current_api_token_id: string | null; agent_principal_id: string; workspace_id: string }>(
+    await this.db.transaction(async tx => {
+      await this.lockRefreshFamily(tx, familyId);
+      await this.revokeFamilyInTransaction(tx, familyId);
+    });
+  }
+
+  private async revokeFamilyInTransaction(db: DatabaseAdapter, familyId: string): Promise<void> {
+    const rows = await db.query<{ current_api_token_id: string | null; agent_principal_id: string; workspace_id: string }>(
       'SELECT current_api_token_id, agent_principal_id, workspace_id FROM oauth_refresh_token WHERE family_id = ? AND revoked = 0',
       [familyId],
     );
+    const tokenService = this.tokenServiceFor(db);
+    const auditService = this.auditServiceFor(db);
     for (const row of rows) {
       if (row.current_api_token_id) {
-        await this.tokenService.revoke(row.current_api_token_id);
-        await this.auditService?.log({
+        await tokenService.revoke(row.current_api_token_id);
+        await auditService?.log({
           workspace_id: row.workspace_id,
           actor: { id: row.agent_principal_id, kind: 'agent' },
           action: 'token.revoke',
@@ -252,7 +329,7 @@ export class McpOAuthService {
         });
       }
     }
-    await this.db.execute('UPDATE oauth_refresh_token SET revoked = 1 WHERE family_id = ?', [familyId]);
+    await db.execute('UPDATE oauth_refresh_token SET revoked = 1 WHERE family_id = ?', [familyId]);
   }
 
   private async issueTokenFamily(params: {
@@ -262,37 +339,39 @@ export class McpOAuthService {
     workspaceId: string;
     resource: string;
     familyId: string;
-  }): Promise<TokenResult> {
-    const client = await this.getClient(params.clientId);
+  }, db: DatabaseAdapter = this.db): Promise<TokenResult> {
+    const client = await this.getClient(params.clientId, db);
     const tokenData = { name: `MCP client: ${client?.client_name || params.clientId}` };
-    const token = params.operatorUserId
-      ? await this.tokenService.issueForOperatorOwnedAgent(
-          params.operatorUserId,
-          params.workspaceId,
-          params.agentPrincipalId,
-          tokenData,
-        )
-      : await this.tokenService.issueForCurrentAgentOwner(
-          params.agentPrincipalId,
-          params.workspaceId,
-          tokenData,
-        );
-
-    const actorId = params.operatorUserId || (await this.db.query<{ operator_user_id: string | null }>(
+    const tokenService = this.tokenServiceFor(db);
+    const auditService = this.auditServiceFor(db);
+    const actorId = params.operatorUserId || (await db.query<{ operator_user_id: string | null }>(
       'SELECT operator_user_id FROM agent WHERE id = ? AND workspace_id = ?',
       [params.agentPrincipalId, params.workspaceId],
     ))[0]?.operator_user_id;
     if (!actorId) throw new PermissionDeniedError('agent.register', null);
 
+    const token = params.operatorUserId
+      ? await tokenService.issueForOperatorOwnedAgent(
+          params.operatorUserId,
+          params.workspaceId,
+          params.agentPrincipalId,
+          tokenData,
+        )
+      : await tokenService.issueForCurrentAgentOwner(
+          params.agentPrincipalId,
+          params.workspaceId,
+          tokenData,
+        );
+
     const refreshToken = crypto.randomBytes(32).toString('hex');
     const now = new Date().toISOString();
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO oauth_refresh_token (token_hash, family_id, client_id, agent_principal_id, workspace_id, resource, current_api_token_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [hashToken(refreshToken), params.familyId, params.clientId, params.agentPrincipalId, params.workspaceId, params.resource, token.id, now],
     );
 
-    await this.auditService?.log({
+    await auditService?.log({
       workspace_id: params.workspaceId,
       actor: { id: actorId, kind: 'user' },
       action: 'token.create',
@@ -304,10 +383,30 @@ export class McpOAuthService {
     return { ok: true, token, refreshToken };
   }
 
-  private async auditIssuanceRefusal(workspaceId: string, actorId: string, via: string): Promise<void> {
-    if (!this.auditService) return;
+  private tokenServiceFor(db: DatabaseAdapter): TokenService {
+    return db === this.db ? this.tokenService : new TokenService(db);
+  }
+
+  private auditServiceFor(db: DatabaseAdapter): AuditService | undefined {
+    if (!this.auditService) return undefined;
+    return db === this.db ? this.auditService : new AuditService(db);
+  }
+
+  private async lockRefreshFamily(db: DatabaseAdapter, familyId: string): Promise<void> {
+    if (db.dialect !== 'postgres') return;
+    await db.execute('SELECT pg_advisory_xact_lock(hashtext(?))', [`muster:oauth-refresh:${familyId}`]);
+  }
+
+  private async auditIssuanceRefusal(
+    workspaceId: string,
+    actorId: string,
+    via: string,
+    db: DatabaseAdapter = this.db,
+  ): Promise<void> {
+    const auditService = this.auditServiceFor(db);
+    if (!auditService) return;
     try {
-      await this.auditService.log({
+      await auditService.log({
         workspace_id: workspaceId,
         actor: { id: actorId, kind: 'user' },
         action: 'token.create_refused',
@@ -320,13 +419,18 @@ export class McpOAuthService {
     }
   }
 
-  private async auditIssuanceRefusalForAgent(workspaceId: string, agentId: string, via: string): Promise<void> {
-    if (!this.auditService) return;
-    const rows = await this.db.query<{ operator_user_id: string | null }>(
+  private async auditIssuanceRefusalForAgent(
+    workspaceId: string,
+    agentId: string,
+    via: string,
+    db: DatabaseAdapter = this.db,
+  ): Promise<void> {
+    if (!this.auditServiceFor(db)) return;
+    const rows = await db.query<{ operator_user_id: string | null }>(
       'SELECT operator_user_id FROM agent WHERE id = ? AND workspace_id = ?',
       [agentId, workspaceId],
     );
     if (!rows[0]?.operator_user_id) return;
-    await this.auditIssuanceRefusal(workspaceId, rows[0].operator_user_id, via);
+    await this.auditIssuanceRefusal(workspaceId, rows[0].operator_user_id, via, db);
   }
 }
