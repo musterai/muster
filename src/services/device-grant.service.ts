@@ -136,8 +136,8 @@ export class DeviceGrantService {
       const result = await tx.execute(
         `UPDATE device_grant
             SET status = 'approved', principal_id = ?, workspace_id = ?
-          WHERE id = ? AND status = 'pending'`,
-        [principalId, auth.workspace_id, row.id],
+          WHERE id = ? AND status = 'pending' AND expires_at > ?`,
+        [principalId, auth.workspace_id, row.id, new Date().toISOString()],
       );
       return result.changes === 1;
     });
@@ -156,8 +156,10 @@ export class DeviceGrantService {
         return false;
       }
       const result = await tx.execute(
-        `UPDATE device_grant SET status = 'denied' WHERE id = ? AND status = 'pending'`,
-        [row.id],
+        `UPDATE device_grant
+            SET status = 'denied'
+          WHERE id = ? AND status = 'pending' AND expires_at > ?`,
+        [row.id, new Date().toISOString()],
       );
       return result.changes === 1;
     });

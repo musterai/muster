@@ -63,6 +63,38 @@ class FailOnceAdapter implements DatabaseAdapter {
   }
 }
 
+class DelayOnceAdapter implements DatabaseAdapter {
+  readonly dialect: 'sqlite' | 'postgres';
+  private delayed = false;
+
+  constructor(
+    private readonly delegate: DatabaseAdapter,
+    private readonly matcher: (sql: string) => boolean,
+    private readonly delayMs: number,
+  ) {
+    this.dialect = delegate.dialect;
+  }
+
+  async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+    if (!this.delayed && this.matcher(sql)) {
+      this.delayed = true;
+      await new Promise(resolve => setTimeout(resolve, this.delayMs));
+    }
+    return this.delegate.query<T>(sql, params);
+  }
+
+  execute(sql: string, params?: unknown[]): Promise<ExecutionResult> {
+    return this.delegate.execute(sql, params);
+  }
+
+  transaction<T>(fn: (adapter: DatabaseAdapter) => Promise<T>): Promise<T> {
+    return this.delegate.transaction(tx => fn(new DelayOnceAdapter(tx, this.matcher, this.delayMs)));
+  }
+
+  migrate(sql: string): Promise<void> { return this.delegate.migrate(sql); }
+  close(): Promise<void> { return this.delegate.close(); }
+}
+
 async function seedDatabase(db: DatabaseAdapter): Promise<AuthContext> {
   const migrator = new Migrator(db, path.join(process.cwd(), 'src/db/migrations'));
   await migrator.run();
@@ -104,6 +136,18 @@ async function countRows(db: DatabaseAdapter, table: string): Promise<number> {
   return Number(rows[0]?.count || 0);
 }
 
+async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[]> {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let ready = 0;
+  return Promise.all(operations.map(async operation => {
+    ready += 1;
+    if (ready === operations.length) release();
+    await gate;
+    return operation();
+  }));
+}
+
 describe('MUS-62: device-grant atomicity', () => {
   let dbA: DatabaseAdapter;
   let dbB: DatabaseAdapter;
@@ -135,9 +179,9 @@ describe('MUS-62: device-grant atomicity', () => {
     const grant = await serviceA.createDeviceCode();
     expect(await serviceA.approve(grant.user_code, auth)).toBe(true);
 
-    const [resultA, resultB] = await Promise.all([
-      serviceA.poll(grant.device_code),
-      serviceB.poll(grant.device_code),
+    const [resultA, resultB] = await raceAtBarrier([
+      () => serviceA.poll(grant.device_code),
+      () => serviceB.poll(grant.device_code),
     ]);
     const results = [resultA, resultB];
 
@@ -156,9 +200,9 @@ describe('MUS-62: device-grant atomicity', () => {
   it('serializes concurrent pending polls: one records the poll and the other slows down', async () => {
     const grant = await serviceA.createDeviceCode();
 
-    const [resultA, resultB] = await Promise.all([
-      serviceA.poll(grant.device_code),
-      serviceB.poll(grant.device_code),
+    const [resultA, resultB] = await raceAtBarrier([
+      () => serviceA.poll(grant.device_code),
+      () => serviceB.poll(grant.device_code),
     ]);
     const errors = [resultA, resultB]
       .filter((result): result is { ok: false; error: string } => !result.ok)
@@ -178,9 +222,9 @@ describe('MUS-62: device-grant atomicity', () => {
   it('makes concurrent approval and denial a one-winner CAS', async () => {
     const grant = await serviceA.createDeviceCode();
 
-    const [approved, denied] = await Promise.all([
-      serviceA.approve(grant.user_code, auth),
-      serviceB.deny(grant.user_code),
+    const [approved, denied] = await raceAtBarrier([
+      () => serviceA.approve(grant.user_code, auth),
+      () => serviceB.deny(grant.user_code),
     ]);
 
     expect([approved, denied].filter(Boolean)).toHaveLength(1);
@@ -193,6 +237,43 @@ describe('MUS-62: device-grant atomicity', () => {
       );
       expect(bound[0]).toEqual({ principal_id: USER_ID, workspace_id: WORKSPACE_ID });
     }
+  });
+
+  it('does not approve a grant that expires during authorization work', async () => {
+    const grant = await serviceA.createDeviceCode();
+    await dbA.execute(
+      'UPDATE device_grant SET expires_at = ? WHERE user_code = ?',
+      [new Date(Date.now() + 20).toISOString(), grant.user_code],
+    );
+    const delayedDb = new DelayOnceAdapter(dbA, sql => /SELECT kind FROM principal/i.test(sql), 50);
+    const delayedService = new DeviceGrantService(
+      delayedDb,
+      new TokenService(delayedDb),
+      new AuditService(delayedDb),
+    );
+
+    expect(await delayedService.approve(grant.user_code, auth)).toBe(false);
+    expect(await dbA.query<{ status: string }>('SELECT status FROM device_grant'))
+      .toEqual([{ status: 'pending' }]);
+  });
+
+  it('consumes an approved grant when live membership policy changes before polling', async () => {
+    const grant = await serviceA.createDeviceCode();
+    expect(await serviceA.approve(grant.user_code, auth)).toBe(true);
+    await dbA.execute(
+      'DELETE FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+      [WORKSPACE_ID, USER_ID],
+    );
+
+    const result = await serviceA.poll(grant.device_code);
+    expect(result).toEqual({ ok: false, error: 'access_denied' });
+    expect(await countRows(dbA, 'device_grant')).toBe(0);
+    expect(await countRows(dbA, 'api_token')).toBe(0);
+    const audits = await dbA.query<{ action: string; payload: string }>(
+      "SELECT action, payload FROM audit_log WHERE action = 'token.create_refused'",
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0].payload)).toMatchObject({ via: 'device_grant' });
   });
 
   it('rolls back the grant when token persistence fails unexpectedly', async () => {

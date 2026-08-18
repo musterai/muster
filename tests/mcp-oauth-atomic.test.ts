@@ -10,6 +10,7 @@ import { AgentService } from '../src/services/agent.service.js';
 import { McpOAuthService } from '../src/services/mcp-oauth.service.js';
 import { RoleService } from '../src/services/role.service.js';
 import { TokenService } from '../src/services/token.service.js';
+import { AuditService } from '../src/services/audit.service.js';
 
 const RESOURCE = 'https://muster.example.test/mcp';
 
@@ -57,6 +58,18 @@ function pkcePair(): { verifier: string; challenge: string } {
   };
 }
 
+async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[]> {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let ready = 0;
+  return Promise.all(operations.map(async operation => {
+    ready += 1;
+    if (ready === operations.length) release();
+    await gate;
+    return operation();
+  }));
+}
+
 describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
   let tempDir: string;
   let dbPath: string;
@@ -99,7 +112,7 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
 
     tokenA = new TokenService(dbA);
     const agentA = new AgentService(dbA);
-    oauthA = new McpOAuthService(dbA, tokenA, agentA);
+    oauthA = new McpOAuthService(dbA, tokenA, agentA, new AuditService(dbA));
     const client = await oauthA.registerClient({ client_name: 'Atomic Client', redirect_uris: [redirectUri] });
     clientId = client.client_id;
     const agent = await agentA.register({ name: 'Atomic Agent' }, operatorId, seniorRole.id, workspaceId);
@@ -118,7 +131,7 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
     });
 
     dbB = createDatabaseAdapter(dbPath);
-    oauthB = new McpOAuthService(dbB, new TokenService(dbB), new AgentService(dbB));
+    oauthB = new McpOAuthService(dbB, new TokenService(dbB), new AgentService(dbB), new AuditService(dbB));
   });
 
   afterEach(async () => {
@@ -138,12 +151,17 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
   }
 
   it('allows exactly one of two concurrent authorization-code exchanges to mint a family', async () => {
-    const results = await Promise.all([exchange(oauthA), exchange(oauthB)]);
+    const results = await raceAtBarrier([() => exchange(oauthA), () => exchange(oauthB)]);
     expect(results.filter(result => result.ok)).toHaveLength(1);
     expect(results.filter(result => !result.ok && result.error === 'invalid_grant')).toHaveLength(1);
     expect(await dbA.query('SELECT id FROM api_token WHERE principal_id = ?', [agentId])).toHaveLength(1);
     expect(await dbA.query('SELECT token_hash FROM oauth_refresh_token')).toHaveLength(1);
     expect(await dbA.query('SELECT code_hash FROM oauth_authorization_code')).toHaveLength(0);
+    const audits = await dbA.query<{ action: string; payload: string }>(
+      "SELECT action, payload FROM audit_log WHERE action = 'token.create'",
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0].payload)).toEqual({ via: 'mcp_oauth', client_id: clientId });
   });
 
   it('rolls back code consumption and partial token writes after an unexpected issuance failure', async () => {
@@ -163,19 +181,48 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
     expect(retried.ok).toBe(true);
   });
 
+  it('consumes a code and records a safe refusal when live issuance policy changes', async () => {
+    await dbA.execute(
+      'DELETE FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+      [workspaceId, operatorId],
+    );
+
+    const result = await exchange(oauthA);
+    expect(result).toMatchObject({ ok: false, error: 'invalid_grant' });
+    expect(await dbA.query('SELECT code_hash FROM oauth_authorization_code')).toHaveLength(0);
+    expect(await dbA.query('SELECT id FROM api_token')).toHaveLength(0);
+    expect(await dbA.query('SELECT token_hash FROM oauth_refresh_token')).toHaveLength(0);
+    const audits = await dbA.query<{ action: string; payload: string }>(
+      "SELECT action, payload FROM audit_log WHERE action = 'token.create_refused'",
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0].payload)).toEqual({ via: 'mcp_oauth', reason: 'authorization_changed' });
+    expect(JSON.stringify(audits[0])).not.toContain(code);
+  });
+
   it('serializes concurrent refreshes and treats the loser as replay of the family', async () => {
     const issued = await exchange(oauthA);
     if (!issued.ok) throw new Error('OAuth setup failed');
 
-    const results = await Promise.all([
-      oauthA.refreshToken({ refreshToken: issued.refreshToken, clientId, resource: RESOURCE }),
-      oauthB.refreshToken({ refreshToken: issued.refreshToken, clientId, resource: RESOURCE }),
+    const results = await raceAtBarrier([
+      () => oauthA.refreshToken({ refreshToken: issued.refreshToken, clientId, resource: RESOURCE }),
+      () => oauthB.refreshToken({ refreshToken: issued.refreshToken, clientId, resource: RESOURCE }),
     ]);
     expect(results.filter(result => result.ok)).toHaveLength(1);
     expect(results.filter(result => !result.ok && result.error === 'invalid_grant')).toHaveLength(1);
     const rows = await dbA.query<{ revoked: number }>('SELECT revoked FROM oauth_refresh_token');
     expect(rows).toHaveLength(2);
     expect(rows.every(row => row.revoked === 1)).toBe(true);
+    const revokeAudits = await dbA.query<{ payload: string }>(
+      "SELECT payload FROM audit_log WHERE action = 'token.revoke'",
+    );
+    expect(revokeAudits.length).toBeGreaterThanOrEqual(2);
+    for (const audit of revokeAudits) {
+      const payload = JSON.parse(audit.payload);
+      expect(payload).toMatchObject({ reason: 'refresh_token_reuse_detected' });
+      expect(JSON.stringify(payload)).not.toContain(issued.refreshToken);
+      expect(JSON.stringify(payload)).not.toContain(issued.token.token);
+    }
   });
 
   it('rolls back refresh claim, access revocation, and partial writes on unexpected failure', async () => {
