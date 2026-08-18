@@ -16,4 +16,16 @@ describe('MUS-71 CLI secret and process isolation', () => {
     expect(result.stderr).toContain('Unknown option "--token"');
     expect(`${result.stdout}${result.stderr}`).not.toContain(secret);
   });
+
+  it('direct server entrypoint validation exits the child without signaling its parent', () => {
+    const result = spawnSync(
+      path.resolve('node_modules/.bin/tsx'),
+      ['src/index.ts', '--database'],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.signal).toBeNull();
+    expect(result.stderr).toContain('option requires a database name or file path');
+  });
 });
