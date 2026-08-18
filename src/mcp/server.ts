@@ -2,53 +2,20 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z as zod } from 'zod';
 import {
-  ProjectService,
-  BoardService,
-  ColumnService,
+  AgentService,
   CardService,
   CommentService,
-  DocumentService,
-  AgentService,
-  EventService,
-  KBService,
-  RoleService,
-  TokenService,
-  SessionService,
-  OidcService,
-  InvitationService,
-  UserService,
-  DeviceGrantService,
-  McpOAuthService,
-  AuditService,
 } from '../services/index.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { withPermission } from '../shared/permission-enforcer.js';
+import type { Services } from '../shared/services.js';
 
 const z = zod;
 const cardReferenceSchema = z.string().describe(
   'The card ULID or its human-readable key (e.g. "MUS-49"); writes resolve it to the immutable card ID.'
 );
 
-export interface Services {
-  projectService: ProjectService;
-  boardService: BoardService;
-  columnService: ColumnService;
-  cardService: CardService;
-  commentService: CommentService;
-  documentService: DocumentService;
-  agentService: AgentService;
-  eventService: EventService;
-  kbService: KBService;
-  roleService: RoleService;
-  tokenService: TokenService;
-  sessionService: SessionService;
-  oidcService: OidcService;
-  invitationService: InvitationService;
-  userService: UserService;
-  deviceGrantService: DeviceGrantService;
-  mcpOAuthService: McpOAuthService;
-  auditService: AuditService;
-}
+export type { Services } from '../shared/services.js';
 
 import { Request } from 'express';
 import { config } from '../config/index.js';

@@ -27,7 +27,8 @@ import {
 import { SSEManager } from './realtime/sse.js';
 import { createRouter } from './api/router.js';
 import { errorHandler } from './api/middleware/error-handler.js';
-import { createMcpServer, Services } from './mcp/server.js';
+import { createMcpServer } from './mcp/server.js';
+import type { Services } from './shared/services.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { config, setDatabaseOverride } from './config/index.js';
 import { OPEN_AUTH_CONTEXT } from './shared/auth-context.js';

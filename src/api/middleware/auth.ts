@@ -64,8 +64,8 @@ async function resolveUserPermissions(
   db: DatabaseAdapter,
   userId: string,
   workspaceId: string | null,
-): Promise<{ permissions: string[]; roleName: string | null }> {
-  if (!workspaceId) return { permissions: [], roleName: null };
+): Promise<{ permissions: string[]; roleName: string | null; isWorkspaceMember: boolean }> {
+  if (!workspaceId) return { permissions: [], roleName: null, isWorkspaceMember: false };
 
   const memberRows = await db.query<any>(
     `SELECT wm.role_id, r.name as role_name, r.permissions_json
@@ -75,13 +75,45 @@ async function resolveUserPermissions(
     [userId, workspaceId],
   );
 
-  if (memberRows.length === 0) return { permissions: [], roleName: null };
+  if (memberRows.length === 0) {
+    return { permissions: [], roleName: null, isWorkspaceMember: false };
+  }
 
   const permissions = typeof memberRows[0].permissions_json === 'string'
     ? JSON.parse(memberRows[0].permissions_json)
     : (memberRows[0].permissions_json || []);
 
-  return { permissions, roleName: memberRows[0].role_name || null };
+  return {
+    permissions,
+    roleName: memberRows[0].role_name || null,
+    isWorkspaceMember: true,
+  };
+}
+
+/**
+ * Agents are workspace members only through an active operator membership.
+ * Merely retaining an agent row or nominal role after operator offboarding
+ * must not preserve implicit read access.
+ */
+async function resolveAgentWorkspaceMembership(
+  db: DatabaseAdapter,
+  agentId: string,
+  workspaceId: string | null,
+): Promise<boolean> {
+  if (!workspaceId) return false;
+
+  const rows = await db.query<{ id: string }>(
+    `SELECT a.id
+       FROM agent a
+       JOIN workspace_member wm
+         ON wm.user_id = a.operator_user_id
+        AND wm.workspace_id = a.workspace_id
+      WHERE a.id = ?
+        AND a.workspace_id = ?
+      LIMIT 1`,
+    [agentId, workspaceId],
+  );
+  return rows.length === 1;
 }
 
 export function createAuthMiddleware(
@@ -155,10 +187,16 @@ export function createAuthMiddleware(
         let permissions: string[] = [];
         let roleName: string | null = null;
         let isOperatorOverride = false;
+        let isWorkspaceMember = false;
 
         if (principalKind === 'agent') {
           permissions = await roleService.getEffectivePermissions(verification.principal_id);
           const agent = await agentService.getById(verification.principal_id);
+          isWorkspaceMember = await resolveAgentWorkspaceMembership(
+            db,
+            verification.principal_id,
+            verification.workspace_id,
+          );
           if (agent?.role_id) {
             const role = await roleService.getById(agent.role_id);
             roleName = role?.name || null;
@@ -167,12 +205,14 @@ export function createAuthMiddleware(
           const resolved = await resolveUserPermissions(db, verification.principal_id, verification.workspace_id);
           permissions = resolved.permissions;
           roleName = resolved.roleName;
+          isWorkspaceMember = resolved.isWorkspaceMember;
           isOperatorOverride = permissions.includes('workspace.admin');
         }
 
         (req as any).authContext = {
           principal: { kind: principalKind, id: verification.principal_id },
           workspace_id: verification.workspace_id,
+          is_workspace_member: isWorkspaceMember,
           permissions,
           is_operator_override: isOperatorOverride,
           role_name: roleName,
@@ -203,11 +243,16 @@ export function createAuthMiddleware(
 
         const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
         const workspaceId = wsRows[0]?.id || null;
-        const { permissions, roleName } = await resolveUserPermissions(db, verification.user_id, workspaceId);
+        const { permissions, roleName, isWorkspaceMember } = await resolveUserPermissions(
+          db,
+          verification.user_id,
+          workspaceId,
+        );
 
         (req as any).authContext = {
           principal: { kind: 'user', id: verification.user_id },
           workspace_id: workspaceId,
+          is_workspace_member: isWorkspaceMember,
           permissions,
           is_operator_override: permissions.includes('workspace.admin'),
           role_name: roleName,

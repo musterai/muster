@@ -19,6 +19,13 @@ export interface AuthContext {
   principal: PrincipalRef | null;
   /** The workspace this request acts within, if known. */
   workspace_id: string | null;
+  /**
+   * Whether the credential resolves to an active member of workspace_id.
+   * Read access is implicit for members, including observer roles with an
+   * intentionally empty write-permission set, so it cannot be inferred from
+   * permissions.length.
+   */
+  is_workspace_member: boolean;
   /** Permission strings the principal holds (effective set). */
   permissions: string[];
   /** True when the request carries operator-override authority. */
@@ -34,6 +41,7 @@ export interface AuthContext {
 export const OPEN_AUTH_CONTEXT: AuthContext = {
   principal: null,
   workspace_id: null,
+  is_workspace_member: false,
   permissions: [],
   is_operator_override: false,
   role_name: null,

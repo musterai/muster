@@ -1,7 +1,7 @@
 // File: src/api/router.ts
 import { Router } from 'express';
 import { DatabaseAdapter } from '../db/adapter.js';
-import { Services } from '../mcp/server.js';
+import type { Services } from '../shared/services.js';
 import { SSEManager } from '../realtime/sse.js';
 import { createProjectRouter } from './routes/project.routes.js';
 import { createBoardRouter } from './routes/board.routes.js';
