@@ -7,6 +7,24 @@ export function createHealthRouter(db: DatabaseAdapter): Router {
   const router = Router();
   const startTime = Date.now();
 
+  // Liveness deliberately does not touch the database or expose workspace
+  // metadata: an orchestrator can distinguish a running process from a ready
+  // process without turning the probe into an information endpoint.
+  router.get('/health/live', ...validateRequest(), (_req: Request, res: Response) => {
+    res.status(200).json({ status: 'alive' });
+  });
+
+  router.get('/health/ready', ...validateRequest(), async (_req: Request, res: Response) => {
+    try {
+      await db.query('SELECT 1');
+      res.status(200).json({ status: 'ready' });
+    } catch {
+      // Never return driver errors, paths, or connection details in a public
+      // readiness response.
+      res.status(503).json({ status: 'not_ready' });
+    }
+  });
+
   router.get('/health', ...validateRequest(), async (_req: Request, res: Response) => {
     try {
       // Test DB query latency
@@ -26,10 +44,9 @@ export function createHealthRouter(db: DatabaseAdapter): Router {
           latency_ms: latencyMs,
         },
       });
-    } catch (err: any) {
+    } catch {
       res.status(503).json({
         status: 'unhealthy',
-        error: err.message,
         timestamp: new Date().toISOString(),
       });
     }

@@ -9,6 +9,8 @@ import {
   normalizeListenHost,
   resolveDbPath,
   resolveListenerConfig,
+  resolveTrustedProxies,
+  validateDeploymentConfig,
   setDatabaseOverride,
 } from '../src/config/index.js';
 import { listenApplication } from '../src/server.js';
@@ -139,6 +141,24 @@ describe('Listener and authentication configuration', () => {
       .toBe('enforced');
     expect(resolveListenerConfig({ MUSTER_HOST: '192.0.2.10', MUSTER_AUTH_MODE: 'enforced' }).authMode)
       .toBe('enforced');
+  });
+
+  it('validates enforced deployments before startup and supports secret files', () => {
+    expect(() => validateDeploymentConfig({
+      MUSTER_HOST: '0.0.0.0', MUSTER_AUTH_MODE: 'enforced', MUSTER_PUBLIC_URL: 'http://example.test',
+      MUSTER_OIDC_ISSUER: 'https://id.example.test', MUSTER_OIDC_CLIENT_ID: 'muster', MUSTER_OIDC_CLIENT_SECRET: 'secret',
+    })).toThrow('MUSTER_PUBLIC_URL must use https');
+    expect(() => validateDeploymentConfig({ MUSTER_HOST: '0.0.0.0', MUSTER_AUTH_MODE: 'enforced' }))
+      .toThrow('MUSTER_PUBLIC_URL is required');
+    expect(() => validateDeploymentConfig({ MUSTER_HOST: '0.0.0.0', MUSTER_AUTH_MODE: 'enforced', MUSTER_PUBLIC_URL: 'https://muster.example.test' }))
+      .toThrow('MUSTER_OIDC_ISSUER');
+  });
+
+  it('accepts only explicit proxy IPs and CIDRs', () => {
+    expect(resolveTrustedProxies({ MUSTER_TRUST_PROXY: '127.0.0.1, ::1, 10.0.0.0/8' }))
+      .toEqual(['127.0.0.1', '::1', '10.0.0.0/8']);
+    expect(() => resolveTrustedProxies({ MUSTER_TRUST_PROXY: '0.0.0.0/33' })).toThrow('invalid CIDR');
+    expect(() => resolveTrustedProxies({ MUSTER_TRUST_PROXY: 'proxy.internal' })).toThrow('invalid address');
   });
 
   it('rejects invalid auth modes and malformed host values', () => {

@@ -316,13 +316,13 @@ docker-compose down
 ```
 
 The platform will be available at `http://localhost:6878`.  
-Health telemetry: `http://localhost:6878/api/v1/health`
+Health probes: `http://localhost:6878/api/v1/health/live` and
+`http://localhost:6878/api/v1/health/ready`
 
-⚠️ The `docker-compose.yml` in this repo publishes port 6878 to all
-interfaces (`0.0.0.0`) for local getting-started convenience. **Before
-exposing Muster on a public host, follow [docs/deployment.md](docs/deployment.md)**
-to put a TLS-terminating reverse proxy in front of it and bind Muster itself
-to loopback only.
+The checked-in `docker-compose.yml` is loopback-published, requires enforced
+OIDC configuration, and reads the client secret from `secrets/oidc_client_secret`.
+See [docs/deployment.md](docs/deployment.md) for the reverse-proxy topology and
+forwarded-header trust configuration.
 
 ---
 

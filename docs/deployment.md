@@ -48,8 +48,8 @@ make sure the mode is `enforced` before exposing the port.
 
 ## Do not publish port 6878 directly
 
-`docker-compose.yml`'s default `ports: ["6878:6878"]` is a getting-started
-convenience, not a deployment topology. Muster's own HTTP server has no TLS
+`docker-compose.yml` is loopback-published by default; do not change it to a
+host-wide `"6878:6878"` mapping. Muster's own HTTP server has no TLS
 support and no public-facing hardening beyond what's described in this
 document — it is designed to sit behind a reverse proxy that terminates TLS,
 not to be the public-facing edge itself.
@@ -60,8 +60,10 @@ not to be the public-facing edge itself.
 Internet → reverse proxy (TLS termination, port 443) → Muster (port 6878, reachable only from the proxy)
 ```
 
-Change `docker-compose.yml` to publish the port on the host's loopback
-interface only:
+The checked-in `docker-compose.yml` already publishes the port on the host's
+loopback interface only. Copy `.env.example` to `.env`, create
+`secrets/oidc_client_secret` with mode `0600`, and fill in the OIDC values
+before starting:
 
 ```yaml
 ports:
@@ -93,8 +95,20 @@ Restart Caddy after changes; no separate certbot step.
 `127.0.0.1:6878` assumes Caddy runs on the host and Muster publishes to
 loopback. If Caddy is a container on the same Docker network instead, use the
 service name — `reverse_proxy muster-server:6878` — and drop the `ports:`
-mapping entirely. The same substitution applies to the nginx `proxy_pass`
-below.
+mapping entirely. In that topology set `MUSTER_TRUST_PROXY` to the proxy
+container's fixed private IP/CIDR, not a broad private network. The same
+substitution applies to the nginx `proxy_pass` below.
+
+### Forwarded headers and proxy trust
+
+Muster ignores `X-Forwarded-*` headers by default. Set
+`MUSTER_TRUST_PROXY` to a comma-separated list of the exact proxy IPs or CIDRs
+that connect to Muster (the Compose host-proxy example uses `127.0.0.1,::1`).
+Express then uses forwarded protocol/host/client IP only when the immediate
+peer is in that allowlist; a direct client cannot spoof HTTPS or its address.
+Do not use `0.0.0.0/0`, `::/0`, or an unbounded hop count. Keep the proxy's
+forwarding configuration fixed and overwrite, rather than append to, incoming
+forwarded headers at the edge.
 
 ### nginx
 
@@ -145,7 +159,9 @@ existing ACME tooling) before starting nginx with this config.
 | `MUSTER_OIDC_ISSUER` | — | The OIDC provider's issuer URL (Authentik, Keycloak, Okta, Auth0, Google, GitHub via an OIDC-compatible proxy, etc). Discovery is fetched from `${issuer}/.well-known/openid-configuration`. |
 | `MUSTER_OIDC_CLIENT_ID` | — | OAuth client ID registered with the provider. |
 | `MUSTER_OIDC_CLIENT_SECRET` | — | OAuth client secret. Keep this out of version control and shell history — pass it via your deployment platform's secret store. |
+| `MUSTER_OIDC_CLIENT_SECRET_FILE` | — | Read the client secret from a mounted secret file (preferred for Compose/Kubernetes); the value is trimmed and never logged. |
 | `MUSTER_BOOTSTRAP_OWNER_SUBJECT` | — | The OIDC `sub` claim to pin as workspace owner in advance, bypassing invitation admission. Optional — the first person to sign in becomes owner automatically if this is unset. |
+| `MUSTER_TRUST_PROXY` | empty (trust none) | Comma-separated exact proxy IPs/CIDRs. Forwarded headers are ignored unless the immediate peer matches. |
 
 OIDC is required for a public deployment: without it, `/auth/login` returns
 `503 oidc_not_configured` and nobody can sign in at all.
@@ -156,6 +172,12 @@ configured bootstrap owner. When no bootstrap subject is pinned, the
 first-user membership check and owner insert run in one database transaction,
 so concurrent first logins cannot both become owners. Anonymous `/auth/me`
 responses retain the login-state shape but do not disclose workspace metadata.
+
+The liveness probe is `GET /api/v1/health/live` and returns only
+`{"status":"alive"}`. Readiness is `GET /api/v1/health/ready`; it performs a
+`SELECT 1` and returns `503 {"status":"not_ready"}` on failure without
+leaking database details. The legacy `/api/v1/health` endpoint remains for
+clients that consume its telemetry shape.
 
 ## Backing up and restoring the SQLite database
 
