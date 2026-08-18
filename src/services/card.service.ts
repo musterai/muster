@@ -769,7 +769,7 @@ export class CardService {
             action: 'claimed',
             actor_id: agentId,
             payload: { claim_expires_at: expiresIso },
-          });
+          }, tx);
         }
       }
 

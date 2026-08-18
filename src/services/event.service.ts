@@ -48,13 +48,14 @@ export class EventService {
     const boundedLimit = Number.isFinite(limit)
       ? Math.min(100, Math.max(1, Math.floor(limit)))
       : 100;
-    const cursor = await this.db.query<{ id: string }>(
-      'SELECT id FROM event WHERE project_id = ? AND id = ? LIMIT 1',
+    const cursor = await this.db.query<{ event_order: number | string | null }>(
+      'SELECT event_order FROM event WHERE project_id = ? AND id = ? LIMIT 1',
       [projectId, eventId],
     );
-    if (cursor.length === 0) {
+    if (cursor.length === 0 || cursor[0].event_order === null || cursor[0].event_order === undefined) {
       return { status: 'unavailable', events: [], truncated: false };
     }
+    const cursorOrder = Number(cursor[0].event_order);
 
     const rows = await this.db.query<any>(
       `SELECT e.*, COALESCE(a.name, u.display_name) as actor_name, p.kind as actor_kind
@@ -62,43 +63,60 @@ export class EventService {
          LEFT JOIN principal p ON e.actor_id = p.id
          LEFT JOIN agent a ON e.actor_id = a.id
          LEFT JOIN app_user u ON e.actor_id = u.id
-        WHERE e.project_id = ? AND e.id > ?
-        ORDER BY e.id ASC
+        WHERE e.project_id = ? AND e.event_order > ?
+        ORDER BY e.event_order ASC
         LIMIT ?`,
-      [projectId, eventId, boundedLimit + 1],
+      [projectId, cursorOrder, boundedLimit + 1],
     );
     const truncated = rows.length > boundedLimit;
     return {
       status: 'available',
       truncated,
-      events: rows.slice(0, boundedLimit).map(r => ({
+      events: rows.slice(0, boundedLimit).map(({ event_order: _eventOrder, ...r }) => ({
         ...r,
         payload: r.payload ? JSON.parse(r.payload) : null,
       })),
     };
   }
 
-  async create(data: CreateEvent): Promise<Event> {
+  async create(data: CreateEvent, transactionDb?: DatabaseAdapter): Promise<Event> {
     const id = ulid();
     const created_at = new Date().toISOString();
     const payload = data.payload ? JSON.stringify(data.payload) : null;
 
-    await this.db.execute(
-      `INSERT INTO event (id, project_id, entity_type, entity_id, action, actor_id, payload, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, data.project_id, data.entity_type, data.entity_id, data.action, data.actor_id || null, payload, created_at]
-    );
+    let event: Event | null = null;
+    const persist = async (tx: DatabaseAdapter): Promise<void> => {
+      const sequence = await tx.query<{ next_order: number | string }>(
+        `SELECT next_order FROM event_order_sequence WHERE id = 1${tx.dialect === 'postgres' ? ' FOR UPDATE' : ''}`,
+      );
+      if (sequence.length === 0) throw new Error('Event order sequence is not initialized');
+      const eventOrder = Number(sequence[0].next_order);
+      await tx.execute(
+        'UPDATE event_order_sequence SET next_order = next_order + 1 WHERE id = 1',
+      );
+      await tx.execute(
+        `INSERT INTO event (id, project_id, entity_type, entity_id, action, actor_id, payload, created_at, event_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, data.project_id, data.entity_type, data.entity_id, data.action, data.actor_id || null, payload, created_at, eventOrder]
+      );
 
-    const event: Event = {
-      id,
-      project_id: data.project_id,
-      entity_type: data.entity_type,
-      entity_id: data.entity_id,
-      action: data.action,
-      actor_id: data.actor_id || null,
-      payload: data.payload || null,
-      created_at,
+      event = {
+        id,
+        project_id: data.project_id,
+        entity_type: data.entity_type,
+        entity_id: data.entity_id,
+        action: data.action,
+        actor_id: data.actor_id || null,
+        payload: data.payload || null,
+        created_at,
+      };
     };
+    // Callers already inside a domain transaction pass its adapter through so
+    // SQLite does not queue a nested transaction behind itself (and Postgres
+    // keeps the event order allocation in the same transaction).
+    if (transactionDb) await persist(transactionDb);
+    else await this.db.transaction(persist);
+    if (!event) throw new Error('Event persistence did not produce an event');
 
     for (const listener of this.listeners) {
       try {
