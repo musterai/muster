@@ -183,7 +183,12 @@ export function createAuthMiddleware(
             verification.principal_id,
             verification.workspace_id,
           );
-          if (agent?.role_id) {
+          if (!isWorkspaceMember) {
+            // Do not carry a nominal agent role across operator offboarding;
+            // it would both leak stale role metadata and make a future
+            // boundary mistake more dangerous.
+            permissions = [];
+          } else if (agent?.role_id) {
             const role = await roleService.getById(agent.role_id);
             roleName = role?.name || null;
           }

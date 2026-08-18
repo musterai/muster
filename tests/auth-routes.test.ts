@@ -287,7 +287,9 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
         headers: { Authorization: `Bearer ${credential.token}` },
       });
       expect(denied.status).toBe(403);
-      expect((await denied.json()).required_permission).toBe('workspace.read');
+      const deniedBody = await denied.json();
+      expect(deniedBody.required_permission).toBe('workspace.read');
+      expect(deniedBody.your_role).toBeNull();
     } finally {
       (config.auth as any).mode = priorMode;
     }
