@@ -165,6 +165,18 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     expect(await meRes.json()).toMatchObject({ authenticated: false, admitted: false, user: null, role: null });
   });
 
+  it('honors a configured bootstrap owner instead of admitting an arbitrary first user', async () => {
+    (config.oidc as any).bootstrapOwnerSubject = 'sub-pinned-owner';
+
+    const unpinned = await signIn('sub-not-pinned', 'not-pinned@example.com');
+    expect(unpinned.callbackRes.status).toBe(403);
+    expect(extractCookieValue(unpinned.setCookie!, 'muster_session')).toBeNull();
+
+    const pinned = await signIn('sub-pinned-owner', 'pinned-owner@example.com');
+    expect(pinned.callbackRes.status).toBe(302);
+    expect(extractCookieValue(pinned.setCookie!, 'muster_session')).toBeTruthy();
+  });
+
   it('keeps health public while protected reads require admission', async () => {
     const priorMode = config.auth.mode;
     (config.auth as any).mode = 'enforced';

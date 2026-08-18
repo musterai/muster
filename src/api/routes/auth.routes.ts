@@ -87,7 +87,10 @@ export function createAuthRouter(
           const isFirstUser = await userService.isWorkspaceEmpty(workspaceId);
           const isBootstrapOwner = !!config.oidc.bootstrapOwnerSubject && config.oidc.bootstrapOwnerSubject === result.sub;
 
-          if (isFirstUser || isBootstrapOwner) {
+          // A configured bootstrap subject is authoritative.  Without a pin,
+          // the first successful login is the documented owner bootstrap.
+          const canBootstrap = isBootstrapOwner || (!config.oidc.bootstrapOwnerSubject && isFirstUser);
+          if (canBootstrap) {
             const ownerRole = await roleService.getByKey(workspaceId, 'owner');
             if (ownerRole) {
               await userService.addWorkspaceMember(workspaceId, user.id, ownerRole.id, null);
