@@ -20,7 +20,10 @@ export class DocumentService {
     const updated_at = created_at;
 
     const parent_id = data.parent_id || null;
-    const author_id = data.author_id || actorId || null;
+    // Transport boundaries pass the credential-derived actor separately. It
+    // must win over any legacy payload field so an authenticated caller can
+    // never forge document authorship or the initial version attribution.
+    const author_id = actorId || data.author_id || null;
     const status = 'draft';
     const version = 1;
 
@@ -125,7 +128,7 @@ export class DocumentService {
     // Who actually made this edit. Null when the caller is unidentified — the
     // version row must not inherit the previous author, or history credits the
     // wrong person.
-    const editor_id = data.author_id || actorId || null;
+    const editor_id = actorId || data.author_id || null;
     // The document row keeps its last known author rather than going null.
     const author_id = editor_id || existing.author_id;
     const change_summary = data.change_summary || 'Updated content';

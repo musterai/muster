@@ -154,6 +154,8 @@ export const OPERATION_PERMISSIONS = {
   // These remain named operations in the same policy catalog so their access
   // decisions cannot drift into a second, transport-specific permission map.
   health_check: WORKSPACE_READ,
+  liveness_check: WORKSPACE_READ,
+  readiness_check: WORKSPACE_READ,
   list_users: WORKSPACE_READ,
   update_member: 'member.manage',
   remove_member: 'member.manage',
@@ -161,8 +163,12 @@ export const OPERATION_PERMISSIONS = {
   create_token: WORKSPACE_READ,
   revoke_token: WORKSPACE_READ,
   lookup_device_authorization: WORKSPACE_READ,
-  approve_device_authorization: 'project.create',
-  deny_device_authorization: 'project.create',
+  // Device approval/denial is self-consent: the route derives the user and
+  // workspace from the authenticated context and accepts no caller-selected
+  // principal. Every admitted member, including an observer, may complete or
+  // reject a login for their own identity.
+  approve_device_authorization: WORKSPACE_READ,
+  deny_device_authorization: WORKSPACE_READ,
   get_oauth_authorization_details: WORKSPACE_READ,
   consent_oauth_authorization: 'agent.register',
   get_audit_log: 'workspace.admin',
@@ -181,6 +187,8 @@ export type OperationName = keyof typeof OPERATION_PERMISSIONS;
  */
 const REST_ONLY_OPERATIONS = new Set<OperationName>([
   'health_check',
+  'liveness_check',
+  'readiness_check',
   'list_users',
   'update_member',
   'remove_member',
@@ -222,6 +230,8 @@ export interface RoutePattern {
  */
 export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   // ── Health (always public) ──
+  { method: 'GET', pattern: /^\/api\/v1\/health\/live$/, operation: 'liveness_check', public: true },
+  { method: 'GET', pattern: /^\/api\/v1\/health\/ready$/, operation: 'readiness_check', public: true },
   { method: 'GET', pattern: /^\/api\/v1\/health$/, operation: 'health_check', public: true },
 
   // ── Projects ──

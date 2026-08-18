@@ -5,3 +5,5 @@ data/
 scratch/
 *.db
 .claude
+.env
+secrets/

@@ -144,7 +144,7 @@ describe('MUS-68: bounded SSE delivery', () => {
     expect(value.getStats()).toMatchObject({ eventsSent: 3, eventsDropped: 0 });
   });
 
-  it('keeps malformed cursors bounded and uses only the socket peer for IP caps', () => {
+  it('keeps malformed cursors bounded and uses Express trusted client IP for caps', () => {
     expect(parseLastEventId('01ARZ3NDEKTSV4RRFFQ69G5FAV')).toBe('01ARZ3NDEKTSV4RRFFQ69G5FAV');
     expect(parseLastEventId('contains whitespace')).toBeNull();
     expect(parseLastEventId('x'.repeat(129))).toBeNull();
@@ -153,7 +153,7 @@ describe('MUS-68: bounded SSE delivery', () => {
       socket: { remoteAddress: '127.0.0.1' },
       ip: '198.51.100.99',
     } as unknown as import('express').Request;
-    expect(getTrustedSSEClientIp(request)).toBe('127.0.0.1');
+    expect(getTrustedSSEClientIp(request)).toBe('198.51.100.99');
   });
 
   it('flushes bounded queued events after drain and cleans up on close', () => {

@@ -1,6 +1,8 @@
 // File: src/api/routes/kb.routes.ts
 import { Router, Request, Response, NextFunction } from 'express';
 import { KBService } from '../../services/kb.service.js';
+import { AuthContext } from '../../shared/auth-context.js';
+import { config } from '../../config/index.js';
 import { validateRequest } from '../middleware/validate.js';
 import {
   idParamsSchema,
@@ -20,6 +22,20 @@ import {
   kbSearchQuerySchema,
 } from '../schemas.js';
 
+/**
+ * A KB event actor/source is credential-derived in enforced mode. Legacy
+ * actor/source fields remain usable only for local open-mode attribution and
+ * are stripped before every service call, so they cannot override identity.
+ */
+function getActorId(req: Request, openModeClaim?: unknown): string | undefined {
+  const auth: AuthContext | undefined = (req as any).authContext;
+  if (auth?.principal?.id) return auth.principal.id;
+  if (config.auth.mode === 'open' && typeof openModeClaim === 'string' && openModeClaim.length > 0) {
+    return openModeClaim;
+  }
+  return undefined;
+}
+
 export function createKBRouter(kbService: KBService): Router {
   const router = Router();
 
@@ -37,7 +53,8 @@ export function createKBRouter(kbService: KBService): Router {
   // Create Knowledge Base
   router.post('/kbs', ...validateRequest({ body: kbCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const kb = await kbService.create(req.body, req.body?.actor_id || undefined);
+      const { actor_id: claimedActorId, ...data } = req.body;
+      const kb = await kbService.create(data, getActorId(req, claimedActorId));
       res.status(201).json(kb);
     } catch (err) {
       next(err);
@@ -117,9 +134,9 @@ export function createKBRouter(kbService: KBService): Router {
   // Link Project to KB
   router.post('/kbs/:id/link', ...validateRequest({ body: kbProjectLinkSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { project_id } = req.body;
+      const { project_id, actor_id: claimedActorId } = req.body;
       if (!project_id) return res.status(400).json({ error: 'project_id is required' });
-      await kbService.linkProject(req.params.id, project_id, req.body?.actor_id || undefined);
+      await kbService.linkProject(req.params.id, project_id, getActorId(req, claimedActorId));
       res.status(200).json({ success: true });
     } catch (err) {
       next(err);
@@ -152,7 +169,8 @@ export function createKBRouter(kbService: KBService): Router {
   // Upsert Entity
   router.post('/kbs/entities', ...validateRequest({ body: kbEntityCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const entity = await kbService.upsertEntity(req.body, req.body?.actor_id || undefined);
+      const { actor_id: claimedActorId, ...data } = req.body;
+      const entity = await kbService.upsertEntity(data, getActorId(req, claimedActorId));
       res.status(201).json(entity);
     } catch (err) {
       next(err);
@@ -162,7 +180,8 @@ export function createKBRouter(kbService: KBService): Router {
   // Update Entity
   router.put('/kbs/entities/:id', ...validateRequest({ body: kbEntityUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const entity = await kbService.updateEntity(req.params.id, req.body, req.body?.actor_id || undefined);
+      const { actor_id: claimedActorId, ...data } = req.body;
+      const entity = await kbService.updateEntity(req.params.id, data, getActorId(req, claimedActorId));
       res.json(entity);
     } catch (err) {
       next(err);
@@ -194,7 +213,8 @@ export function createKBRouter(kbService: KBService): Router {
   // Add Gained Knowledge Fact
   router.post('/kbs/facts', ...validateRequest({ body: kbFactCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const fact = await kbService.addFact(req.body, req.body?.actor_id || undefined);
+      const { actor_id: claimedActorId, source_principal_id: claimedSourceId, ...data } = req.body;
+      const fact = await kbService.addFact(data, getActorId(req, claimedActorId ?? claimedSourceId));
       res.status(201).json(fact);
     } catch (err) {
       next(err);
@@ -204,7 +224,8 @@ export function createKBRouter(kbService: KBService): Router {
   // Update Fact
   router.put('/kbs/facts/:id', ...validateRequest({ body: kbFactUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const fact = await kbService.updateFact(req.params.id, req.body, req.body?.actor_id || undefined);
+      const { actor_id: claimedActorId, ...data } = req.body;
+      const fact = await kbService.updateFact(req.params.id, data, getActorId(req, claimedActorId));
       res.json(fact);
     } catch (err) {
       next(err);
@@ -214,7 +235,7 @@ export function createKBRouter(kbService: KBService): Router {
   // Delete Fact
   router.delete('/kbs/facts/:id', ...validateRequest({ body: kbActorSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await kbService.deleteFact(req.params.id, req.body?.actor_id || undefined);
+      await kbService.deleteFact(req.params.id, getActorId(req, req.body?.actor_id));
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -224,7 +245,8 @@ export function createKBRouter(kbService: KBService): Router {
   // Add Graph Relation
   router.post('/kbs/relations', ...validateRequest({ body: kbRelationCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const relation = await kbService.addRelation(req.body, req.body?.actor_id || undefined);
+      const { actor_id: claimedActorId, ...data } = req.body;
+      const relation = await kbService.addRelation(data, getActorId(req, claimedActorId));
       res.status(201).json(relation);
     } catch (err) {
       next(err);

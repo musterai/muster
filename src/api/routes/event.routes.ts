@@ -22,13 +22,13 @@ export function parseLastEventId(value: string | undefined): string | null {
 }
 
 /**
- * Muster's documented reverse-proxy posture does not enable Express
- * `trust proxy`. Use the socket peer directly so a caller cannot spoof the
- * per-IP cap with X-Forwarded-For. Behind a proxy this intentionally counts
- * the proxy peer until an explicit, trusted-proxy policy is introduced.
+ * Express resolves `req.ip` from the socket peer unless that peer is in the
+ * deployment's explicit trust-proxy allowlist. Direct spoofed forwarding
+ * headers remain inert, while the fixed Caddy edge can supply the real client
+ * address instead of collapsing every proxied stream into one IP bucket.
  */
 export function getTrustedSSEClientIp(req: Request): string | null {
-  return req.socket.remoteAddress || null;
+  return req.ip || req.socket.remoteAddress || null;
 }
 
 export function createEventRouter(eventService: EventService, sseManager: SSEManager): Router {

@@ -188,12 +188,11 @@ describe('Atomic card claiming and lease expiry', () => {
     );
     const beforeEvents = await db.query<{ id: string }>('SELECT id FROM event WHERE entity_id = ?', [first.id]);
 
-    // Calling the registered handler directly bypasses SDK parsing, so this
-    // also proves the service boundary is a no-op safety net.
-    await expect(tool.handler({ card_id: first.id }, {})).rejects.toMatchObject({
-      code: 'VALIDATION_ERROR',
-      details: { code: 'MOVE_INTENT_REQUIRED' },
-    });
+    // Calling the registered handler directly bypasses the SDK transport, but
+    // MUS-59's central registration guard still applies MUS-76's complete
+    // cross-field schema before the service can rebalance or emit an event.
+    await expect(tool.handler({ card_id: first.id }, {}))
+      .rejects.toThrow(/target_column_id or position is required/);
 
     const after = await db.query<{ id: string; column_id: string; position: string }>(
       'SELECT id, column_id, position FROM card WHERE column_id = ? ORDER BY position, id', [first.column_id],

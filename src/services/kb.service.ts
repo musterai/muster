@@ -322,7 +322,10 @@ export class KBService {
 
     const category = data.category || 'general';
     const confidence = data.confidence !== undefined ? data.confidence : 1.0;
-    const sourceAgentId = data.source_principal_id || actorId || null;
+    // `actorId` originates at a transport boundary from AuthContext. It is
+    // authoritative over the legacy source field so provenance cannot be
+    // spoofed by a caller who is otherwise allowed to add knowledge.
+    const sourceAgentId = actorId || data.source_principal_id || null;
 
     await db.execute(
       `INSERT INTO kb_fact (id, kb_id, entity_id, title, content, category, confidence, source_principal_id, created_at, updated_at)
