@@ -529,6 +529,18 @@ describe('MUS-22: Permission enforcement', () => {
       }));
   });
 
+  it('denies writes to removed members even when stale role permissions remain', () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth(['project.create', 'workspace.admin'], 'owner', undefined, false);
+    expect(() => requireRestPermission('POST', '/api/v1/projects', auth))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+    expect(() => requirePermission('create_project', auth)).toThrowError(expect.objectContaining({
+      refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+    }));
+  });
+
   it('default-denies unmapped GET routes for admitted members and admins', () => {
     (config.auth as any).mode = 'enforced';
     expect(() => requireRestPermission('GET', '/api/v1/new-unmapped-data', makeAuth([])))

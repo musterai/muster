@@ -395,6 +395,14 @@ export function requirePermission(
     throw new PermissionDeniedError('(unknown — unmapped tool)', auth.role_name || null);
   }
 
+  // Membership is a prerequisite for every workspace operation, not just
+  // implicit reads.  In particular, an agent can retain a nominal role after
+  // its operator is removed; allowing that stale permission set to authorize
+  // a write would turn offboarding into a privilege-retention path.
+  if (!auth.is_workspace_member) {
+    throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
+  }
+
   const required = resolvePermission(spec, args);
 
   if (required === WORKSPACE_READ) {
@@ -431,6 +439,13 @@ export function requireRestPermission(
     if (!matches) continue;
 
     if (route.public) return;
+
+    // Public routes are returned above; every other mapped operation is
+    // workspace-scoped, including mutations whose role may still contain
+    // permissions after membership removal.
+    if (!auth.is_workspace_member) {
+      throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
+    }
 
     const required = resolvePermission(OPERATION_PERMISSIONS[route.operation], args);
 

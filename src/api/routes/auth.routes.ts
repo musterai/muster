@@ -4,7 +4,7 @@
 //
 // GET  /auth/login     — redirect to the IdP's authorization endpoint
 // GET  /auth/callback  — exchange the code, resolve/create the user, admit
-//                        into the workspace if possible, start a session
+//                        into the workspace, then start a session
 // POST /auth/logout    — revoke the session server-side
 // GET  /auth/me        — report the current authenticated/admitted state
 //
@@ -112,9 +112,17 @@ export function createAuthRouter(
         }
       }
 
-      // A session is created regardless of admission — the user IS
-      // authenticated; "admitted" (workspace membership) is a separate gate
-      // enforced by requireRestPermission/requirePermission on every route.
+      // Identity authentication and workspace admission are separate steps.
+      // Do not issue a usable workspace credential to an IdP identity that
+      // has neither bootstrap-owner status nor an invitation/membership.
+      // Keep the response deliberately generic so callback behavior cannot be
+      // used to enumerate workspace members or invitations.
+      if (!admitted) {
+        res.setHeader('Set-Cookie', clearCookieHeader(SESSION_COOKIE_NAME));
+        res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+        return;
+      }
+
       const session = await sessionService.create(user.id, {
         userAgent: req.headers['user-agent'] || null,
         ip: req.ip || null,
@@ -129,8 +137,7 @@ export function createAuthRouter(
       }));
 
       const destination = result.redirectTo || '/';
-      const separator = destination.includes('?') ? '&' : '?';
-      res.redirect(`${destination}${separator}admitted=${admitted}`);
+      res.redirect(destination);
     } catch (err) {
       next(err);
     }
@@ -161,7 +168,12 @@ export function createAuthRouter(
         return;
       }
 
-      const admitted = auth.permissions.length > 0 || !!auth.role_name;
+      if (!auth.is_workspace_member) {
+        res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+        return;
+      }
+
+      const admitted = true;
       const userRows = await db.query<any>(
         'SELECT id, email, display_name, avatar_url, status FROM app_user WHERE id = ?',
         [auth.principal.id],

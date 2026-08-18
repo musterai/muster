@@ -27,6 +27,7 @@ import { AuditService } from '../src/services/audit.service.js';
 import { createAuthRouter } from '../src/api/routes/auth.routes.js';
 import { createAuthMiddleware } from '../src/api/middleware/auth.js';
 import { permissionGuard } from '../src/api/middleware/permission-guard.js';
+import { createHealthRouter } from '../src/api/routes/health.routes.js';
 import { config } from '../src/config/index.js';
 import { FakeOidcProvider } from './helpers/fake-oidc-provider.js';
 
@@ -89,6 +90,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     app.use(createAuthMiddleware(db, tokenService, roleService, agentService, sessionService));
     const v1 = express.Router();
     v1.use(permissionGuard);
+    v1.use(createHealthRouter(db));
     v1.use(createAuthRouter(db, oidcService, sessionService, userService, invitationService, roleService, auditService));
     // Minimal protected collection used to exercise the real AuthContext +
     // permissionGuard boundary without pulling unrelated project services
@@ -120,7 +122,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
   });
 
   /** Drives login -> fake IdP consent -> callback, returning the session cookie header and the callback response. */
-  async function signIn(sub: string, email: string | null): Promise<{ setCookie: string; callbackRes: Response }> {
+  async function signIn(sub: string, email: string | null): Promise<{ setCookie: string | undefined; callbackRes: Response }> {
     provider.setNextIdentity(sub, email);
 
     const loginRes = await fetch(`${baseUrl}/api/v1/auth/login`, { redirect: 'manual' });
@@ -131,13 +133,12 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     const callbackRes = await fetch(callbackUrl.href.replace(callbackUrl.origin, baseUrl), { redirect: 'manual' });
 
     const setCookie = parseSetCookie(callbackRes.headers);
-    expect(setCookie).toBeDefined();
-    return { setCookie: setCookie!, callbackRes };
+    return { setCookie: setCookie || undefined, callbackRes };
   }
 
   it('admits the first user to sign in as workspace owner', async () => {
     const { setCookie } = await signIn('sub-first', 'first@example.com');
-    const token = extractCookieValue(setCookie, 'muster_session');
+    const token = extractCookieValue(setCookie!, 'muster_session');
 
     const meRes = await fetch(`${baseUrl}/api/v1/auth/me`, { headers: { Cookie: `muster_session=${token}` } });
     const me = await meRes.json();
@@ -147,27 +148,75 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     expect(me.role).toBe('Owner');
   });
 
-  it('authenticates but does not admit a user with no invitation and no bootstrap claim', async () => {
+  it('does not issue a session to a user with no invitation or bootstrap claim', async () => {
     // First user becomes owner — burn that slot first.
     await signIn('sub-owner', 'owner@example.com');
 
-    const { setCookie } = await signIn('sub-uninvited', 'uninvited@example.com');
-    const token = extractCookieValue(setCookie, 'muster_session');
+    const { setCookie, callbackRes } = await signIn('sub-uninvited', 'uninvited@example.com');
 
-    const meRes = await fetch(`${baseUrl}/api/v1/auth/me`, { headers: { Cookie: `muster_session=${token}` } });
-    const me = await meRes.json();
+    expect(callbackRes.status).toBe(403);
+    expect(await callbackRes.json()).toEqual({ error: 'forbidden', message: 'Access denied.' });
+    expect(extractCookieValue(setCookie!, 'muster_session')).toBeNull();
 
-    expect(me.authenticated).toBe(true);
-    expect(me.admitted).toBe(false);
+    // The callback's generic refusal must not create a credential that can
+    // be replayed to introspect the user or enumerate membership.
+    const meRes = await fetch(`${baseUrl}/api/v1/auth/me`);
+    expect(meRes.status).toBe(200);
+    expect(await meRes.json()).toMatchObject({ authenticated: false, admitted: false, user: null, role: null });
+  });
+
+  it('keeps health public while protected reads require admission', async () => {
+    const priorMode = config.auth.mode;
+    (config.auth as any).mode = 'enforced';
+    try {
+      const healthRes = await fetch(`${baseUrl}/api/v1/health`);
+      expect(healthRes.status).toBe(200);
+      expect((await healthRes.json()).status).toBe('ok');
+
+      const protectedRes = await fetch(`${baseUrl}/api/v1/projects`);
+      expect(protectedRes.status).toBe(401);
+      expect(await protectedRes.json()).toEqual({ error: 'unauthorized', message: 'Authentication required.' });
+
+      const futureAuthRoute = await fetch(`${baseUrl}/api/v1/auth/future`, { redirect: 'manual' });
+      expect(futureAuthRoute.status).toBe(401);
+      expect(await futureAuthRoute.json()).toEqual({ error: 'unauthorized', message: 'Authentication required.' });
+    } finally {
+      (config.auth as any).mode = priorMode;
+    }
+  });
+
+  it('revokes an existing browser session when membership is removed', async () => {
+    const { setCookie } = await signIn('sub-session-owner', 'session-owner@example.com');
+    const token = extractCookieValue(setCookie!, 'muster_session');
+    const users = await db.query<{ id: string }>(
+      `SELECT u.id FROM app_user u
+        JOIN identity i ON i.user_id = u.id
+       WHERE i.subject = ?`,
+      ['sub-session-owner'],
+    );
+    const userId = users[0].id;
 
     const priorMode = config.auth.mode;
     (config.auth as any).mode = 'enforced';
     try {
-      const protectedRes = await fetch(`${baseUrl}/api/v1/projects`, {
+      await db.execute(
+        'DELETE FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+        [workspaceId, userId],
+      );
+
+      // The first stale request is refused without exposing the member row.
+      const denied = await fetch(`${baseUrl}/api/v1/projects`, {
         headers: { Cookie: `muster_session=${token}` },
       });
-      expect(protectedRes.status).toBe(403);
-      expect((await protectedRes.json()).required_permission).toBe('workspace.read');
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual(expect.objectContaining({ error: 'forbidden' }));
+
+      // The membership failure also invalidates the session server-side.
+      const replay = await fetch(`${baseUrl}/api/v1/projects`, {
+        headers: { Cookie: `muster_session=${token}` },
+      });
+      expect(replay.status).toBe(401);
+      expect(await replay.json()).toEqual({ error: 'unauthorized', message: 'Authentication required.' });
     } finally {
       (config.auth as any).mode = priorMode;
     }
@@ -182,7 +231,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
       role_id: observerRole!.id,
     });
     const { setCookie } = await signIn('sub-observer', 'observer@example.com');
-    const token = extractCookieValue(setCookie, 'muster_session');
+    const token = extractCookieValue(setCookie!, 'muster_session');
 
     const priorMode = config.auth.mode;
     (config.auth as any).mode = 'enforced';
@@ -251,7 +300,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     const invite = await invitationService.create({ workspace_id: workspaceId, email: 'invited@example.com', role_id: juniorRole!.id });
 
     const { setCookie } = await signIn('sub-invited', 'invited@example.com');
-    const token = extractCookieValue(setCookie, 'muster_session');
+    const token = extractCookieValue(setCookie!, 'muster_session');
 
     const meRes = await fetch(`${baseUrl}/api/v1/auth/me`, { headers: { Cookie: `muster_session=${token}` } });
     const me = await meRes.json();
@@ -270,7 +319,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
 
   it('logout invalidates the session server-side', async () => {
     const { setCookie } = await signIn('sub-logout', 'logout@example.com');
-    const token = extractCookieValue(setCookie, 'muster_session');
+    const token = extractCookieValue(setCookie!, 'muster_session');
 
     const meBefore = await fetch(`${baseUrl}/api/v1/auth/me`, { headers: { Cookie: `muster_session=${token}` } });
     expect((await meBefore.json()).authenticated).toBe(true);
