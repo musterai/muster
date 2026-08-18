@@ -133,6 +133,34 @@ export class CardService {
   }
 
   /**
+   * Resolve a move target only when its board belongs to the credential's
+   * workspace. Missing and foreign column IDs deliberately produce the same
+   * refusal so target selectors cannot be used for workspace enumeration.
+   */
+  async assertColumnWorkspaceScope(
+    columnId: string,
+    auth: AuthContext | undefined,
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<string> {
+    if (config.auth.mode === 'open') return columnId;
+    auth = await assertActiveWorkspacePrincipal(adapter, auth);
+
+    const rows = await adapter.query<{ id: string; workspace_id: string }>(
+      `SELECT col.id, p.workspace_id
+       FROM "column" col
+       JOIN board b ON b.id = col.board_id
+       JOIN project p ON p.id = b.project_id
+       WHERE col.id = ?
+       LIMIT 1`,
+      [columnId],
+    );
+    if (rows.length === 0 || rows[0].workspace_id !== auth.workspace_id) {
+      return this.denyCardScope(auth);
+    }
+    return rows[0].id;
+  }
+
+  /**
    * Enforce the assignment rule for update/move at the service boundary.
    * A user is in scope when assigned directly or through an agent they
    * operate; an agent is in scope only through its own live registration.
@@ -718,6 +746,10 @@ export class CardService {
       if (!initial) throw new NotFoundError(`Card with ID ${cardId} not found`);
       await this.assertCardMutationScope(cardId, options.auth, tx);
       const initialTarget = data.target_column_id ?? initial.column_id;
+      // The target selector is independently scoped on every serialization
+      // attempt. Do this before lane locks, capacity reads, rank rewrites, or
+      // events so a missing/foreign target is an observable no-op.
+      await this.assertColumnWorkspaceScope(initialTarget, options.auth, tx);
       if (tx.dialect === 'postgres') {
         const laneIds = [...new Set([initial.column_id, initialTarget])].sort();
         for (const laneId of laneIds) {

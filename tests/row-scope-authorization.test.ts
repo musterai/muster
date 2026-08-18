@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { createDatabaseAdapter } from '../src/db/factory.js';
 import type { DatabaseAdapter } from '../src/db/adapter.js';
 import { Migrator } from '../src/db/migrator.js';
-import { AgentService, AuditService, CardService, CommentService, RoleService } from '../src/services/index.js';
+import { AgentService, AuditService, CardService, CommentService, EventService, RoleService } from '../src/services/index.js';
 import { createCardRouter } from '../src/api/routes/card.routes.js';
 import { createAgentRouter } from '../src/api/routes/agent.routes.js';
 import { errorHandler } from '../src/api/middleware/error-handler.js';
@@ -65,7 +65,7 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'muster-row-scope-'));
     db = createDatabaseAdapter(path.join(tempDir, 'muster.db'));
     await new Migrator(db, path.join(process.cwd(), 'src/db/migrations')).run();
-    cardService = new CardService(db);
+    cardService = new CardService(db, new EventService(db));
     commentService = new CommentService(db);
     agentService = new AgentService(db);
     auditService = new AuditService(db);
@@ -219,6 +219,48 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     const allowedRest = await rest('PUT', '/cards/card-own-agent', { title: 'rest-owned' });
     expect(allowedRest.status).toBe(200);
     await expect(server._registeredTools.move_card.handler({ card_id: 'card-own-user', target_column_id: colA2 }, {})).resolves.toBeTruthy();
+  });
+
+  it('rejects missing and cross-workspace move targets before rank, card, or event mutation across service, REST, and MCP', async () => {
+    currentAuth = juniorAuth();
+    const snapshot = () => db.query<{ id: string; column_id: string; position: string }>(
+      'SELECT id, column_id, position FROM card ORDER BY id',
+    );
+    const movedEvents = () => db.query<{ id: string }>(
+      "SELECT id FROM event WHERE entity_type = 'card' AND action = 'moved'",
+    );
+    const beforeCards = await snapshot();
+    const beforeEvents = await movedEvents();
+
+    await expect(cardService.move('card-own-user', { target_column_id: colB }, userA, { auth: currentAuth }))
+      .rejects.toMatchObject({
+        refusal: expect.objectContaining({ required_permission: 'card.assign_others' }),
+      });
+
+    const restDenied = await rest('PATCH', '/cards/card-own-agent/move', { target_column_id: 'missing-column' });
+    expect(restDenied.status).toBe(403);
+    expect(await restDenied.json()).toMatchObject({
+      error: 'forbidden',
+      required_permission: 'card.assign_others',
+    });
+
+    const server = mcp(currentAuth);
+    await expect(server._registeredTools.move_card.handler({ card_id: 'card-coassigned', target_column_id: colB }, {}))
+      .rejects.toMatchObject({
+        refusal: expect.objectContaining({ required_permission: 'card.assign_others' }),
+      });
+
+    await expect(cardService.move('card-unassigned', { target_column_id: colB }, userA, { auth: adminAuth() }))
+      .rejects.toMatchObject({
+        refusal: expect.objectContaining({ required_permission: 'card.assign_others' }),
+      });
+
+    expect(await snapshot()).toEqual(beforeCards);
+    expect(await movedEvents()).toEqual(beforeEvents);
+
+    const valid = await cardService.move('card-own-user', { target_column_id: colA2 }, userA, { auth: currentAuth });
+    expect(valid.column_id).toBe(colA2);
+    expect(await movedEvents()).toHaveLength(beforeEvents.length + 1);
   });
 
   it('treats claim IDs as selectors in REST and MCP and never claims as another operator', async () => {
