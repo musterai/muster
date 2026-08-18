@@ -233,6 +233,7 @@ export class DeviceGrantService {
           row.principal_id,
           row.workspace_id,
           { name: 'muster login (device)' },
+          tx,
         );
       } catch (error) {
         if (!this.isPolicyFailure(error)) throw error;

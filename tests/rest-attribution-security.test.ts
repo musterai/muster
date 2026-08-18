@@ -72,7 +72,11 @@ describe('MUS-59 REST credential-derived attribution', () => {
     }));
 
     const baseUrl = await start(app => {
-      app.use(createDocumentRouter({ create, update } as any, { logAs: vi.fn() } as any));
+      app.use(createDocumentRouter(
+        { transaction: vi.fn() } as any,
+        { create, update } as any,
+        { logAs: vi.fn() } as any,
+      ));
     });
 
     const createResponse = await fetch(`${baseUrl}/projects/project-1/documents`, {

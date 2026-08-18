@@ -118,4 +118,21 @@ describe('MUS-17: card routes thread the authenticated actor through to events',
     const moveEvt = events.find(e => e.entity_type === 'card' && e.action === 'moved');
     expect(moveEvt?.actor_id).toBe(actingUserId);
   });
+
+  it('PATCH /cards/:id/move rejects an empty intent without changing the card or events', async () => {
+    const before = await db.query<{ column_id: string; position: string; updated_at: string }>(
+      'SELECT column_id, position, updated_at FROM card WHERE id = ?', [cardId],
+    );
+    const res = await fetch(`${baseUrl}/cards/${cardId}/move`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const after = await db.query<{ column_id: string; position: string; updated_at: string }>(
+      'SELECT column_id, position, updated_at FROM card WHERE id = ?', [cardId],
+    );
+    expect(after).toEqual(before);
+    expect(await eventService.list('proj-1')).toEqual([]);
+  });
 });

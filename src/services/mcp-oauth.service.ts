@@ -283,7 +283,10 @@ export class McpOAuthService {
 
       const tokenService = this.tokenServiceFor(tx);
       if (row.current_api_token_id) {
-        await tokenService.revoke(row.current_api_token_id);
+        // This refresh rotation already owns the transaction. Passing its
+        // adapter is required on SQLite: starting a nested transaction would
+        // queue behind this callback, which is waiting for the nested call.
+        await tokenService.revoke(row.current_api_token_id, tx);
       }
 
       try {
@@ -318,7 +321,7 @@ export class McpOAuthService {
     const auditService = this.auditServiceFor(db);
     for (const row of rows) {
       if (row.current_api_token_id) {
-        await tokenService.revoke(row.current_api_token_id);
+        await tokenService.revoke(row.current_api_token_id, db);
         await auditService?.log({
           workspace_id: row.workspace_id,
           actor: { id: row.agent_principal_id, kind: 'agent' },
@@ -356,11 +359,13 @@ export class McpOAuthService {
           params.workspaceId,
           params.agentPrincipalId,
           tokenData,
+          db,
         )
       : await tokenService.issueForCurrentAgentOwner(
           params.agentPrincipalId,
           params.workspaceId,
           tokenData,
+          db,
         );
 
     const refreshToken = crypto.randomBytes(32).toString('hex');

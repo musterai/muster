@@ -6,6 +6,7 @@ import { AuthContext } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { validateRequest } from '../middleware/validate.js';
 import { documentCreateSchema, documentListQuerySchema, documentQuerySchema, documentStatusSchema, documentUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
+import { DatabaseAdapter } from '../../db/adapter.js';
 
 /**
  * Credentials are the only identity assertion in enforced mode. The legacy
@@ -21,7 +22,7 @@ function getActorId(req: Request, openModeClaim?: unknown): string | undefined {
   return undefined;
 }
 
-export function createDocumentRouter(documentService: DocumentService, auditService: AuditService): Router {
+export function createDocumentRouter(db: DatabaseAdapter, documentService: DocumentService, auditService: AuditService): Router {
   const router = Router();
 
   router.get('/projects/:projectId/documents', ...validateRequest({ query: documentListQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
@@ -80,17 +81,21 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
 
   router.patch('/documents/:id/status', ...validateRequest({ body: documentStatusSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const doc = await documentService.setStatus(req.params.id, req.body.status, getActorId(req));
-      if (req.body.status === 'approved') {
-        const auth: AuthContext | undefined = (req as any).authContext;
-        await auditService.logAs(auth, {
-          action: 'document.approve',
-          target_type: 'document',
-          target_id: doc.id,
-          payload: { title: doc.title, project_id: doc.project_id },
-          ip: req.ip,
-        });
-      }
+      let doc: Awaited<ReturnType<DocumentService['setStatus']>> | undefined;
+      await db.transaction(async tx => {
+        doc = await documentService.setStatus(req.params.id, req.body.status, getActorId(req), tx);
+        if (req.body.status === 'approved') {
+          const auth: AuthContext | undefined = (req as any).authContext;
+          await auditService.logAs(auth, {
+            action: 'document.approve',
+            target_type: 'document',
+            target_id: doc.id,
+            payload: { title: doc.title, project_id: doc.project_id },
+            ip: req.ip,
+          }, tx);
+        }
+      });
+      if (!doc) throw new Error('Document status update did not return a document');
       res.json(doc);
     } catch (err) {
       next(err);

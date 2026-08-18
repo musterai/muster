@@ -139,7 +139,7 @@ describe('MUS-22: Permission enforcement', () => {
   // ================================================================
   // Acceptance criterion 1: every registered MCP tool is mapped
   // ================================================================
-  it('AC1: the runtime MCP registry and canonical policy catalog are a complete bidirectional inventory', async () => {
+  it('AC1: the complete MCP permission inventory also rejects an empty move before service execution', async () => {
     const services: Services = {
       projectService,
       boardService,
@@ -158,6 +158,16 @@ describe('MUS-22: Permission enforcement', () => {
     // expected-name array that can drift alongside a newly added tool.
     expect(() => assertMcpToolPermissionInventory(server)).not.toThrow();
     expect(getRegisteredMcpToolNames(server)).toEqual(Object.keys(TOOL_PERMISSIONS).sort());
+
+    // MUS-76's cross-field move intent must survive MUS-59's modern
+    // registerTool boundary normalization. A card selector alone is not a
+    // move and must fail before CardService can rebalance or emit an event.
+    const moveSpy = vi.spyOn(cardService, 'move');
+    await expect((server as any)._registeredTools.move_card.handler({
+      card_id: 'MUS-59',
+    }, {})).rejects.toThrow(/target_column_id or position is required/);
+    expect(moveSpy).not.toHaveBeenCalled();
+    expect(() => assertMcpToolPermissionInventory(server)).not.toThrow();
   });
 
   it('MUS-59: the central MCP boundary rejects unmapped registration and wraps an otherwise unguarded handler', async () => {

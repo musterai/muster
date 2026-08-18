@@ -110,12 +110,12 @@ export class TokenService {
    * one of the grant helpers) so a caller cannot select another principal or
    * workspace by supplying database identifiers.
    */
-  async authorize(auth: AuthContext, data: TokenIssueInput): Promise<NormalizedTokenIssue> {
+  async authorize(auth: AuthContext, data: TokenIssueInput, adapter: DatabaseAdapter = this.db): Promise<NormalizedTokenIssue> {
     const normalized = this.normalizeIssueInput(auth, data);
-    const actor = await this.resolveActor(auth.principal!.id, auth.principal!.kind, normalized.workspace_id);
+    const actor = await this.resolveActor(auth.principal!.id, auth.principal!.kind, normalized.workspace_id, adapter);
     if (!actor) throw this.denied(auth);
 
-    const target = await this.resolveTarget(normalized.principal_id, normalized.workspace_id);
+    const target = await this.resolveTarget(normalized.principal_id, normalized.workspace_id, adapter);
     if (!target) {
       // Deliberately collapse unknown, cross-workspace and inactive targets
       // into the same refusal so target existence cannot be enumerated.
@@ -149,9 +149,10 @@ export class TokenService {
   }
 
   /** Authorize and mint a token for an authenticated request. */
-  async issue(auth: AuthContext, data: TokenIssueInput): Promise<CreatedApiToken> {
-    const normalized = await this.authorize(auth, data);
-    return this.create(normalized);
+  async issue(auth: AuthContext, data: TokenIssueInput, adapter?: DatabaseAdapter): Promise<CreatedApiToken> {
+    if (!adapter) return this.db.transaction(tx => this.issue(auth, data, tx));
+    const normalized = await this.authorize(auth, data, adapter);
+    return this.create(normalized, adapter);
   }
 
   /**
@@ -163,12 +164,14 @@ export class TokenService {
     principalId: string,
     workspaceId: string,
     data: Omit<TokenIssueInput, 'principal_id' | 'workspace_id'> = {},
+    adapter?: DatabaseAdapter,
   ): Promise<CreatedApiToken> {
-    const kind = await this.principalKind(principalId);
+    if (!adapter) return this.db.transaction(tx => this.issueForPrincipal(principalId, workspaceId, data, tx));
+    const kind = await this.principalKind(principalId, adapter);
     if (!kind) throw this.denied();
     return this.issue(
       this.grantAuthContext(kind, principalId, workspaceId),
-      { ...data, principal_id: principalId, workspace_id: workspaceId },
+      { ...data, principal_id: principalId, workspace_id: workspaceId }, adapter,
     );
   }
 
@@ -183,10 +186,12 @@ export class TokenService {
     workspaceId: string,
     agentPrincipalId: string,
     data: Omit<TokenIssueInput, 'principal_id' | 'workspace_id'> = {},
+    adapter?: DatabaseAdapter,
   ): Promise<CreatedApiToken> {
+    if (!adapter) return this.db.transaction(tx => this.issueForOperatorOwnedAgent(operatorUserId, workspaceId, agentPrincipalId, data, tx));
     return this.issue(
       this.grantAuthContext('user', operatorUserId, workspaceId),
-      { ...data, principal_id: agentPrincipalId, workspace_id: workspaceId },
+      { ...data, principal_id: agentPrincipalId, workspace_id: workspaceId }, adapter,
     );
   }
 
@@ -196,10 +201,11 @@ export class TokenService {
     workspaceId: string,
     agentPrincipalId: string,
     data: Omit<TokenIssueInput, 'principal_id' | 'workspace_id'> = {},
+    adapter?: DatabaseAdapter,
   ): Promise<void> {
     await this.authorize(
       this.grantAuthContext('user', operatorUserId, workspaceId),
-      { ...data, principal_id: agentPrincipalId, workspace_id: workspaceId },
+      { ...data, principal_id: agentPrincipalId, workspace_id: workspaceId }, adapter,
     );
   }
 
@@ -208,8 +214,10 @@ export class TokenService {
     agentPrincipalId: string,
     workspaceId: string,
     data: Omit<TokenIssueInput, 'principal_id' | 'workspace_id'> = {},
+    adapter?: DatabaseAdapter,
   ): Promise<CreatedApiToken> {
-    const rows = await this.db.query<{ operator_user_id: string | null }>(
+    if (!adapter) return this.db.transaction(tx => this.issueForCurrentAgentOwner(agentPrincipalId, workspaceId, data, tx));
+    const rows = await adapter.query<{ operator_user_id: string | null }>(
       `SELECT operator_user_id
          FROM agent
         WHERE id = ? AND workspace_id = ?`,
@@ -217,7 +225,7 @@ export class TokenService {
     );
     const operatorUserId = rows[0]?.operator_user_id;
     if (!operatorUserId) throw this.denied();
-    return this.issueForOperatorOwnedAgent(operatorUserId, workspaceId, agentPrincipalId, data);
+    return this.issueForOperatorOwnedAgent(operatorUserId, workspaceId, agentPrincipalId, data, adapter);
   }
 
   /**
@@ -229,7 +237,7 @@ export class TokenService {
     workspace_id: string;
     name: string;
     expires_at?: string | null;
-  }): Promise<CreatedApiToken> {
+  }, adapter: DatabaseAdapter = this.db): Promise<CreatedApiToken> {
     const id = ulid();
     const prefix = randomHex(PREFIX_LENGTH / 2); // 8 hex chars
     const secret = randomHex(SECRET_BYTES); // 48 hex chars
@@ -237,7 +245,7 @@ export class TokenService {
     const tokenHash = hashToken(token);
     const now = new Date().toISOString();
 
-    await this.db.execute(
+    await adapter.execute(
       `INSERT INTO api_token (id, principal_id, workspace_id, name, token_hash, prefix, expires_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.principal_id, data.workspace_id, data.name, tokenHash, prefix, data.expires_at || null, now],
@@ -300,8 +308,8 @@ export class TokenService {
     };
   }
 
-  private async principalKind(principalId: string): Promise<PrincipalKind | null> {
-    const rows = await this.db.query<{ kind: PrincipalKind }>('SELECT kind FROM principal WHERE id = ?', [principalId]);
+  private async principalKind(principalId: string, adapter: DatabaseAdapter = this.db): Promise<PrincipalKind | null> {
+    const rows = await adapter.query<{ kind: PrincipalKind }>('SELECT kind FROM principal WHERE id = ?', [principalId]);
     return rows[0]?.kind || null;
   }
 
@@ -316,12 +324,12 @@ export class TokenService {
     };
   }
 
-  private async resolveActor(id: string, kind: PrincipalKind, workspaceId: string): Promise<PrincipalSnapshot | null> {
-    const principalRows = await this.db.query<{ kind: PrincipalKind }>('SELECT kind FROM principal WHERE id = ?', [id]);
+  private async resolveActor(id: string, kind: PrincipalKind, workspaceId: string, adapter: DatabaseAdapter = this.db): Promise<PrincipalSnapshot | null> {
+    const principalRows = await adapter.query<{ kind: PrincipalKind }>('SELECT kind FROM principal WHERE id = ?', [id]);
     if (principalRows.length === 0 || principalRows[0].kind !== kind) return null;
 
     if (kind === 'user') {
-      const rows = await this.db.query<any>(
+      const rows = await adapter.query<any>(
         `SELECT wm.role_id, r.name AS role_name, r.permissions_json
            FROM app_user u
            JOIN workspace_member wm ON wm.user_id = u.id AND wm.workspace_id = ?
@@ -339,7 +347,7 @@ export class TokenService {
       };
     }
 
-    const rows = await this.db.query<any>(
+    const rows = await adapter.query<any>(
       `SELECT a.operator_user_id,
               ar.permissions_json AS agent_permissions,
               opr.permissions_json AS operator_permissions,
@@ -368,8 +376,8 @@ export class TokenService {
     };
   }
 
-  private async resolveTarget(id: string, workspaceId: string): Promise<PrincipalSnapshot | null> {
-    const userRows = await this.db.query<any>(
+  private async resolveTarget(id: string, workspaceId: string, adapter: DatabaseAdapter = this.db): Promise<PrincipalSnapshot | null> {
+    const userRows = await adapter.query<any>(
       `SELECT r.permissions_json, r.name AS role_name
          FROM principal p
          JOIN app_user u ON u.id = p.id
@@ -388,7 +396,7 @@ export class TokenService {
       };
     }
 
-    const agentRows = await this.db.query<any>(
+    const agentRows = await adapter.query<any>(
       `SELECT a.operator_user_id,
               ar.permissions_json AS agent_permissions,
               opr.permissions_json AS operator_permissions,
@@ -475,11 +483,13 @@ export class TokenService {
   /**
    * Revoke a token immediately by setting revoked_at.
    */
-  async revoke(id: string): Promise<void> {
-    await this.db.execute(
-      'UPDATE api_token SET revoked_at = ? WHERE id = ?',
+  async revoke(id: string, adapter?: DatabaseAdapter): Promise<boolean> {
+    if (!adapter) return this.db.transaction(tx => this.revoke(id, tx));
+    const result = await adapter.execute(
+      'UPDATE api_token SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
       [new Date().toISOString(), id],
     );
+    return result.changes === 1;
   }
 
   /**
