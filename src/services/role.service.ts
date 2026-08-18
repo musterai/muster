@@ -170,14 +170,21 @@ export class RoleService {
 
     const agentRole = await this.getById(agent.role_id);
     if (!agentRole) return [];
+    if (agent.workspace_id && agentRole.workspace_id !== agent.workspace_id) return [];
 
     // No operator means the agent is unbound — return its role's permissions as-is
     if (!agent.operator_user_id) return agentRole.permissions;
 
     // Look up the operator's role
     const opRows = await this.db.query<any>(
-      `SELECT wm.role_id FROM workspace_member wm WHERE wm.user_id = ?`,
-      [agent.operator_user_id],
+      `SELECT wm.role_id
+         FROM workspace_member wm
+         JOIN agent a
+           ON a.operator_user_id = wm.user_id
+          AND a.workspace_id = wm.workspace_id
+        WHERE a.id = ?
+        LIMIT 1`,
+      [agentId],
     );
     if (opRows.length === 0 || !opRows[0].role_id) return agentRole.permissions;
 
