@@ -579,8 +579,13 @@ All AI agents and human operators collaborating within Muster must follow this p
     status: z.enum(['active', 'idle', 'offline']).optional()
   }, withPermission('register_agent', auth, async (args) => {
     // MUS-23: bind agent to the authenticated operator
-    const operatorUserId = resolveActor(auth);
-    const result = await services.agentService.register(args, operatorUserId);
+    const operatorUserId = auth.principal?.kind === 'user' ? auth.principal.id : undefined;
+    const result = await services.agentService.register(
+      args,
+      operatorUserId,
+      undefined,
+      auth.workspace_id || undefined,
+    );
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 

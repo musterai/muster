@@ -3,10 +3,37 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { AgentService } from '../../services/agent.service.js';
 import { CardService } from '../../services/card.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { config } from '../../config/index.js';
+import { PermissionDeniedError } from '../../shared/permission-enforcer.js';
 
-function getActorId(req: Request): string | undefined {
+function getAuth(req: Request): AuthContext | undefined {
+  return (req as any).authContext;
+}
+
+function getOperatorUserId(req: Request): string | undefined {
   const auth: AuthContext | undefined = (req as any).authContext;
-  return auth?.principal?.id;
+  return auth?.principal?.kind === 'user' ? auth.principal.id : undefined;
+}
+
+async function requireAgentScope(agentService: AgentService, req: Request, agentId: string): Promise<void> {
+  if (config.auth.mode === 'open') return;
+  const auth = getAuth(req);
+  if (!auth?.principal || !auth.is_workspace_member) {
+    throw new PermissionDeniedError('workspace.read', auth?.role_name || null);
+  }
+  if (auth.permissions.includes('workspace.admin')) return;
+  if (auth.principal.kind === 'agent' && auth.principal.id === agentId) return;
+  if (auth.principal.kind !== 'user') {
+    throw new PermissionDeniedError('agent.manage_others', auth.role_name);
+  }
+  try {
+    const ownerId = await agentService.validateAgentOwnership(agentId, auth.principal.id);
+    if (!ownerId) throw new Error('Agent is not in scope');
+  } catch {
+    // Deliberately do not distinguish missing, cross-workspace, unassigned,
+    // or another operator's agent.
+    throw new PermissionDeniedError('agent.manage_others', auth.role_name);
+  }
 }
 
 export function createAgentRouter(agentService: AgentService, cardService: CardService): Router {
@@ -25,7 +52,13 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
   // Register a new global agent (or re-bind existing session)
   router.post('/agents', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const agent = await agentService.register(req.body, getActorId(req));
+      const auth = getAuth(req);
+      const agent = await agentService.register(
+        req.body,
+        getOperatorUserId(req),
+        undefined,
+        auth?.workspace_id || undefined,
+      );
       res.status(201).json(agent);
     } catch (err) {
       next(err);
@@ -34,6 +67,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
 
   router.post('/agents/:id/heartbeat', async (req: Request, res: Response, next: NextFunction) => {
     try {
+      await requireAgentScope(agentService, req, req.params.id);
       const agent = await agentService.heartbeat(req.params.id);
       await cardService.renewClaims(req.params.id);
       res.json(agent);
@@ -45,7 +79,12 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
   // Update agent attributes
   router.put('/agents/:id', async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const agent = await agentService.update(req.params.id, req.body);
+      await requireAgentScope(agentService, req, req.params.id);
+      const auth = getAuth(req);
+      const agent = await agentService.update(req.params.id, req.body, {
+        workspaceId: auth?.workspace_id || undefined,
+        allowIdentityChanges: auth?.permissions.includes('workspace.admin') || false,
+      });
       res.json(agent);
     } catch (err) {
       next(err);
@@ -54,6 +93,7 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
 
   router.delete('/agents/:id', async (req: Request, res: Response, next: NextFunction) => {
     try {
+      await requireAgentScope(agentService, req, req.params.id);
       await agentService.unregister(req.params.id);
       res.status(204).send();
     } catch (err) {

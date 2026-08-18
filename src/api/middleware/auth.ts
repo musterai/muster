@@ -190,7 +190,10 @@ export function createAuthMiddleware(
         let isWorkspaceMember = false;
 
         if (principalKind === 'agent') {
-          permissions = await roleService.getEffectivePermissions(verification.principal_id);
+          permissions = await roleService.getEffectivePermissions(
+            verification.principal_id,
+            verification.workspace_id,
+          );
           const agent = await agentService.getById(verification.principal_id);
           isWorkspaceMember = await resolveAgentWorkspaceMembership(
             db,

@@ -395,6 +395,13 @@ export function requirePermission(
     throw new PermissionDeniedError('(unknown — unmapped tool)', auth.role_name || null);
   }
 
+  // Authentication is not workspace admission. Every MCP operation is
+  // workspace-scoped, including writes whose role permission may otherwise
+  // still be present in a stale or forged context.
+  if (!auth.is_workspace_member) {
+    throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
+  }
+
   const required = resolvePermission(spec, args);
 
   if (required === WORKSPACE_READ) {
@@ -431,6 +438,10 @@ export function requireRestPermission(
     if (!matches) continue;
 
     if (route.public) return;
+
+    if (!auth.is_workspace_member) {
+      throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
+    }
 
     const required = resolvePermission(OPERATION_PERMISSIONS[route.operation], args);
 
