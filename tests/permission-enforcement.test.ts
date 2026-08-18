@@ -28,10 +28,12 @@ import {
 } from '../src/services/index.js';
 import {
   TOOL_PERMISSIONS,
+  OPERATION_PERMISSIONS,
   PermissionDeniedError,
   requirePermission,
   requireRestPermission,
   REST_ROUTE_PERMISSIONS,
+  WORKSPACE_READ,
   resolvePermission,
   withPermission,
 } from '../src/shared/permission-enforcer.js';
@@ -43,10 +45,16 @@ import { createMcpServer, Services } from '../src/mcp/server.js';
 const TEST_DB = path.join(process.cwd(), 'data', 'test-permission-enforcement.db');
 
 // Create a mock AuthContext with specific permissions and role
-function makeAuth(permissions: string[], roleName: string | null = null, principalId?: string): AuthContext {
+function makeAuth(
+  permissions: string[],
+  roleName: string | null = null,
+  principalId?: string,
+  isWorkspaceMember = true,
+): AuthContext {
   return {
     principal: principalId ? { kind: 'user', id: principalId } : null,
     workspace_id: 'test-ws',
+    is_workspace_member: isWorkspaceMember,
     permissions,
     is_operator_override: false,
     role_name: roleName,
@@ -159,6 +167,38 @@ describe('MUS-22: Permission enforcement', () => {
     const mappedNames = Object.keys(TOOL_PERMISSIONS);
     const unknownMappings = mappedNames.filter(n => !registeredTools.includes(n));
     expect(unknownMappings, `TOOL_PERMISSIONS has stale entries: ${unknownMappings.join(', ')}`).toEqual([]);
+  });
+
+  it('REST routes reference the canonical operation policy catalog', () => {
+    for (const route of REST_ROUTE_PERMISSIONS) {
+      expect(
+        route.operation in OPERATION_PERMISSIONS,
+        `${route.method} ${String(route.pattern)} references unknown operation ${route.operation}`,
+      ).toBe(true);
+    }
+  });
+
+  it('equivalent MCP and REST operations resolve through the same policy decisions', () => {
+    const equivalentOperations = [
+      'list_projects',
+      'create_project',
+      'update_project',
+      'delete_project',
+      'get_board',
+      'create_card',
+      'move_card',
+      'add_comment',
+      'list_documents',
+      'set_document_status',
+      'list_agents',
+      'get_activity',
+    ] as const;
+
+    for (const operation of equivalentOperations) {
+      expect(TOOL_PERMISSIONS[operation]).toBe(OPERATION_PERMISSIONS[operation]);
+    }
+    expect(resolvePermission(OPERATION_PERMISSIONS.set_document_status, { status: 'approved' })).toBe('doc.approve');
+    expect(resolvePermission(OPERATION_PERMISSIONS.set_document_status, { status: 'in_review' })).toBe('doc.submit_review');
   });
 
   it('search_cards exposes validated project-scoped title search through MCP', async () => {
@@ -472,11 +512,41 @@ describe('MUS-22: Permission enforcement', () => {
   // ================================================================
   // REST route permission map tests
   // ================================================================
-  it('requireRestPermission passes on GET with readOnly routes in enforced mode', () => {
+  it('allows public health and implicit reads for admitted workspace members', () => {
     (config.auth as any).mode = 'enforced';
-    const auth = makeAuth(['project.create']);
-    expect(() => requireRestPermission('GET', '/api/v1/health', auth)).not.toThrow();
-    expect(() => requireRestPermission('GET', '/api/v1/projects', auth)).not.toThrow();
+    const unadmitted = makeAuth([], null, undefined, false);
+    const observer = makeAuth([], 'observer');
+    expect(() => requireRestPermission('GET', '/api/v1/health', unadmitted)).not.toThrow();
+    expect(() => requireRestPermission('GET', '/api/v1/projects', observer)).not.toThrow();
+  });
+
+  it('denies reads to unadmitted principals even when they hold a write verb', () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth(['project.create'], null, undefined, false);
+    expect(() => requireRestPermission('GET', '/api/v1/projects', auth))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+  });
+
+  it('denies writes to removed members even when stale role permissions remain', () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth(['project.create', 'workspace.admin'], 'owner', undefined, false);
+    expect(() => requireRestPermission('POST', '/api/v1/projects', auth))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+    expect(() => requirePermission('create_project', auth)).toThrowError(expect.objectContaining({
+      refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+    }));
+  });
+
+  it('default-denies unmapped GET routes for admitted members and admins', () => {
+    (config.auth as any).mode = 'enforced';
+    expect(() => requireRestPermission('GET', '/api/v1/new-unmapped-data', makeAuth([])))
+      .toThrow(PermissionDeniedError);
+    expect(() => requireRestPermission('GET', '/api/v1/new-unmapped-data', makeAuth(['workspace.admin'])))
+      .toThrow(PermissionDeniedError);
   });
 
   it('requireRestPermission refuses mutations without matching permission', () => {
@@ -491,11 +561,51 @@ describe('MUS-22: Permission enforcement', () => {
     expect(() => requireRestPermission('POST', '/api/v1/projects', auth)).not.toThrow();
   });
 
+  it('uses agent registration authority for MCP OAuth consent instead of project creation', () => {
+    (config.auth as any).mode = 'enforced';
+    expect(() => requireRestPermission(
+      'POST',
+      '/api/v1/oauth/authorize/consent',
+      makeAuth(['project.create']),
+    )).toThrowError(expect.objectContaining({
+      refusal: expect.objectContaining({ required_permission: 'agent.register' }),
+    }));
+    expect(() => requireRestPermission(
+      'POST',
+      '/api/v1/oauth/authorize/consent',
+      makeAuth(['agent.register']),
+    )).not.toThrow();
+  });
+
   it('requireRestPermission allows workspace.admin through everything', () => {
     (config.auth as any).mode = 'enforced';
     const auth = makeAuth(['workspace.admin']);
     expect(() => requireRestPermission('DELETE', '/api/v1/projects/some-id', auth)).not.toThrow();
     expect(() => requireRestPermission('POST', '/api/v1/boards/xyz/columns', auth)).not.toThrow();
+  });
+
+  it('resolves REST document transition permission from the requested status', () => {
+    (config.auth as any).mode = 'enforced';
+    const senior = makeAuth(['doc.submit_review'], 'senior_engineer');
+    const architect = makeAuth(['doc.submit_review', 'doc.approve'], 'architect');
+    expect(() => requireRestPermission(
+      'PATCH',
+      '/api/v1/documents/doc-1/status',
+      senior,
+      { status: 'in_review' },
+    )).not.toThrow();
+    expect(() => requireRestPermission(
+      'PATCH',
+      '/api/v1/documents/doc-1/status',
+      senior,
+      { status: 'approved' },
+    )).toThrow(PermissionDeniedError);
+    expect(() => requireRestPermission(
+      'PATCH',
+      '/api/v1/documents/doc-1/status',
+      architect,
+      { status: 'approved' },
+    )).not.toThrow();
   });
 
   // ================================================================
@@ -530,17 +640,26 @@ describe('MUS-22: Permission enforcement', () => {
     expect(TOOL_PERMISSIONS['create_role']).toBe('role.manage');
   });
 
-  it('TOOL_PERMISSIONS has read tools mapped to project.create (workspace membership)', () => {
-    expect(TOOL_PERMISSIONS['list_projects']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['get_board']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['list_cards']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['list_agents']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['list_documents']).toBe('project.create');
+  it('maps implicit read tools to the explicit workspace membership requirement', () => {
+    expect(TOOL_PERMISSIONS['list_projects']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['get_board']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['list_cards']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['list_agents']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['list_documents']).toBe(WORKSPACE_READ);
   });
 
-  it('KB read tools are mapped to kb.read', () => {
-    expect(TOOL_PERMISSIONS['search_knowledge']).toBe('kb.read');
-    expect(TOOL_PERMISSIONS['get_entity_knowledge']).toBe('kb.read');
+  it('uses the same membership requirement for knowledge reads', () => {
+    expect(TOOL_PERMISSIONS['search_knowledge']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['get_entity_knowledge']).toBe(WORKSPACE_READ);
+  });
+
+  it('enforces implicit MCP reads from membership, not write permissions', () => {
+    (config.auth as any).mode = 'enforced';
+    expect(() => requirePermission('list_projects', makeAuth([], 'observer'))).not.toThrow();
+    expect(() => requirePermission(
+      'list_projects',
+      makeAuth(['project.create'], null, undefined, false),
+    )).toThrow(PermissionDeniedError);
   });
 });
 

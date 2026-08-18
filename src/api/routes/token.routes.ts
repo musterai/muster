@@ -10,8 +10,36 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { TokenService } from '../../services/token.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { ValidationError } from '../../shared/errors.js';
+import { PermissionDeniedError } from '../../shared/permission-enforcer.js';
 import { validateRequest } from '../middleware/validate.js';
 import { idParamsSchema, tokenCreateSchema } from '../schemas.js';
+
+async function auditIssuanceRefusal(
+  auditService: AuditService,
+  auth: AuthContext | undefined,
+  error: unknown,
+  ip?: string,
+): Promise<void> {
+  if (!auth?.principal || !auth.workspace_id) return;
+  if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;
+  try {
+    await auditService.logAs(auth, {
+      action: 'token.create_refused',
+      target_type: 'api_token',
+      target_id: undefined,
+      // Never include request values here: a caller-controlled name could be
+      // a secret, and target IDs should not become an enumeration oracle.
+      payload: {
+        via: 'rest',
+        reason: error instanceof PermissionDeniedError ? 'forbidden' : 'invalid_request',
+      },
+      ip,
+    });
+  } catch {
+    // An audit failure must not turn a safe refusal into a 500 response.
+  }
+}
 
 export function createTokenRouter(tokenService: TokenService, auditService: AuditService): Router {
   const router = Router();
@@ -19,7 +47,7 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   // List tokens for the authenticated principal
   router.get('/tokens', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const auth: AuthContext = (req as any).authContext;
+      const auth: AuthContext | undefined = (req as any).authContext;
       if (!auth?.principal?.id) {
         res.status(401).json({ error: 'unauthorized', message: 'Not authenticated' });
         return;
@@ -33,7 +61,10 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   });
 
   // Create a new token
-  router.post('/tokens', ...validateRequest({ body: tokenCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/tokens', ...validateRequest(
+    { body: tokenCreateSchema },
+    async (req, error) => auditIssuanceRefusal(auditService, req.authContext, error, req.ip),
+  ), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {
@@ -41,38 +72,27 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
         return;
       }
 
-      const { name, expires_at, target_principal_id } = req.body;
-
-      if (!name || typeof name !== 'string' || name.trim().length === 0) {
-        res.status(400).json({ error: 'bad_request', message: 'Token name is required' });
-        return;
-      }
-
-      // Default to creating a token for the authenticated principal
-      const principalId = target_principal_id || auth.principal.id;
-      const workspaceId = auth.workspace_id;
-
-      if (!workspaceId) {
-        res.status(400).json({ error: 'bad_request', message: 'No workspace context available' });
-        return;
-      }
-
-      const created = await tokenService.create({
-        principal_id: principalId,
-        workspace_id: workspaceId,
-        name: name.trim(),
-        expires_at: expires_at || null,
+      const body = req.body || {};
+      const created = await tokenService.issue(auth, {
+        principal_id: body.target_principal_id,
+        workspace_id: auth.workspace_id,
+        name: body.name,
+        expires_at: body.expires_at,
       });
       await auditService.logAs(auth, {
         action: 'token.create',
         target_type: 'api_token',
         target_id: created.id,
-        payload: { name: created.name, principal_id: principalId },
+        // The plaintext token is intentionally absent; only the one-time
+        // response below contains it.  Do not echo the caller's name either.
+        payload: { principal_id: created.principal_id, via: 'rest' },
         ip: req.ip,
       });
 
       res.status(201).json(created);
     } catch (err) {
+      const auth: AuthContext = (req as any).authContext;
+      await auditIssuanceRefusal(auditService, auth, err, req.ip);
       next(err);
     }
   });

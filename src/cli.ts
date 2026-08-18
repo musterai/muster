@@ -6,11 +6,11 @@
 // added by MUS-27.
 
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import { startServer } from './server.js';
 import { createConnectApp } from './connect/proxy.js';
-import { getCredential, setCredential, removeCredential, normalizeServerUrl } from './connect/credentials.js';
-import { whoAmI, listMyTokens, tokenPrefix, revokeToken, RemoteError, requestDeviceCode, pollForDeviceToken } from './connect/remote-client.js';
+import { getCredential, setCredential, normalizeServerUrl, writePrivateFileAtomic } from './connect/credentials.js';
+import { whoAmI, listMyTokens, tokenPrefix, RemoteError, requestDeviceCode, pollForDeviceToken } from './connect/remote-client.js';
+import { logoutCredential } from './connect/logout.js';
 import { promptHidden } from './connect/prompt.js';
 
 type Flags = Record<string, string | boolean>;
@@ -34,9 +34,6 @@ function parseFlags(argv: string[]): Flags {
 
 function fail(message: string): never {
   console.error(`Error: ${message}`);
-  try {
-    process.kill(process.ppid, 'SIGINT');
-  } catch {}
   process.exit(1);
 }
 
@@ -72,14 +69,14 @@ async function runConnect(flags: Flags): Promise<void> {
       console.log(`  Muster connect — proxying to ${server}`);
       console.log(`======================================================`);
       console.log(`  • Web UI:    ${localUrl}`);
-      console.log(`  • Local /mcp requires: Authorization: Bearer ${localToken}`);
-      console.log(`\n  Claude Code / MCP config:\n`);
-      console.log(JSON.stringify(mcpConfig, null, 2));
+      console.log(`  • Local /mcp is protected by an ephemeral loopback credential.`);
       console.log(`======================================================\n`);
 
       if (typeof flags['write-config'] === 'string') {
-        fs.writeFileSync(flags['write-config'] as string, JSON.stringify(mcpConfig, null, 2) + '\n');
+        writePrivateFileAtomic(flags['write-config'] as string, JSON.stringify(mcpConfig, null, 2) + '\n');
         console.log(`Wrote MCP config to ${flags['write-config']}`);
+      } else {
+        console.log('Use --write-config <path> to create a private MCP configuration without printing its credential.');
       }
     });
 
@@ -108,7 +105,7 @@ async function runLogin(flags: Flags): Promise<void> {
   const server = typeof flags.server === 'string' ? normalizeServerUrl(flags.server) : null;
   if (!server) fail('muster login requires --server <url>');
 
-  let token = typeof flags.token === 'string' ? flags.token : null;
+  let token: string | null = null;
   if (!token && flags.paste) {
     console.log(`Paste a personal access token minted from ${server}'s Tokens page.`);
     token = await promptHidden('Token: ');
@@ -165,21 +162,23 @@ async function runLogout(flags: Flags): Promise<void> {
   const server = typeof flags.server === 'string' ? normalizeServerUrl(flags.server) : null;
   if (!server) fail('muster logout requires --server <url>');
 
-  const credential = getCredential(server!);
-  if (!credential) fail(`No saved credentials for ${server}.`);
-
-  if (credential.token_id) {
-    await revokeToken(server!, credential.token, credential.token_id);
+  const result = await logoutCredential(server!, { localOnly: flags['local-only'] === true });
+  if (result.status === 'logged_out' || result.status === 'already_revoked') {
+    console.log(result.message);
+    return;
   }
-  removeCredential(server!);
-  console.log(`Logged out of ${server}.`);
+  if (result.status === 'local_only') {
+    console.warn(result.message);
+    return;
+  }
+  fail(result.message);
 }
 
 const ALLOWED_FLAGS: Record<string, string[]> = {
   serve: ['db', 'db-name', 'database', 'd', 'help', 'h'],
   connect: ['server', 'port', 'write-config', 'help', 'h'],
-  login: ['server', 'token', 'paste', 'help', 'h'],
-  logout: ['server', 'help', 'h'],
+  login: ['server', 'paste', 'help', 'h'],
+  logout: ['server', 'local-only', 'help', 'h'],
 };
 
 function validateFlags(subcommand: string, flags: Flags): void {

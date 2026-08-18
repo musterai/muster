@@ -39,6 +39,7 @@ describe('MUS-22 regression: permissionGuard must use the full request path', ()
       const auth: AuthContext = {
         principal: { kind: 'user', id: 'u1' },
         workspace_id: 'ws1',
+        is_workspace_member: true,
         permissions: ['project.create'],
         is_operator_override: false,
         role_name: 'owner',
@@ -65,6 +66,7 @@ describe('MUS-22 regression: permissionGuard must use the full request path', ()
       const auth: AuthContext = {
         principal: { kind: 'user', id: 'u2' },
         workspace_id: 'ws1',
+        is_workspace_member: true,
         permissions: [],
         is_operator_override: false,
         role_name: 'observer',
@@ -89,6 +91,7 @@ describe('MUS-22 regression: permissionGuard must use the full request path', ()
       const auth: AuthContext = {
         principal: null,
         workspace_id: null,
+        is_workspace_member: false,
         permissions: [],
         is_operator_override: false,
         role_name: null,
@@ -101,6 +104,56 @@ describe('MUS-22 regression: permissionGuard must use the full request path', ()
       permissionGuard(req, res, () => { calledNext = true; });
 
       expect(calledNext).toBe(true);
+    } finally {
+      (config.auth as any).mode = 'open';
+    }
+  });
+
+  it('refuses a zero-permission, unadmitted principal on a mapped GET', () => {
+    (config.auth as any).mode = 'enforced';
+    try {
+      const auth: AuthContext = {
+        principal: { kind: 'user', id: 'unadmitted' },
+        workspace_id: 'ws1',
+        is_workspace_member: false,
+        permissions: [],
+        is_operator_override: false,
+        role_name: null,
+      };
+      const req = makeReq('/api/v1/projects', '/projects', 'GET', auth);
+      const res = makeRes();
+      let calledNext = false;
+
+      permissionGuard(req, res, () => { calledNext = true; });
+
+      expect(calledNext).toBe(false);
+      expect((res as any).statusCode).toBe(403);
+      expect((res as any).body.required_permission).toBe('workspace.read');
+    } finally {
+      (config.auth as any).mode = 'open';
+    }
+  });
+
+  it('refuses an unmapped GET even for a workspace admin', () => {
+    (config.auth as any).mode = 'enforced';
+    try {
+      const auth: AuthContext = {
+        principal: { kind: 'user', id: 'owner' },
+        workspace_id: 'ws1',
+        is_workspace_member: true,
+        permissions: ['workspace.admin'],
+        is_operator_override: true,
+        role_name: 'owner',
+      };
+      const req = makeReq('/api/v1/not-mapped', '/not-mapped', 'GET', auth);
+      const res = makeRes();
+      let calledNext = false;
+
+      permissionGuard(req, res, () => { calledNext = true; });
+
+      expect(calledNext).toBe(false);
+      expect((res as any).statusCode).toBe(403);
+      expect((res as any).body.required_permission).toContain('unmapped');
     } finally {
       (config.auth as any).mode = 'open';
     }

@@ -6,6 +6,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthContext } from '../../shared/auth-context.js';
 import { requireRestPermission, PermissionDeniedError } from '../../shared/permission-enforcer.js';
+import { isPublicRoute } from '../../shared/public-routes.js';
 
 declare global {
   namespace Express {
@@ -24,16 +25,10 @@ export function permissionGuard(req: Request, res: Response, next: NextFunction)
   // must use it, not req.path.
   const fullPath = req.originalUrl.split('?')[0];
 
-  // The auth routes (login/callback/logout/me) are the mechanism by which a
-  // principal is established in the first place — they cannot themselves
-  // require a permission the caller has no way to hold yet. The device-code
-  // and token endpoints of the Device Authorization Grant (MUS-28), and MCP
-  // OAuth's client registration and authorize hand-off (MUS-29), are the
-  // same story for a not-yet-authenticated CLI/MCP client; device/lookup|
-  // approve|deny and authorize/details|consent are NOT exempted — those run
-  // as the already-signed-in approving user.
-  const PUBLIC_OAUTH_PATHS = ['/api/v1/oauth/device/code', '/api/v1/oauth/token', '/api/v1/oauth/register', '/api/v1/oauth/authorize'];
-  if (fullPath.includes('/auth/') || PUBLIC_OAUTH_PATHS.includes(fullPath)) {
+  // Bootstrap and protocol discovery routes are the only unauthenticated
+  // exceptions.  Keep this decision in the shared exact allowlist used by
+  // auth middleware; prefix-based exemptions would make future routes public.
+  if (isPublicRoute(req.method, fullPath)) {
     next();
     return;
   }
@@ -49,7 +44,8 @@ export function permissionGuard(req: Request, res: Response, next: NextFunction)
   }
 
   try {
-    requireRestPermission(req.method, fullPath, auth);
+    const input = req.body && typeof req.body === 'object' ? req.body : undefined;
+    requireRestPermission(req.method, fullPath, auth, input);
     next();
   } catch (err) {
     if (err instanceof PermissionDeniedError) {

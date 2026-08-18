@@ -79,6 +79,13 @@ function parseRedirectUri(raw: unknown): string | null {
   }
 }
 
+/** Preserve registered query parameters while adding protocol response data. */
+function appendRedirectParameters(redirectUri: string, parameters: URLSearchParams): string {
+  const redirect = new URL(redirectUri);
+  for (const [name, value] of parameters) redirect.searchParams.set(name, value);
+  return redirect.toString();
+}
+
 export function createMcpOAuthRouter(
   db: DatabaseAdapter,
   oauthService: McpOAuthService,
@@ -94,6 +101,8 @@ export function createMcpOAuthRouter(
         client_name: req.body?.client_name,
         redirect_uris: req.body?.redirect_uris,
         token_endpoint_auth_method: req.body?.token_endpoint_auth_method,
+        grant_types: req.body?.grant_types,
+        response_types: req.body?.response_types,
       });
       res.status(201).json({
         client_id: client.client_id,
@@ -145,7 +154,7 @@ export function createMcpOAuthRouter(
       if (qs.has('error')) {
         if (typeof req.query.state === 'string') qs.set('state', req.query.state);
         qs.set('iss', config.oidc.publicUrl);
-        res.redirect(`${redirectUri}?${qs.toString()}`);
+        res.redirect(appendRedirectParameters(redirectUri, qs));
         return;
       }
 
@@ -216,7 +225,7 @@ export function createMcpOAuthRouter(
 
       if (decision !== 'approve') {
         qs.set('error', 'access_denied');
-        res.json({ redirect_uri: `${redirectUri}?${qs.toString()}` });
+        res.json({ redirect_uri: appendRedirectParameters(redirectUri, qs) });
         return;
       }
 
@@ -244,7 +253,7 @@ export function createMcpOAuthRouter(
         }
       } else {
         const name = typeof new_agent_name === 'string' && new_agent_name.trim() ? new_agent_name.trim() : (client.client_name || 'MCP Agent');
-        const created = await agentService.register({ name }, auth.principal.id, role_id);
+        const created = await agentService.register({ name }, auth.principal.id, role_id, auth.workspace_id);
         agentPrincipalId = created.id;
       }
 
@@ -260,7 +269,7 @@ export function createMcpOAuthRouter(
       });
 
       qs.set('code', code);
-      res.json({ redirect_uri: `${redirectUri}?${qs.toString()}` });
+      res.json({ redirect_uri: appendRedirectParameters(redirectUri, qs) });
     } catch (err) {
       next(err);
     }

@@ -3,6 +3,8 @@ import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Agent, RegisterAgent, UpdateAgent } from '../shared/types.js';
 import { EventService } from './event.service.js';
+import { ValidationError } from '../shared/errors.js';
+import type { PrincipalRef } from '../shared/auth-context.js';
 
 export class AgentService {
   constructor(
@@ -20,13 +22,42 @@ export class AgentService {
    * @param restrictToRoleId - (MUS-23) A role_id whose permissions are a subset
    *   of the operator's own. When set, the agent is pinned to this role.
    */
-  async register(data: RegisterAgent, operatorUserId?: string, restrictToRoleId?: string): Promise<Agent> {
+  async register(
+    data: RegisterAgent,
+    operatorUserId?: string,
+    restrictToRoleId?: string,
+    workspaceId?: string | null,
+    actor?: PrincipalRef | null,
+  ): Promise<Agent> {
     const id = data.agent_id || data.id || ulid();
     const now = new Date().toISOString();
+    const membershipRows = operatorUserId && !workspaceId
+      ? await this.db.query<{ workspace_id: string }>(
+          'SELECT workspace_id FROM workspace_member WHERE user_id = ? ORDER BY joined_at ASC LIMIT 1',
+          [operatorUserId],
+        )
+      : [];
+    const resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
 
     // Check if re-binding an existing agent
     const existing = await this.getById(id);
     if (existing) {
+      if (actor?.kind === 'agent') {
+        if (existing.id !== actor.id || !existing.workspace_id || existing.workspace_id !== resolvedWorkspaceId) {
+          throw new ValidationError('Agent registration is outside the authenticated agent scope');
+        }
+      }
+      if (operatorUserId) {
+        if (!existing.operator_user_id) {
+          throw new ValidationError('Unassigned agents require an administrator adoption flow');
+        }
+        if (existing.operator_user_id !== operatorUserId) {
+          throw new ValidationError('Agent belongs to a different operator');
+        }
+        if (!existing.workspace_id || existing.workspace_id !== resolvedWorkspaceId) {
+          throw new ValidationError('Agent belongs to a different workspace');
+        }
+      }
       const name = data.name || existing.name;
       const status = data.status || 'active';
 
@@ -39,16 +70,25 @@ export class AgentService {
         }
       }
 
-      // MUS-23: On re-bind, set operator_user_id if not already set
-      const finalOperatorUserId = existing.operator_user_id || operatorUserId || null;
+      // Re-binding refreshes mutable telemetry only; it never adopts or
+      // re-parents an unassigned identity.
+      const finalOperatorUserId = existing.operator_user_id || null;
       const finalRoleId = restrictToRoleId || existing.role_id || null;
+      const finalWorkspaceId = existing.workspace_id || null;
 
       await this.db.execute(
-        `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ? WHERE id = ?`,
-        [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, id]
+        `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ?, workspace_id = ? WHERE id = ?`,
+        [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, finalWorkspaceId, id]
       );
 
       return (await this.getById(id))!;
+    }
+
+    // An agent credential identifies an already-registered principal. It may
+    // refresh that same registration above, but it cannot manufacture another
+    // agent identity (or recreate a deleted one) through the rebind endpoint.
+    if (actor?.kind === 'agent') {
+      throw new ValidationError('Authenticated agents cannot create agent identities');
     }
 
     // Create a new agent — requires a principal row first
@@ -67,9 +107,9 @@ export class AgentService {
       : null;
 
     await this.db.execute(
-      `INSERT INTO agent (id, name, capabilities, status, last_seen_at, operator_user_id, role_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, name, capabilitiesStr, status, now, operatorUserId || null, restrictToRoleId || null, now]
+      `INSERT INTO agent (id, name, capabilities, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, name, capabilitiesStr, status, now, operatorUserId || null, restrictToRoleId || null, resolvedWorkspaceId, now]
     );
 
     if (this.eventService) {
@@ -84,7 +124,7 @@ export class AgentService {
       last_seen_at: now,
       operator_user_id: operatorUserId || null,
       role_id: restrictToRoleId || null,
-      workspace_id: null,
+      workspace_id: resolvedWorkspaceId,
       created_at: now,
     };
   }
@@ -92,13 +132,45 @@ export class AgentService {
   async unregister(id: string, actorId?: string): Promise<void> {
     const existing = await this.getById(id);
     if (!existing) throw new Error(`Agent with ID ${id} not found`);
-    await this.db.execute('DELETE FROM agent WHERE id = ?', [id]);
-    await this.db.execute('DELETE FROM principal WHERE id = ?', [id]);
+    await this.db.transaction(async tx => {
+      const now = new Date().toISOString();
+      await tx.execute(
+        'UPDATE api_token SET revoked_at = ? WHERE principal_id = ? AND revoked_at IS NULL',
+        [now, id],
+      );
+      await tx.execute('DELETE FROM oauth_authorization_code WHERE agent_principal_id = ?', [id]);
+      await tx.execute('UPDATE oauth_refresh_token SET revoked = 1 WHERE agent_principal_id = ?', [id]);
+      await tx.execute(
+        'UPDATE card SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL WHERE claimed_by = ?',
+        [id],
+      );
+      // Keep the principal and agent row so comments, documents and audit
+      // records retain attribution. Null role/operator makes the tombstone
+      // cryptographically powerless; status keeps it out of active telemetry.
+      await tx.execute(
+        `UPDATE agent
+         SET status = 'offline', operator_user_id = NULL, role_id = NULL, capabilities = NULL
+         WHERE id = ?`,
+        [id],
+      );
+    });
   }
 
-  async update(id: string, data: UpdateAgent): Promise<Agent> {
+  async update(
+    id: string,
+    data: UpdateAgent,
+    options: { workspaceId?: string; allowIdentityChanges?: boolean } = {},
+  ): Promise<Agent> {
     const existing = await this.getById(id);
     if (!existing) throw new Error(`Agent with ID ${id} not found`);
+
+    const changesIdentity = data.operator_user_id !== undefined || data.role_id !== undefined;
+    if (changesIdentity && !options.allowIdentityChanges) {
+      throw new ValidationError('Changing an agent owner or role requires workspace administrator authority');
+    }
+    if (options.workspaceId && existing.workspace_id !== options.workspaceId) {
+      throw new ValidationError('Agent belongs to a different workspace');
+    }
 
     const name = data.name !== undefined ? data.name : existing.name;
     const status = data.status !== undefined ? data.status : existing.status;
@@ -114,10 +186,39 @@ export class AgentService {
       }
     }
 
-    await this.db.execute(
-      `UPDATE agent SET name = ?, capabilities = ?, status = ?, operator_user_id = ?, role_id = ? WHERE id = ?`,
-      [name, capabilitiesStr, status, operator_user_id, role_id, id]
-    );
+    await this.db.transaction(async tx => {
+      if (role_id) {
+        const roles = await tx.query<{ workspace_id: string }>('SELECT workspace_id FROM role WHERE id = ?', [role_id]);
+        if (roles.length === 0 || roles[0].workspace_id !== existing.workspace_id) {
+          throw new ValidationError('Target role does not belong to the agent workspace');
+        }
+      }
+      if (operator_user_id) {
+        const members = await tx.query<{ user_id: string }>(
+          'SELECT user_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+          [existing.workspace_id, operator_user_id],
+        );
+        if (members.length === 0) {
+          throw new ValidationError('Target operator is not a member of the agent workspace');
+        }
+      }
+
+      await tx.execute(
+        `UPDATE agent SET name = ?, capabilities = ?, status = ?, operator_user_id = ?, role_id = ? WHERE id = ?`,
+        [name, capabilitiesStr, status, operator_user_id, role_id, id],
+      );
+
+      const credentialsMustRotate = changesIdentity || status !== existing.status;
+      if (credentialsMustRotate) {
+        const now = new Date().toISOString();
+        await tx.execute(
+          'UPDATE api_token SET revoked_at = ? WHERE principal_id = ? AND revoked_at IS NULL',
+          [now, id],
+        );
+        await tx.execute('DELETE FROM oauth_authorization_code WHERE agent_principal_id = ?', [id]);
+        await tx.execute('UPDATE oauth_refresh_token SET revoked = 1 WHERE agent_principal_id = ?', [id]);
+      }
+    });
 
     return (await this.getById(id))!;
   }
@@ -174,7 +275,10 @@ export class AgentService {
       return;
     }
 
-    // Passive update: set agents to 'idle' if >5m, 'offline' if >15m
+    // Passive update: set agents to 'idle' if >5m, 'offline' if >15m.
+    // These values are presence telemetry, not an authorization state machine:
+    // a delayed heartbeat must not destroy long-lived credentials. Explicit
+    // lifecycle mutations through update()/unregister() perform revocation.
     const now = new Date().getTime();
     const agents = await this.db.query<any>('SELECT id, status, last_seen_at FROM agent');
 
@@ -201,17 +305,24 @@ export class AgentService {
    * Returns the agent's operator_user_id if found, null if agent doesn't exist.
    * Throws if the agent exists but does NOT belong to the principal.
    */
-  async validateAgentOwnership(agentId: string, principalId: string): Promise<string | null> {
+  async validateAgentOwnership(
+    agentId: string,
+    principalId: string,
+    workspaceId?: string | null,
+  ): Promise<string | null> {
     const agent = await this.getById(agentId);
     if (!agent) return null;
 
-    if (agent.operator_user_id && agent.operator_user_id !== principalId) {
+    if (workspaceId && agent.workspace_id !== workspaceId) {
+      throw new Error(`Agent "${agentId}" belongs to a different workspace.`);
+    }
+    if (!agent.operator_user_id || agent.operator_user_id !== principalId) {
       throw new Error(
-        `Agent "${agentId}" belongs to a different operator and cannot be used by principal "${principalId}".`
+        `Agent "${agentId}" belongs to a different operator or is unassigned and cannot be used by principal "${principalId}".`,
       );
     }
 
-    return agent.operator_user_id || principalId;
+    return agent.operator_user_id;
   }
 
   /**

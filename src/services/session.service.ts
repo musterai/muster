@@ -92,6 +92,11 @@ export class SessionService {
     await this.db.execute('DELETE FROM session WHERE token_hash = ?', [hash]);
   }
 
+  /** Invalidate one session after a membership/status recheck fails. */
+  async revokeById(id: string): Promise<void> {
+    await this.db.execute('DELETE FROM session WHERE id = ?', [id]);
+  }
+
   async revokeAllForUser(userId: string): Promise<void> {
     await this.db.execute('DELETE FROM session WHERE user_id = ?', [userId]);
   }

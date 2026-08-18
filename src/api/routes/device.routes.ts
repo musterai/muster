@@ -196,7 +196,7 @@ export function createDeviceRouter(db: DatabaseAdapter, deviceGrantService: Devi
         return;
       }
       const userCode = normalizeCode(req.body?.user_code);
-      const ok = await deviceGrantService.approve(userCode, auth.principal.id, auth.workspace_id);
+      const ok = await deviceGrantService.approve(userCode, auth);
       if (!ok) {
         res.status(404).json({ error: 'not_found', message: 'That code is invalid or has expired.' });
         return;

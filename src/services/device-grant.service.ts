@@ -10,6 +10,9 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { TokenService, hashToken } from './token.service.js';
 import { AuditService } from './audit.service.js';
 import { CreatedApiToken } from '../shared/types.js';
+import { AuthContext } from '../shared/auth-context.js';
+import { PermissionDeniedError } from '../shared/permission-enforcer.js';
+import { ValidationError } from '../shared/errors.js';
 
 const DEVICE_CODE_BYTES = 32;
 const EXPIRES_IN_SECONDS = 600; // 10 minutes
@@ -40,7 +43,14 @@ function randomUserCode(): string {
 }
 
 export class DeviceGrantService {
-  constructor(private db: DatabaseAdapter, private tokenService: TokenService, private auditService?: AuditService) {}
+  constructor(
+    private db: DatabaseAdapter,
+    // Kept in the constructor for the public service contract.  Every
+    // mutation below binds a fresh TokenService to its transaction adapter so
+    // PostgreSQL never writes a token on a different pool connection.
+    _tokenService: TokenService,
+    private auditService?: AuditService,
+  ) {}
 
   async createDeviceCode(): Promise<DeviceCodeResult> {
     const deviceCode = crypto.randomBytes(DEVICE_CODE_BYTES).toString('hex');
@@ -80,28 +90,79 @@ export class DeviceGrantService {
     return rows[0];
   }
 
-  /** Binds the grant to the approving principal's own identity — the token is issued for them, never for whoever happens to be polling. */
-  async approve(userCode: string, principalId: string, workspaceId: string): Promise<boolean> {
-    const rows = await this.db.query<{ id: string; status: string; expires_at: string }>(
-      'SELECT id, status, expires_at FROM device_grant WHERE user_code = ?',
-      [userCode.toUpperCase()],
-    );
-    const row = rows[0];
-    if (!row || row.status !== 'pending' || new Date(row.expires_at).getTime() <= Date.now()) return false;
+  /**
+   * Binds the grant to the approving principal's own identity.  Authorization
+   * is checked here and again at poll time so removing membership between the
+   * two steps cannot leave a mintable grant behind.
+   */
+  async approve(userCode: string, principalOrAuth: string | AuthContext, workspaceId?: string): Promise<boolean> {
+    const auth: AuthContext = typeof principalOrAuth === 'string'
+      ? {
+          principal: { kind: 'user', id: principalOrAuth },
+          workspace_id: workspaceId || null,
+          is_workspace_member: false,
+          permissions: [],
+          is_operator_override: false,
+          role_name: null,
+        }
+      : principalOrAuth;
+    if (!auth.principal || auth.principal.kind !== 'user' || !auth.workspace_id) return false;
+    const principalId = auth.principal.id;
 
-    await this.db.execute(
-      `UPDATE device_grant SET status = 'approved', principal_id = ?, workspace_id = ? WHERE id = ?`,
-      [principalId, workspaceId, row.id],
-    );
-    return true;
+    return this.db.transaction(async tx => {
+      const rows = await tx.query<{ id: string; status: string; expires_at: string }>(
+        `SELECT id, status, expires_at FROM device_grant WHERE user_code = ?${this.lockClause(tx)}`,
+        [this.normalizeCode(userCode)],
+      );
+      const row = rows[0];
+      if (!row || row.status !== 'pending') return false;
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        await tx.execute('DELETE FROM device_grant WHERE id = ? AND status = \'pending\'', [row.id]);
+        return false;
+      }
+
+      try {
+        await new TokenService(tx).authorize(auth, {
+          principal_id: principalId,
+          workspace_id: auth.workspace_id,
+          name: 'muster login (device)',
+        });
+      } catch (error) {
+        if (!this.isPolicyFailure(error)) throw error;
+        await this.auditIssuanceRefusal(auth, error, this.auditService ? new AuditService(tx) : undefined);
+        return false;
+      }
+
+      const result = await tx.execute(
+        `UPDATE device_grant
+            SET status = 'approved', principal_id = ?, workspace_id = ?
+          WHERE id = ? AND status = 'pending' AND expires_at > ?`,
+        [principalId, auth.workspace_id, row.id, new Date().toISOString()],
+      );
+      return result.changes === 1;
+    });
   }
 
   async deny(userCode: string): Promise<boolean> {
-    const rows = await this.db.query<{ id: string; status: string }>('SELECT id, status FROM device_grant WHERE user_code = ?', [userCode.toUpperCase()]);
-    const row = rows[0];
-    if (!row || row.status !== 'pending') return false;
-    await this.db.execute(`UPDATE device_grant SET status = 'denied' WHERE id = ?`, [row.id]);
-    return true;
+    return this.db.transaction(async tx => {
+      const rows = await tx.query<{ id: string; status: string; expires_at: string }>(
+        `SELECT id, status, expires_at FROM device_grant WHERE user_code = ?${this.lockClause(tx)}`,
+        [this.normalizeCode(userCode)],
+      );
+      const row = rows[0];
+      if (!row || row.status !== 'pending') return false;
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        await tx.execute('DELETE FROM device_grant WHERE id = ? AND status = \'pending\'', [row.id]);
+        return false;
+      }
+      const result = await tx.execute(
+        `UPDATE device_grant
+            SET status = 'denied'
+          WHERE id = ? AND status = 'pending' AND expires_at > ?`,
+        [row.id, new Date().toISOString()],
+      );
+      return result.changes === 1;
+    });
   }
 
   /**
@@ -111,45 +172,142 @@ export class DeviceGrantService {
    */
   async poll(deviceCode: string): Promise<PollResult> {
     const hash = hashToken(deviceCode);
-    const rows = await this.db.query<any>('SELECT * FROM device_grant WHERE device_code_hash = ?', [hash]);
-    const row = rows[0];
-    if (!row) return { ok: false, error: 'expired_token' };
+    return this.db.transaction(async tx => {
+      const rows = await tx.query<any>(
+        `SELECT * FROM device_grant WHERE device_code_hash = ?${this.lockClause(tx)}`,
+        [hash],
+      );
+      const row = rows[0];
+      if (!row) return { ok: false, error: 'expired_token' };
 
-    if (new Date(row.expires_at).getTime() <= Date.now()) {
-      await this.db.execute('DELETE FROM device_grant WHERE id = ?', [row.id]);
-      return { ok: false, error: 'expired_token' };
-    }
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        await tx.execute('DELETE FROM device_grant WHERE id = ?', [row.id]);
+        return { ok: false, error: 'expired_token' };
+      }
 
-    const now = Date.now();
-    if (row.last_polled_at && now - new Date(row.last_polled_at).getTime() < row.interval_seconds * 1000) {
-      return { ok: false, error: 'slow_down' };
-    }
-    await this.db.execute('UPDATE device_grant SET last_polled_at = ? WHERE id = ?', [new Date(now).toISOString(), row.id]);
+      if (row.status === 'denied') {
+        const result = await tx.execute(
+          `DELETE FROM device_grant WHERE id = ? AND status = 'denied'`,
+          [row.id],
+        );
+        return result.changes === 1
+          ? { ok: false, error: 'access_denied' }
+          : { ok: false, error: 'expired_token' };
+      }
 
-    if (row.status === 'denied') {
-      await this.db.execute('DELETE FROM device_grant WHERE id = ?', [row.id]);
-      return { ok: false, error: 'access_denied' };
-    }
+      if (row.status === 'pending') {
+        const now = Date.now();
+        if (row.last_polled_at && now - new Date(row.last_polled_at).getTime() < row.interval_seconds * 1000) {
+          return { ok: false, error: 'slow_down' };
+        }
 
-    if (row.status === 'pending') {
-      return { ok: false, error: 'authorization_pending' };
-    }
+        const nowIso = new Date(now).toISOString();
+        const cutoffIso = new Date(now - row.interval_seconds * 1000).toISOString();
+        const result = await tx.execute(
+          `UPDATE device_grant
+              SET last_polled_at = ?
+            WHERE id = ?
+              AND status = 'pending'
+              AND (last_polled_at IS NULL OR last_polled_at <= ?)`,
+          [nowIso, row.id, cutoffIso],
+        );
+        return result.changes === 1
+          ? { ok: false, error: 'authorization_pending' }
+          : { ok: false, error: 'slow_down' };
+      }
 
-    // approved — mint the token now, exactly once, then the grant is gone.
-    const token = await this.tokenService.create({
-      principal_id: row.principal_id,
-      workspace_id: row.workspace_id,
-      name: 'muster login (device)',
+      if (row.status !== 'approved') return { ok: false, error: 'expired_token' };
+
+      // Claim before minting.  The delete, token insert and audit row all
+      // share this transaction: a second poll cannot deliver the same grant,
+      // while an unexpected write failure rolls the claim back atomically.
+      const claimed = await tx.execute(
+        `DELETE FROM device_grant WHERE id = ? AND status = 'approved'`,
+        [row.id],
+      );
+      if (claimed.changes !== 1) return { ok: false, error: 'expired_token' };
+
+      let token: CreatedApiToken;
+      try {
+        token = await new TokenService(tx).issueForPrincipal(
+          row.principal_id,
+          row.workspace_id,
+          { name: 'muster login (device)' },
+        );
+      } catch (error) {
+        if (!this.isPolicyFailure(error)) throw error;
+        // Membership/principal policy changed after approval.  The grant was
+        // already consumed, and the refusal audit is best effort by design.
+        await this.auditIssuanceRefusalForStoredGrant(
+          row.workspace_id,
+          row.principal_id,
+          error,
+          this.auditService ? new AuditService(tx) : undefined,
+        );
+        return { ok: false, error: 'access_denied' };
+      }
+
+      // Successful delivery is not complete until the audit write commits.
+      // Let an unexpected audit failure escape so the transaction restores
+      // both the grant and the token for a safe retry.
+      await (this.auditService ? new AuditService(tx) : undefined)?.log({
+        workspace_id: row.workspace_id,
+        actor: { id: row.principal_id, kind: 'user' },
+        action: 'token.create',
+        target_type: 'api_token',
+        target_id: token.id,
+        payload: { via: 'device_grant' },
+      });
+      return { ok: true, token };
     });
-    await this.db.execute('DELETE FROM device_grant WHERE id = ?', [row.id]);
-    await this.auditService?.log({
-      workspace_id: row.workspace_id,
-      actor: { id: row.principal_id, kind: 'user' },
-      action: 'token.create',
-      target_type: 'api_token',
-      target_id: token.id,
-      payload: { name: token.name, via: 'device_grant' },
-    });
-    return { ok: true, token };
+  }
+
+  private async auditIssuanceRefusal(auth: AuthContext, error: unknown, auditService = this.auditService): Promise<void> {
+    if (!auditService || !auth.principal || !auth.workspace_id) return;
+    if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;
+    try {
+      await auditService.logAs(auth, {
+        action: 'token.create_refused',
+        target_type: 'api_token',
+        target_id: undefined,
+        payload: { via: 'device_grant', reason: error instanceof PermissionDeniedError ? 'forbidden' : 'invalid_request' },
+      });
+    } catch {
+      // Refusal handling must remain safe if the audit sink is unavailable.
+    }
+  }
+
+  private async auditIssuanceRefusalForStoredGrant(
+    workspaceId: string,
+    principalId: string,
+    error: unknown,
+    auditService = this.auditService,
+  ): Promise<void> {
+    if (!auditService) return;
+    if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;
+    try {
+      await auditService.log({
+        workspace_id: workspaceId,
+        actor: { id: principalId, kind: 'user' },
+        action: 'token.create_refused',
+        target_type: 'api_token',
+        target_id: undefined,
+        payload: { via: 'device_grant', reason: 'authorization_changed' },
+      });
+    } catch {
+      // The grant has already been consumed; do not expose audit failures.
+    }
+  }
+
+  private normalizeCode(userCode: string): string {
+    return userCode.trim().toUpperCase();
+  }
+
+  private lockClause(adapter: DatabaseAdapter): string {
+    return adapter.dialect === 'postgres' ? ' FOR UPDATE' : '';
+  }
+
+  private isPolicyFailure(error: unknown): error is PermissionDeniedError | ValidationError {
+    return error instanceof PermissionDeniedError || error instanceof ValidationError;
   }
 }
