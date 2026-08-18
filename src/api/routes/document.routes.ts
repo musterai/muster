@@ -3,12 +3,22 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { DocumentService } from '../../services/document.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { config } from '../../config/index.js';
 import { validateRequest } from '../middleware/validate.js';
 import { documentCreateSchema, documentListQuerySchema, documentQuerySchema, documentStatusSchema, documentUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
 
-function getActorId(req: Request): string | undefined {
+/**
+ * Credentials are the only identity assertion in enforced mode. The legacy
+ * author field remains an open-mode attribution convenience, never a way for
+ * a network caller to choose who authored a document.
+ */
+function getActorId(req: Request, openModeClaim?: unknown): string | undefined {
   const auth: AuthContext | undefined = (req as any).authContext;
-  return auth?.principal?.id;
+  if (auth?.principal?.id) return auth.principal.id;
+  if (config.auth.mode === 'open' && typeof openModeClaim === 'string' && openModeClaim.length > 0) {
+    return openModeClaim;
+  }
+  return undefined;
 }
 
 export function createDocumentRouter(documentService: DocumentService, auditService: AuditService): Router {
@@ -27,9 +37,10 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
 
   router.post('/projects/:projectId/documents', ...validateRequest({ body: documentCreateSchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const { author_id: claimedAuthorId, ...data } = req.body;
       const doc = await documentService.create(
-        { ...req.body, project_id: req.params.projectId },
-        getActorId(req)
+        { ...data, project_id: req.params.projectId },
+        getActorId(req, claimedAuthorId)
       );
       res.status(201).json(doc);
     } catch (err) {
@@ -50,7 +61,8 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
 
   router.put('/documents/:id', ...validateRequest({ body: documentUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const doc = await documentService.update(req.params.id, req.body, getActorId(req));
+      const { author_id: claimedAuthorId, ...data } = req.body;
+      const doc = await documentService.update(req.params.id, data, getActorId(req, claimedAuthorId));
       res.json(doc);
     } catch (err) {
       next(err);

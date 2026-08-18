@@ -8,7 +8,7 @@
 // 5. Refusal payloads name the missing permission.
 // 6. With MUSTER_AUTH_MODE=open, the existing test suite passes unchanged.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createDatabaseAdapter } from '../src/db/factory.js';
@@ -40,7 +40,14 @@ import {
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../src/shared/auth-context.js';
 import { ALL_PERMISSIONS, PRESET_ROLES } from '../src/shared/permissions.js';
 import { config } from '../src/config/index.js';
-import { createMcpServer, Services } from '../src/mcp/server.js';
+import {
+  assertMcpToolPermissionInventory,
+  createMcpServer,
+  getRegisteredMcpToolNames,
+  installMcpPermissionBoundary,
+  Services,
+} from '../src/mcp/server.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-permission-enforcement.db');
 
@@ -113,7 +120,7 @@ describe('MUS-22: Permission enforcement', () => {
   // ================================================================
   // Acceptance criterion 1: every registered MCP tool is mapped
   // ================================================================
-  it('AC1: every registered MCP tool name appears in TOOL_PERMISSIONS', async () => {
+  it('AC1: the runtime MCP registry and canonical policy catalog are a complete bidirectional inventory', async () => {
     const services: Services = {
       projectService,
       boardService,
@@ -128,45 +135,99 @@ describe('MUS-22: Permission enforcement', () => {
     };
     const server = createMcpServer(services, undefined, OPEN_AUTH_CONTEXT);
 
-    // The MCP SDK doesn't expose tool registration directly, so we enumerate
-    // the known tool names from server.ts by matching against the TOOL_PERMISSIONS
-    // map. Every tool in the codebase must be defined there.
-    // We also verify no TOOL_PERMISSIONS entry lacks a corresponding registration.
-    // The known MCP tools (from server.ts):
-    const registeredTools = [
-      'list_projects', 'create_project', 'get_project_summary', 'update_project', 'delete_project',
-      'list_boards', 'get_board', 'create_board', 'update_board', 'delete_board',
-      'create_column', 'update_column', 'move_column', 'delete_column',
-      'list_cards', 'search_cards', 'create_card', 'get_card', 'update_card', 'move_card',
-      'claim_card', 'assign_card', 'unassign_card',
-      'add_comment', 'update_comment', 'delete_comment', 'add_label', 'remove_label',
-      'archive_card', 'delete_card',
-      'link_document_to_card', 'unlink_document_from_card',
-      'link_card', 'unlink_card',
-      'add_work_link', 'remove_work_link', 'list_work_links',
-      'create_label', 'list_labels',
-      'list_documents', 'create_document', 'get_document', 'update_document',
-      'delete_document', 'set_document_status', 'get_document_history',
-      'register_agent', 'update_agent', 'unregister_agent', 'heartbeat', 'list_agents',
-      'get_activity',
-      'list_knowledge_bases', 'create_knowledge_base', 'link_knowledge_base',
-      'search_knowledge', 'get_entity_knowledge',
-      'add_gained_knowledge', 'upsert_kb_entity', 'update_gained_knowledge', 'update_kb_entity', 'add_kb_relation',
-      'list_roles', 'get_role', 'create_role', 'update_role', 'delete_role', 'clone_role',
-    ];
+    // This reads the SDK's actual registry. There is intentionally no copied
+    // expected-name array that can drift alongside a newly added tool.
+    expect(() => assertMcpToolPermissionInventory(server)).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual(Object.keys(TOOL_PERMISSIONS).sort());
+  });
 
-    const unmapped: string[] = [];
-    for (const toolName of registeredTools) {
-      if (!(toolName in TOOL_PERMISSIONS)) {
-        unmapped.push(toolName);
-      }
+  it('MUS-59: the central MCP boundary rejects unmapped registration and wraps an otherwise unguarded handler', async () => {
+    (config.auth as any).mode = 'enforced';
+    const server = new McpServer({ name: 'boundary-test', version: '1.0.0' });
+    const auth = makeAuth([], 'observer', 'observer-01');
+    installMcpPermissionBoundary(server, auth);
+
+    let mappedHandlerRan = false;
+    server.tool('create_project', {}, async () => {
+      mappedHandlerRan = true;
+      return { content: [{ type: 'text', text: 'should not run' }] };
+    });
+
+    await expect((server as any)._registeredTools.create_project.handler({}, {}))
+      .rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(mappedHandlerRan).toBe(false);
+
+    let replacementHandlerRan = false;
+    (server as any)._registeredTools.create_project.update({
+      callback: async () => {
+        replacementHandlerRan = true;
+        return { content: [{ type: 'text', text: 'should not run' }] };
+      },
+    });
+    await expect((server as any)._registeredTools.create_project.handler({}, {}))
+      .rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(replacementHandlerRan).toBe(false);
+
+    let unmappedHandlerRan = false;
+    expect(() => server.tool('frontier_unmapped_tool', {}, async () => {
+      unmappedHandlerRan = true;
+      return { content: [{ type: 'text', text: 'should not run' }] };
+    })).toThrow(/missing a permission mapping/);
+    expect(unmappedHandlerRan).toBe(false);
+
+    const modernServer = new McpServer({ name: 'modern-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(modernServer, auth);
+    let modernHandlerRan = false;
+    modernServer.registerTool('create_project', { inputSchema: {} }, async () => {
+      modernHandlerRan = true;
+      return { content: [{ type: 'text', text: 'should not run' }] };
+    });
+    await expect((modernServer as any)._registeredTools.create_project.handler({}, {}))
+      .rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(modernHandlerRan).toBe(false);
+  });
+
+  it('MUS-59: MCP create_card enforces the shared strict REST constraints before CardService', async () => {
+    const services: Services = {
+      projectService,
+      boardService,
+      columnService,
+      cardService,
+      commentService,
+      documentService,
+      agentService,
+      eventService,
+      kbService,
+      roleService,
+    };
+    const server = createMcpServer(services, undefined, OPEN_AUTH_CONTEXT) as any;
+    const tool = server._registeredTools.create_card;
+    const createSpy = vi.spyOn(cardService, 'create');
+    const invalidInput = {
+      column_id: 'bad!',
+      title: 'x'.repeat(201),
+      due_date: 'not-a-date',
+      unexpected_attacker_key: true,
+    };
+
+    const parsed = tool.inputSchema.safeParse(invalidInput);
+    expect(parsed.success).toBe(false);
+    await expect(tool.handler(invalidInput, {})).rejects.toThrow();
+    expect(createSpy).not.toHaveBeenCalled();
+
+    const unknownKeyCanary = 'unknown_mcp_canary_opaque';
+    const unknownOnly = tool.inputSchema.safeParse({
+      column_id: 'column-01',
+      title: 'Safe validation probe',
+      [unknownKeyCanary]: true,
+    });
+    expect(unknownOnly.success).toBe(false);
+    if (!unknownOnly.success) {
+      expect(unknownOnly.error.message).not.toContain(unknownKeyCanary);
+      expect(unknownOnly.error.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'custom', path: [] }),
+      ]));
     }
-    expect(unmapped, `Unmapped tools: ${unmapped.join(', ')}`).toEqual([]);
-
-    // Verify reverse: every TOOL_PERMISSIONS entry is an actual tool
-    const mappedNames = Object.keys(TOOL_PERMISSIONS);
-    const unknownMappings = mappedNames.filter(n => !registeredTools.includes(n));
-    expect(unknownMappings, `TOOL_PERMISSIONS has stale entries: ${unknownMappings.join(', ')}`).toEqual([]);
   });
 
   it('REST routes reference the canonical operation policy catalog', () => {

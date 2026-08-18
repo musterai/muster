@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { errorHandler } from '../src/api/middleware/error-handler.js';
@@ -47,7 +47,12 @@ describe('REST request validation', () => {
     const res = await fetch(`${baseUrl}/projects/not%21valid/cards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'Card', priority: 'muster_pat_secret_value', due_date: '2025-02-30', typo: true }),
+      body: JSON.stringify({
+        title: 'Card',
+        priority: 'muster_pat_secret_value',
+        due_date: '2025-02-30',
+        unknown_attacker_canary: true,
+      }),
     });
 
     expect(res.status).toBe(400);
@@ -60,6 +65,8 @@ describe('REST request validation', () => {
     ]));
     expect(JSON.stringify(body)).not.toContain('2025-02-30');
     expect(JSON.stringify(body)).not.toContain('muster_pat_secret_value');
+    expect(JSON.stringify(body)).not.toContain('unknown_attacker_canary');
+    expect(body.details.issues.every((issue: Record<string, unknown>) => !('message' in issue))).toBe(true);
 
     const malformedId = await fetch(`${baseUrl}/projects/not%21valid/cards`, {
       method: 'POST',
@@ -166,5 +173,44 @@ describe('REST request validation', () => {
 
     const invalid = await fetch(`${baseUrl}/oauth/device/lookup?user_code=${encodeURIComponent('x'.repeat(121))}`);
     expect(invalid.status).toBe(400);
+  });
+
+  it('maps malformed and oversized parser input to redacted 400/413 responses without logging the raw body', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const baseUrl = await start(app => {
+        app.post('/parser-probe', (_req, res) => res.status(201).json({ ok: true }));
+      });
+
+      const malformedCanary = 'muster-parser-raw-body-canary';
+      const malformed = await fetch(`${baseUrl}/parser-probe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: `{\"secret\":\"${malformedCanary}\"`,
+      });
+      expect(malformed.status).toBe(400);
+      expect(await malformed.json()).toEqual({
+        error: 'Invalid request body',
+        code: 'INVALID_REQUEST_BODY',
+      });
+
+      const oversizedCanary = 'muster-parser-too-large-canary';
+      const oversized = await fetch(`${baseUrl}/parser-probe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payload: oversizedCanary.repeat(300_000) }),
+      });
+      expect(oversized.status).toBe(413);
+      expect(await oversized.json()).toEqual({
+        error: 'Request body too large',
+        code: 'REQUEST_BODY_TOO_LARGE',
+      });
+
+      const logs = errorSpy.mock.calls.flat().join(' ');
+      expect(logs).not.toContain(malformedCanary);
+      expect(logs).not.toContain(oversizedCanary);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
