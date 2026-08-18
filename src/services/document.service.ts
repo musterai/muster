@@ -4,11 +4,25 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { Document, DocumentVersion, CreateDocument, UpdateDocument } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { assertMaxLength, DOCUMENT_CONTENT_MAX_CHARS } from '../shared/content-limits.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { requirePermission } from '../shared/permission-enforcer.js';
+import { DocumentStateError, ValidationError } from '../shared/errors.js';
+import { AuditService } from './audit.service.js';
+
+export type DocumentTransitionStatus = 'in_review' | 'approved';
+
+export interface DocumentStatusTransition {
+  status: DocumentTransitionStatus;
+  /** Content version the caller reviewed; a status transition does not increment it. */
+  expected_version: number;
+  ip?: string | null;
+}
 
 export class DocumentService {
   constructor(
     private db: DatabaseAdapter,
-    private eventService?: EventService
+    private eventService?: EventService,
+    private auditService: AuditService = new AuditService(db),
   ) {}
 
   async create(data: CreateDocument, actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
@@ -122,6 +136,13 @@ export class DocumentService {
     const existingRows = await db.query<Document>(`SELECT * FROM document WHERE id = ?${lockClause}`, [id]);
     const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);
+    if (existing.status === 'approved') {
+      throw new DocumentStateError(
+        'DOCUMENT_APPROVED_IMMUTABLE',
+        'Approved documents cannot be edited',
+        { document_id: id, status: existing.status, version: existing.version },
+      );
+    }
 
     const title = data.title !== undefined ? data.title : existing.title;
     const content = data.content !== undefined ? data.content : existing.content;
@@ -170,18 +191,85 @@ export class DocumentService {
     return updated;
   }
 
-  async setStatus(id: string, status: 'draft' | 'in_review' | 'approved' | 'archived', actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
-    if (!adapter) return this.db.transaction(tx => this.setStatus(id, status, actorId, tx));
+  async setStatus(
+    id: string,
+    transition: DocumentStatusTransition,
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+    adapter?: DatabaseAdapter,
+  ): Promise<Document> {
+    if (!adapter) return this.db.transaction(tx => this.setStatus(id, transition, auth, tx));
     const db = adapter;
+    if (!transition || (transition.status !== 'in_review' && transition.status !== 'approved')) {
+      throw new ValidationError('Invalid document status transition target', {
+        status: transition?.status,
+        allowed: ['in_review', 'approved'],
+      });
+    }
+    if (!Number.isSafeInteger(transition.expected_version) || transition.expected_version < 1) {
+      throw new ValidationError('expected_version must be a positive integer', {
+        expected_version: transition.expected_version,
+      });
+    }
+
+    // Keep permission enforcement at the shared boundary so REST, MCP,
+    // scripts, and future transports cannot disagree about who may advance it.
+    requirePermission('set_document_status', auth, { status: transition.status });
+
     const lockClause = db.dialect === 'postgres' ? ' FOR UPDATE' : '';
     const existingRows = await db.query<Document>(`SELECT * FROM document WHERE id = ?${lockClause}`, [id]);
     const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);
 
-    const updated_at = new Date().toISOString();
-    await db.execute('UPDATE document SET status = ?, updated_at = ? WHERE id = ?', [status, updated_at, id]);
+    if (existing.version !== transition.expected_version) {
+      throw new DocumentStateError(
+        'DOCUMENT_VERSION_CONFLICT',
+        `Document version changed from ${transition.expected_version} to ${existing.version}`,
+        {
+          document_id: id,
+          expected_version: transition.expected_version,
+          current_version: existing.version,
+        },
+      );
+    }
 
-    const updated: Document = { ...existing, status, updated_at };
+    const expectedTarget = existing.status === 'draft'
+      ? 'in_review'
+      : existing.status === 'in_review'
+        ? 'approved'
+        : null;
+    if (transition.status !== expectedTarget) {
+      throw new DocumentStateError(
+        'DOCUMENT_TRANSITION_INVALID',
+        `Cannot transition document from ${existing.status} to ${transition.status}`,
+        {
+          document_id: id,
+          from_status: existing.status,
+          to_status: transition.status,
+          expected_status: expectedTarget,
+          version: existing.version,
+        },
+      );
+    }
+
+    const updated_at = new Date().toISOString();
+    const write = await db.execute(
+      'UPDATE document SET status = ?, updated_at = ? WHERE id = ? AND status = ? AND version = ?',
+      [transition.status, updated_at, id, existing.status, transition.expected_version],
+    );
+    if (write.changes !== 1) {
+      throw new DocumentStateError(
+        'DOCUMENT_VERSION_CONFLICT',
+        'Document changed while applying the status transition',
+        {
+          document_id: id,
+          expected_version: transition.expected_version,
+          expected_status: existing.status,
+        },
+      );
+    }
+
+    const updated: Document = { ...existing, status: transition.status, updated_at };
+    const actorId = auth.principal?.id;
 
     if (this.eventService) {
       await this.eventService.create({
@@ -190,9 +278,23 @@ export class DocumentService {
         entity_id: id,
         action: 'status_changed',
         actor_id: actorId,
-        payload: { from: existing.status, to: status },
+        payload: { from: existing.status, to: transition.status, version: existing.version },
       }, db);
     }
+
+    await this.auditService.logAs(auth, {
+      action: transition.status === 'approved' ? 'document.approve' : 'document.submit_review',
+      target_type: 'document',
+      target_id: id,
+      payload: {
+        title: existing.title,
+        project_id: existing.project_id,
+        from_status: existing.status,
+        to_status: transition.status,
+        version: existing.version,
+      },
+      ip: transition.ip,
+    }, db);
 
     return updated;
   }

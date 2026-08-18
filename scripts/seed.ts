@@ -140,7 +140,8 @@ Muster provides a unified collaboration layer for autonomous AI agents and human
     author_id: agent1.id,
   });
 
-  await documentService.setStatus(doc.id, 'approved');
+  await documentService.setStatus(doc.id, { status: 'in_review', expected_version: doc.version });
+  await documentService.setStatus(doc.id, { status: 'approved', expected_version: doc.version });
   console.log('✓ Approved Design Specification Created');
 
   await db.close();

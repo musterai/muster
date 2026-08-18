@@ -39,3 +39,10 @@ export class CardRuleError extends AppError {
     super(message, 409, code, details);
   }
 }
+
+/** A document workflow refusal that callers can distinguish from write conflicts. */
+export class DocumentStateError extends AppError {
+  constructor(code: string, message: string, details: Record<string, unknown>) {
+    super(message, 409, code, details);
+  }
+}

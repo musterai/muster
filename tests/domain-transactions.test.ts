@@ -492,14 +492,22 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
 
     const project = await projectService.create({ name: 'MCP status audit' });
     const document = await documentService.create({ project_id: project.id, title: 'MCP doc', content: 'draft' });
-    await server._registeredTools.set_document_status.handler({ document_id: document.id, status: 'approved' }, {});
-    await server._registeredTools.set_document_status.handler({ document_id: document.id, status: 'draft' }, {});
+    await server._registeredTools.set_document_status.handler({
+      document_id: document.id,
+      status: 'in_review',
+      expected_version: document.version,
+    }, {});
+    await server._registeredTools.set_document_status.handler({
+      document_id: document.id,
+      status: 'approved',
+      expected_version: document.version,
+    }, {});
     const documentAudits = await db.query<{ action: string }>(
       'SELECT action FROM audit_log WHERE target_id = ?',
       [document.id],
     );
     expect(documentAudits).toHaveLength(2);
-    expect(documentAudits.map(row => row.action)).toEqual(expect.arrayContaining(['document.approve', 'document.status_changed']));
+    expect(documentAudits.map(row => row.action)).toEqual(expect.arrayContaining(['document.approve', 'document.submit_review']));
 
     const beforeRoleCount = (await db.query('SELECT id FROM role WHERE key = ?', ['mcp_missing_db'])).length;
     const noDbServices = { ...services, db: undefined } as Services;

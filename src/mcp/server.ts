@@ -998,14 +998,10 @@ All AI agents and human operators collaborating within Muster must follow this p
 
   server.tool('set_document_status', {
     document_id: z.string(),
-    status: z.enum(['draft', 'in_review', 'approved'])
-  }, withPermission('set_document_status', auth, async ({ document_id, status }) => {
-    const result = await withMutationAudit(services, auth, (result: Awaited<ReturnType<DocumentService['setStatus']>>) => ({
-      action: status === 'approved' ? 'document.approve' : 'document.status_changed',
-      target_type: 'document',
-      target_id: result.id,
-      payload: { status, title: result.title, project_id: result.project_id },
-    }), tx => services.documentService.setStatus(document_id, status, resolveActor(auth), tx));
+    status: z.enum(['in_review', 'approved']),
+    expected_version: z.number().int().positive(),
+  }, withPermission('set_document_status', auth, async ({ document_id, status, expected_version }) => {
+    const result = await services.documentService.setStatus(document_id, { status, expected_version }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
