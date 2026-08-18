@@ -25,10 +25,17 @@ export class AgentService {
     data: RegisterAgent,
     operatorUserId?: string,
     restrictToRoleId?: string,
-    workspaceId?: string,
+    workspaceId?: string | null,
   ): Promise<Agent> {
     const id = data.agent_id || data.id || ulid();
     const now = new Date().toISOString();
+    const membershipRows = operatorUserId && !workspaceId
+      ? await this.db.query<{ workspace_id: string }>(
+          'SELECT workspace_id FROM workspace_member WHERE user_id = ? ORDER BY joined_at ASC LIMIT 1',
+          [operatorUserId],
+        )
+      : [];
+    const resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
 
     // Check if re-binding an existing agent
     const existing = await this.getById(id);
@@ -40,7 +47,7 @@ export class AgentService {
         if (existing.operator_user_id !== operatorUserId) {
           throw new ValidationError('Agent belongs to a different operator');
         }
-        if (!existing.workspace_id || existing.workspace_id !== workspaceId) {
+        if (!existing.workspace_id || existing.workspace_id !== resolvedWorkspaceId) {
           throw new ValidationError('Agent belongs to a different workspace');
         }
       }
@@ -60,10 +67,11 @@ export class AgentService {
       // re-parents an unassigned identity.
       const finalOperatorUserId = existing.operator_user_id || null;
       const finalRoleId = restrictToRoleId || existing.role_id || null;
+      const finalWorkspaceId = existing.workspace_id || null;
 
       await this.db.execute(
-        `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ? WHERE id = ?`,
-        [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, id]
+        `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ?, workspace_id = ? WHERE id = ?`,
+        [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, finalWorkspaceId, id]
       );
 
       return (await this.getById(id))!;
@@ -87,7 +95,7 @@ export class AgentService {
     await this.db.execute(
       `INSERT INTO agent (id, name, capabilities, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, name, capabilitiesStr, status, now, operatorUserId || null, restrictToRoleId || null, workspaceId || null, now]
+      [id, name, capabilitiesStr, status, now, operatorUserId || null, restrictToRoleId || null, resolvedWorkspaceId, now]
     );
 
     if (this.eventService) {
@@ -102,7 +110,7 @@ export class AgentService {
       last_seen_at: now,
       operator_user_id: operatorUserId || null,
       role_id: restrictToRoleId || null,
-      workspace_id: workspaceId || null,
+      workspace_id: resolvedWorkspaceId,
       created_at: now,
     };
   }
