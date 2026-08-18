@@ -39,6 +39,56 @@ async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[
 
 const PG_URL = process.env.MUSTER_TEST_PG_URL;
 
+describe('PostgreSQL transaction lifecycle probe', () => {
+  it('returns the client before a slow after-commit callback and keeps commit order', async () => {
+    const clients: Array<{ released: boolean; query: (sql: string) => Promise<{ rows: never[]; rowCount: number }> }> = [];
+    const pool = {
+      connect: async () => {
+        const client = {
+          released: false,
+          query: async (_sql: string) => ({ rows: [], rowCount: 0 }),
+          release: () => { client.released = true; },
+        };
+        clients.push(client);
+        return client;
+      },
+      query: async () => ({ rows: [], rowCount: 0 }),
+      end: async () => undefined,
+    };
+    const adapter = new PostgresAdapter('unused', pool as any);
+    let enterCallback!: () => void;
+    const callbackEntered = new Promise<void>(resolve => { enterCallback = resolve; });
+    let releaseCallback!: () => void;
+    const callbackRelease = new Promise<void>(resolve => { releaseCallback = resolve; });
+    const callbackOrder: string[] = [];
+
+    const first = adapter.transaction(async tx => {
+      tx.afterCommit(async () => {
+        callbackOrder.push('first');
+        enterCallback();
+        await callbackRelease;
+      });
+    });
+    await callbackEntered;
+    expect(clients[0].released).toBe(true);
+
+    // The first callback is still blocked, but its checked-out client has
+    // already returned to the pool, so a second transaction can commit.
+    const second = adapter.transaction(async tx => {
+      tx.afterCommit(() => { callbackOrder.push('second'); });
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(clients).toHaveLength(2);
+    expect(clients[1].released).toBe(true);
+    expect(callbackOrder).toEqual(['first']);
+
+    releaseCallback();
+    await Promise.all([first, second]);
+    expect(callbackOrder).toEqual(['first', 'second']);
+    await adapter.close();
+  });
+});
+
 describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
   let adminPool: pg.Pool;
   let adapter: PostgresAdapter;

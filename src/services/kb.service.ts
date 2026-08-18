@@ -28,36 +28,35 @@ export class KBService {
     action: string,
     entityId: string,
     actorId?: string,
-    payload?: Record<string, unknown>
+    payload?: Record<string, unknown>,
+    adapter: DatabaseAdapter = this.db,
   ): Promise<void> {
     if (!this.eventService) return;
-    try {
-      const projectIds = await this.getLinkedProjectIds(kbId);
-      for (const projectId of projectIds) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'knowledge_base',
-          entity_id: entityId,
-          action,
-          actor_id: actorId,
-          payload,
-        });
-      }
-    } catch (err) {
-      console.error('Failed to log KB event:', err);
+    const projectIds = await this.getLinkedProjectIds(kbId, adapter);
+    for (const projectId of projectIds) {
+      await this.eventService.create({
+        project_id: projectId,
+        entity_type: 'knowledge_base',
+        entity_id: entityId,
+        action,
+        actor_id: actorId,
+        payload,
+      }, adapter);
     }
   }
 
   // --- Knowledge Base CRUD & Linkage ---
 
 
-  async create(data: CreateKnowledgeBase, actorId?: string): Promise<KnowledgeBase> {
+  async create(data: CreateKnowledgeBase, actorId?: string, adapter?: DatabaseAdapter): Promise<KnowledgeBase> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+    const db = adapter;
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
     const is_global = data.is_global ? 1 : 0;
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO knowledge_base (id, name, description, is_global, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [id, data.name, data.description || null, is_global, created_at, updated_at]
@@ -65,7 +64,7 @@ export class KBService {
 
     if (data.project_ids && data.project_ids.length > 0) {
       for (const projectId of data.project_ids) {
-        await this.linkProject(id, projectId);
+        await this.linkProject(id, projectId, actorId, db);
       }
     }
 
@@ -87,7 +86,7 @@ export class KBService {
         action: 'created',
         actor_id: actorId,
         payload: { name: kb.name, is_global: kb.is_global },
-      });
+      }, db);
     }
 
     return kb;
@@ -123,21 +122,23 @@ export class KBService {
     return kbs;
   }
 
-  async linkProject(kbId: string, projectId: string, actorId?: string): Promise<void> {
+  async linkProject(kbId: string, projectId: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.linkProject(kbId, projectId, actorId, tx));
+    const db = adapter;
     const created_at = new Date().toISOString();
-    await this.db.execute(
+    const result = await db.execute(
       `INSERT OR IGNORE INTO project_knowledge_base (project_id, kb_id, created_at)
        VALUES (?, ?, ?)`,
       [projectId, kbId, created_at]
     );
-    if (this.eventService) {
+    if (result.changes === 1 && this.eventService) {
       await this.eventService.create({
         project_id: projectId,
         entity_type: 'knowledge_base',
         entity_id: kbId,
         action: 'linked',
         actor_id: actorId,
-      });
+      }, db);
     }
   }
 
@@ -148,8 +149,8 @@ export class KBService {
     );
   }
 
-  async getLinkedProjectIds(kbId: string): Promise<string[]> {
-    const rows = await this.db.query<{ project_id: string }>(
+  async getLinkedProjectIds(kbId: string, adapter: DatabaseAdapter = this.db): Promise<string[]> {
+    const rows = await adapter.query<{ project_id: string }>(
       'SELECT project_id FROM project_knowledge_base WHERE kb_id = ?',
       [kbId]
     );
@@ -162,12 +163,14 @@ export class KBService {
 
   // --- Entities ---
 
-  async upsertEntity(data: UpsertKBEntity, actorId?: string): Promise<KBEntity> {
+  async upsertEntity(data: UpsertKBEntity, actorId?: string, adapter?: DatabaseAdapter): Promise<KBEntity> {
+    if (!adapter) return this.db.transaction(tx => this.upsertEntity(data, actorId, tx));
+    const db = adapter;
     const now = new Date().toISOString();
     let existing: KBEntity | null = null;
 
     if (data.identifier) {
-      const rows = await this.db.query<KBEntity>(
+      const rows = await db.query<KBEntity>(
         'SELECT * FROM kb_entity WHERE kb_id = ? AND identifier = ?',
         [data.kb_id, data.identifier]
       );
@@ -175,7 +178,7 @@ export class KBService {
     }
 
     if (!existing && data.name) {
-      const rows = await this.db.query<KBEntity>(
+      const rows = await db.query<KBEntity>(
         'SELECT * FROM kb_entity WHERE kb_id = ? AND name = ?',
         [data.kb_id, data.name]
       );
@@ -188,7 +191,7 @@ export class KBService {
     let resEntity: KBEntity;
 
     if (existing) {
-      await this.db.execute(
+      await db.execute(
         `UPDATE kb_entity SET name = ?, type = ?, identifier = ?, metadata = ?, updated_at = ? WHERE id = ?`,
         [data.name, type, data.identifier || existing.identifier, metadataStr || existing.metadata, now, existing.id]
       );
@@ -200,10 +203,10 @@ export class KBService {
         metadata: data.metadata || existing.metadata,
         updated_at: now,
       };
-      await this.logEventForKb(data.kb_id, 'entity_updated', resEntity.id, actorId, { name: resEntity.name, type: resEntity.type, kb_id: data.kb_id });
+      await this.logEventForKb(data.kb_id, 'entity_updated', resEntity.id, actorId, { name: resEntity.name, type: resEntity.type, kb_id: data.kb_id }, db);
     } else {
       const id = ulid();
-      await this.db.execute(
+      await db.execute(
         `INSERT INTO kb_entity (id, kb_id, name, type, identifier, metadata, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, data.kb_id, data.name, type, data.identifier || null, metadataStr, now, now]
@@ -218,14 +221,14 @@ export class KBService {
         created_at: now,
         updated_at: now,
       };
-      await this.logEventForKb(data.kb_id, 'entity_created', resEntity.id, actorId, { name: resEntity.name, type: resEntity.type, kb_id: data.kb_id });
+      await this.logEventForKb(data.kb_id, 'entity_created', resEntity.id, actorId, { name: resEntity.name, type: resEntity.type, kb_id: data.kb_id }, db);
     }
 
     return resEntity;
   }
 
-  async getEntityById(id: string): Promise<KBEntity | null> {
-    const rows = await this.db.query<KBEntity>('SELECT * FROM kb_entity WHERE id = ?', [id]);
+  async getEntityById(id: string, adapter: DatabaseAdapter = this.db): Promise<KBEntity | null> {
+    const rows = await adapter.query<KBEntity>('SELECT * FROM kb_entity WHERE id = ?', [id]);
     return rows[0] || null;
   }
 
@@ -243,8 +246,10 @@ export class KBService {
     await this.db.execute('DELETE FROM kb_entity WHERE id = ?', [id]);
   }
 
-  async updateEntity(id: string, data: Partial<UpsertKBEntity>, actorId?: string): Promise<KBEntity> {
-    const existing = await this.getEntityById(id);
+  async updateEntity(id: string, data: Partial<UpsertKBEntity>, actorId?: string, adapter?: DatabaseAdapter): Promise<KBEntity> {
+    if (!adapter) return this.db.transaction(tx => this.updateEntity(id, data, actorId, tx));
+    const db = adapter;
+    const existing = await this.getEntityById(id, db);
     if (!existing) throw new Error(`KBEntity with ID ${id} not found`);
 
     const now = new Date().toISOString();
@@ -253,7 +258,7 @@ export class KBService {
     const identifier = data.identifier !== undefined ? data.identifier : existing.identifier;
     const metadataStr = data.metadata ? JSON.stringify(data.metadata) : (existing.metadata ? (typeof existing.metadata === 'string' ? existing.metadata : JSON.stringify(existing.metadata)) : null);
 
-    await this.db.execute(
+    await db.execute(
       `UPDATE kb_entity SET name = ?, type = ?, identifier = ?, metadata = ?, updated_at = ? WHERE id = ?`,
       [name, type, identifier, metadataStr, now, id]
     );
@@ -267,14 +272,16 @@ export class KBService {
       updated_at: now,
     };
 
-    await this.logEventForKb(existing.kb_id, 'entity_updated', id, actorId, { name: updated.name, type: updated.type, kb_id: existing.kb_id });
+    await this.logEventForKb(existing.kb_id, 'entity_updated', id, actorId, { name: updated.name, type: updated.type, kb_id: existing.kb_id }, db);
     return updated;
   }
 
 
   // --- Facts / Gained Knowledge ---
 
-  async addFact(data: AddGainedKnowledge, actorId?: string): Promise<KBFact> {
+  async addFact(data: AddGainedKnowledge, actorId?: string, adapter?: DatabaseAdapter): Promise<KBFact> {
+    if (!adapter) return this.db.transaction(tx => this.addFact(data, actorId, tx));
+    const db = adapter;
     const now = new Date().toISOString();
     const id = ulid();
     let entityId = data.entity_id || null;
@@ -286,7 +293,7 @@ export class KBService {
         name: data.entity_name || data.entity_identifier || 'Unknown Entity',
         identifier: data.entity_identifier,
         type: data.entity_type,
-      }, actorId);
+      }, actorId, db);
       entityId = entity.id;
     } else if (!entityId) {
       // Auto-detect IP or email pattern in title or content if available
@@ -300,7 +307,7 @@ export class KBService {
           name: ipMatch[0],
           identifier: ipMatch[0],
           type: 'ip_address',
-        }, actorId);
+        }, actorId, db);
         entityId = entity.id;
       } else if (emailMatch) {
         const entity = await this.upsertEntity({
@@ -308,7 +315,7 @@ export class KBService {
           name: emailMatch[0],
           identifier: emailMatch[0],
           type: 'email',
-        }, actorId);
+        }, actorId, db);
         entityId = entity.id;
       }
     }
@@ -317,7 +324,7 @@ export class KBService {
     const confidence = data.confidence !== undefined ? data.confidence : 1.0;
     const sourceAgentId = data.source_principal_id || actorId || null;
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO kb_fact (id, kb_id, entity_id, title, content, category, confidence, source_principal_id, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.kb_id, entityId, data.title, data.content, category, confidence, sourceAgentId, now, now]
@@ -337,7 +344,7 @@ export class KBService {
     };
 
     if (entityId) {
-      const entity = await this.getEntityById(entityId);
+      const entity = await this.getEntityById(entityId, db);
       if (entity) {
         fact.entity_name = entity.name;
         fact.entity_identifier = entity.identifier || undefined;
@@ -349,7 +356,7 @@ export class KBService {
       category: fact.category,
       entity_name: fact.entity_name,
       kb_id: data.kb_id,
-    });
+    }, db);
 
     return fact;
   }
@@ -383,16 +390,19 @@ export class KBService {
     return this.db.query<KBFact>(sql, params);
   }
 
-  async deleteFact(id: string, actorId?: string): Promise<void> {
-    const existingRows = await this.db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
-    if (existingRows[0]) {
-      await this.logEventForKb(existingRows[0].kb_id, 'fact_deleted', id, actorId, { title: existingRows[0].title, kb_id: existingRows[0].kb_id });
-    }
-    await this.db.execute('DELETE FROM kb_fact WHERE id = ?', [id]);
+  async deleteFact(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.deleteFact(id, actorId, tx));
+    const db = adapter;
+    const existingRows = await db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
+    if (!existingRows[0]) return;
+    await db.execute('DELETE FROM kb_fact WHERE id = ?', [id]);
+    await this.logEventForKb(existingRows[0].kb_id, 'fact_deleted', id, actorId, { title: existingRows[0].title, kb_id: existingRows[0].kb_id }, db);
   }
 
-  async updateFact(id: string, data: Partial<AddGainedKnowledge>, actorId?: string): Promise<KBFact> {
-    const existingRows = await this.db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
+  async updateFact(id: string, data: Partial<AddGainedKnowledge>, actorId?: string, adapter?: DatabaseAdapter): Promise<KBFact> {
+    if (!adapter) return this.db.transaction(tx => this.updateFact(id, data, actorId, tx));
+    const db = adapter;
+    const existingRows = await db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
     if (!existingRows[0]) throw new Error(`KBFact with ID ${id} not found`);
     const existing = existingRows[0];
 
@@ -410,11 +420,11 @@ export class KBService {
         name: data.entity_name || data.entity_identifier || 'Unknown Entity',
         identifier: data.entity_identifier,
         type: data.entity_type,
-      }, actorId);
+      }, actorId, db);
       entityId = entity.id;
     }
 
-    await this.db.execute(
+    await db.execute(
       `UPDATE kb_fact SET title = ?, content = ?, category = ?, confidence = ?, entity_id = ?, updated_at = ? WHERE id = ?`,
       [title, content, category, confidence, entityId, now, id]
     );
@@ -430,7 +440,7 @@ export class KBService {
     };
 
     if (entityId) {
-      const entity = await this.getEntityById(entityId);
+      const entity = await this.getEntityById(entityId, db);
       if (entity) {
         fact.entity_name = entity.name;
         fact.entity_identifier = entity.identifier || undefined;
@@ -442,7 +452,7 @@ export class KBService {
       category: fact.category,
       entity_name: fact.entity_name,
       kb_id: existing.kb_id,
-    });
+    }, db);
 
     return fact;
   }
@@ -450,18 +460,20 @@ export class KBService {
 
   // --- Graph Relations ---
 
-  async addRelation(data: AddKBRelation, actorId?: string): Promise<KBRelation> {
+  async addRelation(data: AddKBRelation, actorId?: string, adapter?: DatabaseAdapter): Promise<KBRelation> {
+    if (!adapter) return this.db.transaction(tx => this.addRelation(data, actorId, tx));
+    const db = adapter;
     const id = ulid();
     const created_at = new Date().toISOString();
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO kb_relation (id, kb_id, source_entity_id, target_entity_id, relation_type, description, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, data.kb_id, data.source_entity_id, data.target_entity_id, data.relation_type, data.description || null, created_at]
     );
 
-    const source = await this.getEntityById(data.source_entity_id);
-    const target = await this.getEntityById(data.target_entity_id);
+    const source = await this.getEntityById(data.source_entity_id, db);
+    const target = await this.getEntityById(data.target_entity_id, db);
 
     const relation: KBRelation = {
       id,
@@ -480,7 +492,7 @@ export class KBService {
       source_name: relation.source_entity_name,
       target_name: relation.target_entity_name,
       kb_id: data.kb_id,
-    });
+    }, db);
 
     return relation;
   }

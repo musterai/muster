@@ -5,6 +5,8 @@ import {
   AgentService,
   CardService,
   CommentService,
+  DocumentService,
+  RoleService,
 } from '../services/index.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { withPermission } from '../shared/permission-enforcer.js';
@@ -19,6 +21,27 @@ export type { Services } from '../shared/services.js';
 
 import { Request } from 'express';
 import { config } from '../config/index.js';
+import type { DatabaseAdapter } from '../db/adapter.js';
+
+async function withMutationAudit<T>(
+  services: Services,
+  auth: AuthContext,
+  entry: { action: string; target_type: string; target_id?: string; payload?: Record<string, unknown> }
+    | ((result: T) => { action: string; target_type: string; target_id?: string; payload?: Record<string, unknown> }),
+  mutate: (adapter?: DatabaseAdapter) => Promise<T>,
+): Promise<T> {
+  // An audited MCP mutation must never run without the root adapter that can
+  // bind its audit row to the mutation. Test doubles and embedders must wire
+  // the same dependency as production; failing here is deliberately before
+  // mutate() so there is no unaudited side effect.
+  if (!services.db) throw new Error('Atomic MCP mutation requires services.db');
+  return services.db.transaction(async tx => {
+    const result = await mutate(tx);
+    const resolvedEntry = typeof entry === 'function' ? entry(result) : entry;
+    await services.auditService.logAs(auth, resolvedEntry, tx);
+    return result;
+  });
+}
 
 /**
  * Derive the actor ID.
@@ -204,7 +227,11 @@ All AI agents and human operators collaborating within Muster must follow this p
   );
 
   server.tool('delete_project', { project_id: z.string() }, withPermission('delete_project', auth, async ({ project_id }) => {
-    await services.projectService.delete(project_id, resolveActor(auth));
+    await withMutationAudit(services, auth, {
+      action: 'project.delete',
+      target_type: 'project',
+      target_id: project_id,
+    }, tx => services.projectService.delete(project_id, resolveActor(auth), tx));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Project ${project_id} deleted` }) }] };
   }));
 
@@ -565,7 +592,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     document_id: z.string(),
     status: z.enum(['draft', 'in_review', 'approved'])
   }, withPermission('set_document_status', auth, async ({ document_id, status }) => {
-    const result = await services.documentService.setStatus(document_id, status, resolveActor(auth));
+    const result = await withMutationAudit(services, auth, (result: Awaited<ReturnType<DocumentService['setStatus']>>) => ({
+      action: status === 'approved' ? 'document.approve' : 'document.status_changed',
+      target_type: 'document',
+      target_id: result.id,
+      payload: { status, title: result.title, project_id: result.project_id },
+    }), tx => services.documentService.setStatus(document_id, status, resolveActor(auth), tx));
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -611,7 +643,11 @@ All AI agents and human operators collaborating within Muster must follow this p
 
   server.tool('unregister_agent', { agent_id: z.string() }, withPermission('unregister_agent', auth, async ({ agent_id }) => {
     await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'agent.manage_others');
-    await services.agentService.unregister(agent_id);
+    await withMutationAudit(services, auth, {
+      action: 'agent.unregister',
+      target_type: 'agent',
+      target_id: agent_id,
+    }, tx => services.agentService.unregister(agent_id, resolveActor(auth), tx));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Agent ${agent_id} unregistered.` }) }] };
   }));
 
@@ -787,7 +823,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     permissions: z.array(z.string()),
     rank: z.number().optional(),
   }, withPermission('create_role', auth, async (args) => {
-    const role = await services.roleService.create(args);
+    const role = await withMutationAudit(services, auth, (role: Awaited<ReturnType<RoleService['create']>>) => ({
+      action: 'role.create',
+      target_type: 'role',
+      target_id: role.id,
+      payload: { workspace_id: args.workspace_id, key: role.key, name: role.name },
+    }), tx => services.roleService.create(args, tx));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 
@@ -798,12 +839,21 @@ All AI agents and human operators collaborating within Muster must follow this p
     permissions: z.array(z.string()).optional(),
     rank: z.number().optional(),
   }, withPermission('update_role', auth, async ({ role_id, ...data }) => {
-    const role = await services.roleService.update(role_id, data);
+    const role = await withMutationAudit(services, auth, {
+      action: 'role.update',
+      target_type: 'role',
+      target_id: role_id,
+      payload: data,
+    }, tx => services.roleService.update(role_id, data, tx));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 
   server.tool('delete_role', { role_id: z.string() }, withPermission('delete_role', auth, async ({ role_id }) => {
-    await services.roleService.delete(role_id);
+    await withMutationAudit(services, auth, {
+      action: 'role.delete',
+      target_type: 'role',
+      target_id: role_id,
+    }, tx => services.roleService.delete(role_id, tx));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Role ${role_id} deleted` }) }] };
   }));
 
@@ -812,7 +862,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     new_key: z.string(),
     new_name: z.string().optional(),
   }, withPermission('clone_role', auth, async ({ role_id, new_key, new_name }) => {
-    const role = await services.roleService.clone(role_id, new_key, new_name);
+    const role = await withMutationAudit(services, auth, (role: Awaited<ReturnType<RoleService['clone']>>) => ({
+      action: 'role.clone',
+      target_type: 'role',
+      target_id: role.id,
+      payload: { from: role_id, key: role.key, name: role.name },
+    }), tx => services.roleService.clone(role_id, new_key, new_name, tx));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 

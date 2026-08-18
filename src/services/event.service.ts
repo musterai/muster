@@ -22,17 +22,16 @@ export class EventService {
   }
 
   /**
-   * The optional adapter is a transaction handle supplied by a service that
-   * is persisting an entity and its event atomically. On PostgreSQL this is
-   * essential: using the pool-backed adapter here would acquire a second
-   * connection and commit the event independently of the entity mutation.
+   * Insert through an optional transaction-scoped adapter. Domain services
+   * pass their open transaction here so the event cannot outlive a rolled
+   * back mutation. Listener callbacks remain best-effort side effects.
    */
-  async create(data: CreateEvent, db: DatabaseAdapter = this.db): Promise<Event> {
+  async create(data: CreateEvent, adapter: DatabaseAdapter = this.db): Promise<Event> {
     const id = ulid();
     const created_at = new Date().toISOString();
     const payload = data.payload ? JSON.stringify(data.payload) : null;
 
-    await db.execute(
+    await adapter.execute(
       `INSERT INTO event (id, project_id, entity_type, entity_id, action, actor_id, payload, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.project_id, data.entity_type, data.entity_id, data.action, data.actor_id || null, payload, created_at]
@@ -49,10 +48,7 @@ export class EventService {
       created_at,
     };
 
-    // Durable event rows are inserted inside the caller's transaction, but
-    // external delivery must wait until COMMIT. Otherwise a later event
-    // failure can roll back the move while SSE clients already saw it.
-    db.afterCommit(async () => {
+    const notify = async (): Promise<void> => {
       for (const listener of this.listeners) {
         try {
           await listener(event);
@@ -60,7 +56,9 @@ export class EventService {
           console.error('Error in event listener:', err);
         }
       }
-    });
+    };
+    if (adapter.afterCommit) await adapter.afterCommit(notify);
+    else await notify();
 
     return event;
   }

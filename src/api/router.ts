@@ -29,17 +29,17 @@ export function createRouter(services: Services, sseManager: SSEManager, db: Dat
   v1.use(permissionGuard);
 
   v1.use(createHealthRouter(db));
-  v1.use('/projects', createProjectRouter(services.projectService, services.auditService));
+  v1.use('/projects', createProjectRouter(db, services.projectService, services.auditService));
   v1.use(createBoardRouter(services.boardService, services.columnService, services.cardService));
   v1.use(createColumnRouter(services.columnService));
   v1.use(createCardRouter(services.cardService, services.commentService));
-  v1.use(createDocumentRouter(services.documentService, services.auditService));
-  v1.use(createAgentRouter(services.agentService, services.cardService));
+  v1.use(createDocumentRouter(db, services.documentService, services.auditService));
+  v1.use(createAgentRouter(db, services.agentService, services.cardService, services.auditService));
   v1.use(createUserRouter(db, services.userService, services.roleService, services.auditService));
   v1.use(createEventRouter(services.eventService, sseManager));
   v1.use(createKBRouter(services.kbService));
-  v1.use(createRoleRouter(services.roleService, services.auditService));
-  v1.use(createTokenRouter(services.tokenService, services.auditService));
+  v1.use(createRoleRouter(db, services.roleService, services.auditService));
+  v1.use(createTokenRouter(db, services.tokenService, services.auditService));
   v1.use(createAuthRouter(
     db,
     services.oidcService,

@@ -160,17 +160,19 @@ export function createAuthRouter(
           if (!admitted && result.email && result.emailVerified) {
             const invite = await invitationService.findPendingByEmail(workspaceId, result.email);
             if (invite) {
-              await invitationService.accept(invite.id, user.id);
-              admitted = true;
-              await auditService.log({
-                workspace_id: workspaceId,
-                actor: { id: user.id, kind: 'user' },
-                action: 'invitation.accept',
-                target_type: 'invitation',
-                target_id: invite.id,
-                payload: { email: result.email },
-                ip: req.ip || null,
+              await db.transaction(async tx => {
+                await invitationService.accept(invite.id, user.id, tx);
+                await auditService.log({
+                  workspace_id: workspaceId,
+                  actor: { id: user.id, kind: 'user' },
+                  action: 'invitation.accept',
+                  target_type: 'invitation',
+                  target_id: invite.id,
+                  payload: { email: result.email },
+                  ip: req.ip || null,
+                }, tx);
               });
+              admitted = true;
             }
           }
         }
@@ -275,6 +277,7 @@ export function createAuthRouter(
       const displayNameParam = typeof req.body?.display_name === 'string' ? req.body.display_name.trim() : null;
 
       let user: any = null;
+      let needsLocalUser = false;
 
       if (userIdParam) {
         user = await userService.findById(userIdParam);
@@ -285,7 +288,7 @@ export function createAuthRouter(
             res.status(400).json({ error: 'bad_request', message: 'display_name must be 80 characters or fewer' });
             return;
           }
-          user = await userService.createLocalUser(displayNameParam);
+          needsLocalUser = true;
         }
       }
 
@@ -297,15 +300,25 @@ export function createAuthRouter(
       const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
       const workspaceId = wsRows[0]?.id || null;
 
-      if (workspaceId) {
-        const isMember = await userService.isWorkspaceMember(workspaceId, user.id);
-        if (!isMember) {
-          const ownerRole = await roleService.getByKey(workspaceId, 'owner');
-          if (ownerRole) {
-            await userService.addWorkspaceMember(workspaceId, user.id, ownerRole.id, null);
+      await db.transaction(async tx => {
+        if (needsLocalUser) user = await userService.createLocalUser(displayNameParam!, tx);
+        if (workspaceId) {
+          const isMember = await userService.isWorkspaceMember(workspaceId, user.id, tx);
+          if (!isMember) {
+            const ownerRole = await roleService.getByKey(workspaceId, 'owner', tx);
+            if (ownerRole) await userService.addWorkspaceMember(workspaceId, user.id, ownerRole.id, null, tx);
           }
         }
-      }
+        await auditService.log({
+          workspace_id: workspaceId,
+          actor: { id: user.id, kind: 'user' },
+          action: 'user.local_identity_create',
+          target_type: 'user',
+          target_id: user.id,
+          payload: { display_name: user.display_name },
+          ip: req.ip || null,
+        }, tx);
+      });
 
       const session = await sessionService.create(user.id, {
         userAgent: req.headers['user-agent'] || null,
@@ -319,16 +332,6 @@ export function createAuthRouter(
         sameSite: 'Lax',
         maxAgeSeconds: SESSION_TTL_MS / 1000,
       }));
-
-      await auditService.log({
-        workspace_id: workspaceId,
-        actor: { id: user.id, kind: 'user' },
-        action: 'user.local_identity_create',
-        target_type: 'user',
-        target_id: user.id,
-        payload: { display_name: user.display_name },
-        ip: req.ip || null,
-      });
 
       res.status(201).json({ user });
     } catch (err) {
@@ -346,19 +349,22 @@ export function createAuthRouter(
         return;
       }
       const createdBy = req.authContext?.principal?.kind === 'user' ? req.authContext.principal.id : null;
-      const invitation = await invitationService.create({
-        workspace_id: req.params.workspaceId,
-        email,
-        role_id,
-        created_by: createdBy,
-      });
-      await auditService.logAs(req.authContext, {
-        workspace_id: req.params.workspaceId,
-        action: 'invitation.create',
-        target_type: 'invitation',
-        target_id: invitation.id,
-        payload: { email, role_id },
-        ip: req.ip,
+      let invitation;
+      await db.transaction(async tx => {
+        invitation = await invitationService.create({
+          workspace_id: req.params.workspaceId,
+          email,
+          role_id,
+          created_by: createdBy,
+        }, tx);
+        await auditService.logAs(req.authContext, {
+          workspace_id: req.params.workspaceId,
+          action: 'invitation.create',
+          target_type: 'invitation',
+          target_id: invitation.id,
+          payload: { email, role_id },
+          ip: req.ip,
+        }, tx);
       });
       res.status(201).json(invitation);
     } catch (err) {
@@ -378,14 +384,16 @@ export function createAuthRouter(
   router.delete('/invitations/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const invite = await invitationService.getById(req.params.id);
-      await invitationService.revoke(req.params.id);
-      await auditService.logAs(req.authContext, {
-        workspace_id: invite?.workspace_id || null,
-        action: 'invitation.revoke',
-        target_type: 'invitation',
-        target_id: req.params.id,
-        payload: invite ? { email: invite.email } : undefined,
-        ip: req.ip,
+      await db.transaction(async tx => {
+        await invitationService.revoke(req.params.id, tx);
+        await auditService.logAs(req.authContext, {
+          workspace_id: invite?.workspace_id || null,
+          action: 'invitation.revoke',
+          target_type: 'invitation',
+          target_id: req.params.id,
+          payload: invite ? { email: invite.email } : undefined,
+          ip: req.ip,
+        }, tx);
       });
       res.status(204).send();
     } catch (err) {
