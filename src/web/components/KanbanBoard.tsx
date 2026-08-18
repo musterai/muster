@@ -888,6 +888,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           doneVisibleLimit={doneLimit}
                           columnDragProvided={colDragProvided}
                           highlightEpicId={hoveredEpicId}
+                          showBoardName={selectedBoardId === 'all' || board?.id === 'all'}
+                          showParentEpic
                           onOpenNewCardForm={handleOpenNewCardForm}
                           onEditColumnSettings={setEditingColumn}
                           onFocusCard={setFocusedCardId}
@@ -1019,6 +1021,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                     innerRef: () => {},
                                   }}
                                   droppableId={`${column.id}:::${epic.id}`}
+                                  showBoardName={selectedBoardId === 'all' || board?.id === 'all'}
+                                  showParentEpic={false}
                                   onOpenNewCardForm={handleOpenNewCardForm}
                                   onEditColumnSettings={setEditingColumn}
                                   onFocusCard={setFocusedCardId}
@@ -1079,6 +1083,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                                 innerRef: () => {},
                               }}
                               droppableId={`${column.id}:::unparented`}
+                              showBoardName={selectedBoardId === 'all' || board?.id === 'all'}
+                              showParentEpic={false}
                               onOpenNewCardForm={handleOpenNewCardForm}
                               onEditColumnSettings={setEditingColumn}
                               onFocusCard={setFocusedCardId}

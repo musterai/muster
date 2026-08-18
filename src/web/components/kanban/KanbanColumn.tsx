@@ -23,6 +23,8 @@ interface KanbanColumnProps {
   columnDragProvided?: DraggableProvided;
   droppableId?: string;
   highlightEpicId?: string | null;
+  showBoardName?: boolean;
+  showParentEpic?: boolean;
   maxHeightClass?: string;
   onOpenNewCardForm?: (columnId: string) => void;
   onEditColumnSettings?: (column: Column) => void;
@@ -48,6 +50,8 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
   columnDragProvided,
   droppableId,
   highlightEpicId,
+  showBoardName = false,
+  showParentEpic = true,
   maxHeightClass,
   onOpenNewCardForm,
   onEditColumnSettings,
@@ -157,6 +161,8 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
                 copiedKeyCardId={copiedKeyCardId}
                 index={index}
                 highlightEpicId={highlightEpicId}
+                showBoardName={showBoardName}
+                showParentEpic={showParentEpic}
                 onFocusCard={onFocusCard}
                 onOpenCard={onOpenCard}
                 onCopyKey={onCopyKey}
