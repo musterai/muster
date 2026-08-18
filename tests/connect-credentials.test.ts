@@ -5,7 +5,7 @@
 // injects its credential path instead of changing HOME or cleaning up the
 // process-wide default path.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -180,6 +180,22 @@ describe('MUS-27: credentials.json', () => {
     writePrivateFileAtomic(scope!.credentialFile, 'second\n');
     expect(fs.readFileSync(scope!.credentialFile, 'utf8')).toBe('second\n');
     expect(fs.statSync(scope!.credentialFile).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(scope!.root).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('keeps the previous credential intact when replacement is interrupted before rename', () => {
+    scope!.store.setCredential('https://muster.example.com', credential('token-before'));
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw new Error('injected rename interruption');
+    });
+    try {
+      expect(() => scope!.store.setCredential('https://muster.example.com', credential('token-after')))
+        .toThrow(/injected rename interruption/);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(scope!.store.getCredential('https://muster.example.com')?.token).toBe('token-before');
     expect(fs.readdirSync(scope!.root).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
