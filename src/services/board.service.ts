@@ -12,17 +12,21 @@ export class BoardService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateBoard, actorId?: string): Promise<Board> {
+  async create(data: CreateBoard, actorId?: string, adapter?: DatabaseAdapter): Promise<Board> {
+    if (!adapter) {
+      return this.db.transaction(tx => this.create(data, actorId, tx));
+    }
+    const db = adapter;
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
-    const existingSlugs = await this.db.query<{ slug: string }>(
+    const existingSlugs = await db.query<{ slug: string }>(
       `SELECT slug FROM board WHERE project_id = ? AND slug IS NOT NULL`,
       [data.project_id]
     );
     const slug = deriveSlug(data.name, new Set(existingSlugs.map(b => b.slug)));
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO board (id, project_id, name, slug, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [id, data.project_id, data.name, slug, created_at, updated_at]
@@ -67,7 +71,7 @@ export class BoardService {
       const colId = ulid();
       const pos = rankAfter(lastRank);
       lastRank = pos;
-      await this.db.execute(
+      await db.execute(
         `INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal) VALUES (?, ?, ?, ?, ?, ?)`,
         [colId, id, col.name, pos, col.wip_limit, col.is_terminal ? 1 : 0]
       );
@@ -81,7 +85,7 @@ export class BoardService {
         action: 'created',
         actor_id: actorId,
         payload: { name: board.name },
-      });
+      }, db);
     }
 
     return board;

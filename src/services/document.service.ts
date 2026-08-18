@@ -11,7 +11,9 @@ export class DocumentService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateDocument, actorId?: string): Promise<Document> {
+  async create(data: CreateDocument, actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+    const db = adapter;
     assertMaxLength(data.content, DOCUMENT_CONTENT_MAX_CHARS, 'Document content');
     const id = ulid();
     const created_at = new Date().toISOString();
@@ -22,7 +24,7 @@ export class DocumentService {
     const status = 'draft';
     const version = 1;
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO document (id, project_id, parent_id, title, content, status, author_id, version, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.project_id, parent_id, data.title, data.content, status, author_id, version, created_at, updated_at]
@@ -30,7 +32,7 @@ export class DocumentService {
 
     // Initial version entry
     const versionId = ulid();
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO document_version (id, document_id, version, title, content, author_id, change_summary, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [versionId, id, 1, data.title, data.content, author_id, 'Initial document creation', created_at]
@@ -57,7 +59,7 @@ export class DocumentService {
         action: 'created',
         actor_id: author_id || undefined,
         payload: { title: doc.title, version: 1 },
-      });
+      }, db);
     }
 
     return doc;
@@ -109,9 +111,12 @@ export class DocumentService {
     return this.db.query<Document>(sql, params);
   }
 
-  async update(id: string, data: UpdateDocument, actorId?: string): Promise<Document> {
+  async update(id: string, data: UpdateDocument, actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+    const db = adapter;
     assertMaxLength(data.content, DOCUMENT_CONTENT_MAX_CHARS, 'Document content');
-    const existing = await this.getById(id);
+    const existingRows = await db.query<Document>('SELECT * FROM document WHERE id = ?', [id]);
+    const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);
 
     const title = data.title !== undefined ? data.title : existing.title;
@@ -126,13 +131,13 @@ export class DocumentService {
     const newVersion = existing.version + 1;
     const updated_at = new Date().toISOString();
 
-    await this.db.execute(
+    await db.execute(
       `UPDATE document SET title = ?, content = ?, author_id = ?, version = ?, updated_at = ? WHERE id = ?`,
       [title, content, author_id, newVersion, updated_at, id]
     );
 
     const versionId = ulid();
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO document_version (id, document_id, version, title, content, author_id, change_summary, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [versionId, id, newVersion, title, content, editor_id, change_summary, updated_at]
@@ -155,18 +160,21 @@ export class DocumentService {
         action: 'updated',
         actor_id: editor_id || undefined,
         payload: { title, version: newVersion, change_summary },
-      });
+      }, db);
     }
 
     return updated;
   }
 
-  async setStatus(id: string, status: 'draft' | 'in_review' | 'approved' | 'archived', actorId?: string): Promise<Document> {
-    const existing = await this.getById(id);
+  async setStatus(id: string, status: 'draft' | 'in_review' | 'approved' | 'archived', actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
+    if (!adapter) return this.db.transaction(tx => this.setStatus(id, status, actorId, tx));
+    const db = adapter;
+    const existingRows = await db.query<Document>('SELECT * FROM document WHERE id = ?', [id]);
+    const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);
 
     const updated_at = new Date().toISOString();
-    await this.db.execute('UPDATE document SET status = ?, updated_at = ? WHERE id = ?', [status, updated_at, id]);
+    await db.execute('UPDATE document SET status = ?, updated_at = ? WHERE id = ?', [status, updated_at, id]);
 
     const updated: Document = { ...existing, status, updated_at };
 
@@ -178,7 +186,7 @@ export class DocumentService {
         action: 'status_changed',
         actor_id: actorId,
         payload: { from: existing.status, to: status },
-      });
+      }, db);
     }
 
     return updated;
@@ -194,13 +202,16 @@ export class DocumentService {
     );
   }
 
-  async delete(id: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+    const db = adapter;
+    const existingRows = await db.query<Document>('SELECT * FROM document WHERE id = ?', [id]);
+    const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);
 
-    await this.db.execute('DELETE FROM card_document WHERE document_id = ?', [id]);
-    await this.db.execute('DELETE FROM document_version WHERE document_id = ?', [id]);
-    await this.db.execute('DELETE FROM document WHERE id = ?', [id]);
+    await db.execute('DELETE FROM card_document WHERE document_id = ?', [id]);
+    await db.execute('DELETE FROM document_version WHERE document_id = ?', [id]);
+    await db.execute('DELETE FROM document WHERE id = ?', [id]);
 
     if (this.eventService) {
       await this.eventService.create({
@@ -210,7 +221,7 @@ export class DocumentService {
         action: 'deleted',
         actor_id: actorId,
         payload: { title: existing.title },
-      });
+      }, db);
     }
   }
 }

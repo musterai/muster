@@ -28,11 +28,16 @@ export class AgentService {
     restrictToRoleId?: string,
     workspaceId?: string | null,
     actor?: PrincipalRef | null,
+    adapter?: DatabaseAdapter,
   ): Promise<Agent> {
+    if (!adapter) {
+      return this.db.transaction(tx => this.register(data, operatorUserId, restrictToRoleId, workspaceId, actor, tx));
+    }
+    const db = adapter;
     const id = data.agent_id || data.id || ulid();
     const now = new Date().toISOString();
     const membershipRows = operatorUserId && !workspaceId
-      ? await this.db.query<{ workspace_id: string }>(
+      ? await db.query<{ workspace_id: string }>(
           'SELECT workspace_id FROM workspace_member WHERE user_id = ? ORDER BY joined_at ASC LIMIT 1',
           [operatorUserId],
         )
@@ -40,7 +45,7 @@ export class AgentService {
     const resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
 
     // Check if re-binding an existing agent
-    const existing = await this.getById(id);
+    const existing = await this.getById(id, db);
     if (existing) {
       if (actor?.kind === 'agent') {
         if (existing.id !== actor.id || !existing.workspace_id || existing.workspace_id !== resolvedWorkspaceId) {
@@ -76,12 +81,12 @@ export class AgentService {
       const finalRoleId = restrictToRoleId || existing.role_id || null;
       const finalWorkspaceId = existing.workspace_id || null;
 
-      await this.db.execute(
+      await db.execute(
         `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ?, workspace_id = ? WHERE id = ?`,
         [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, finalWorkspaceId, id]
       );
 
-      return (await this.getById(id))!;
+      return (await this.getById(id, db))!;
     }
 
     // An agent credential identifies an already-registered principal. It may
@@ -93,7 +98,7 @@ export class AgentService {
 
     // Create a new agent — requires a principal row first
     const kind = 'agent';
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)`,
       [id, kind, now]
     );
@@ -106,7 +111,7 @@ export class AgentService {
         : JSON.stringify(data.capabilities))
       : null;
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO agent (id, name, capabilities, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, name, capabilitiesStr, status, now, operatorUserId || null, restrictToRoleId || null, resolvedWorkspaceId, now]
@@ -223,8 +228,8 @@ export class AgentService {
     return (await this.getById(id))!;
   }
 
-  async getById(id: string): Promise<Agent | null> {
-    const rows = await this.db.query<any>('SELECT * FROM agent WHERE id = ?', [id]);
+  async getById(id: string, adapter: DatabaseAdapter = this.db): Promise<Agent | null> {
+    const rows = await adapter.query<any>('SELECT * FROM agent WHERE id = ?', [id]);
     const row = rows[0];
     if (!row) return null;
 

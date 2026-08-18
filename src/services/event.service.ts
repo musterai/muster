@@ -21,12 +21,17 @@ export class EventService {
     this.listeners.push(callback);
   }
 
-  async create(data: CreateEvent): Promise<Event> {
+  /**
+   * Insert through an optional transaction-scoped adapter. Domain services
+   * pass their open transaction here so the event cannot outlive a rolled
+   * back mutation. Listener callbacks remain best-effort side effects.
+   */
+  async create(data: CreateEvent, adapter: DatabaseAdapter = this.db): Promise<Event> {
     const id = ulid();
     const created_at = new Date().toISOString();
     const payload = data.payload ? JSON.stringify(data.payload) : null;
 
-    await this.db.execute(
+    await adapter.execute(
       `INSERT INTO event (id, project_id, entity_type, entity_id, action, actor_id, payload, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.project_id, data.entity_type, data.entity_id, data.action, data.actor_id || null, payload, created_at]

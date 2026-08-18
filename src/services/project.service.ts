@@ -16,25 +16,27 @@ export class ProjectService {
     private documentService?: DocumentService
   ) {}
 
-  async create(data: CreateProject, actorId?: string): Promise<Project> {
+  async create(data: CreateProject, actorId?: string, adapter?: DatabaseAdapter): Promise<Project> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+    const db = adapter;
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
 
-    const existingPrefixes = await this.db.query<{ key_prefix: string }>(
+    const existingPrefixes = await db.query<{ key_prefix: string }>(
       `SELECT key_prefix FROM project WHERE key_prefix IS NOT NULL`
     );
     const key_prefix = deriveKeyPrefix(data.name, new Set(existingPrefixes.map(p => p.key_prefix)));
-    const existingSlugs = await this.db.query<{ slug: string }>(
+    const existingSlugs = await db.query<{ slug: string }>(
       `SELECT slug FROM project WHERE slug IS NOT NULL`
     );
     const slug = deriveSlug(data.name, new Set(existingSlugs.map(p => p.slug)));
 
     // Look up the default workspace — projects must belong to a workspace.
-    const wsRows = await this.db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
+    const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
     const workspaceId = wsRows[0]?.id || '';
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO project (id, workspace_id, name, slug, description, key_prefix, card_seq, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [id, workspaceId, data.name, slug, data.description || null, key_prefix, created_at, updated_at]
@@ -60,11 +62,11 @@ export class ProjectService {
         action: 'created',
         actor_id: actorId,
         payload: { name: project.name },
-      });
+      }, db);
     }
 
     if (this.boardService) {
-      await this.boardService.create({ project_id: id, name: 'Sprint 1' }, actorId);
+      await this.boardService.create({ project_id: id, name: 'Sprint 1' }, actorId, db);
     }
 
     if (this.documentService) {
@@ -98,7 +100,7 @@ All AI agents and human operators collaborating within this project must observe
    - Post card comments for task pickup, sub-task completions, intermediate milestones, blockers, architectural decisions, and test/verification results.
    - Always state current work using full human-readable task titles and work summaries out loud (e.g., \`Working on Muster Task "Create authentication middleware"\`), never raw ID strings like \`Work on card #01J3K...\`.
    - When implementation is completed, move card to 'In Review' (if column exists) or directly to 'Done' (on simplified boards) after posting verification notes.`,
-      });
+      }, actorId, db);
     }
 
     return project;
@@ -113,8 +115,11 @@ All AI agents and human operators collaborating within this project must observe
     return this.db.query<Project>('SELECT * FROM project ORDER BY created_at DESC');
   }
 
-  async update(id: string, data: UpdateProject, actorId?: string): Promise<Project> {
-    const existing = await this.getById(id);
+  async update(id: string, data: UpdateProject, actorId?: string, adapter?: DatabaseAdapter): Promise<Project> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+    const db = adapter;
+    const existingRows = await db.query<Project>('SELECT * FROM project WHERE id = ?', [id]);
+    const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Project with ID ${id} not found`);
 
     const name = data.name !== undefined ? data.name : existing.name;
@@ -125,14 +130,14 @@ All AI agents and human operators collaborating within this project must observe
     // Rows created before slugs were introduced are repaired lazily if they
     // are updated before the startup backfill has seen them.
     if (!slug) {
-      const existingSlugs = await this.db.query<{ slug: string }>(
+      const existingSlugs = await db.query<{ slug: string }>(
         `SELECT slug FROM project WHERE id != ? AND slug IS NOT NULL`,
         [id]
       );
       slug = deriveSlug(name, new Set(existingSlugs.map(p => p.slug)));
     }
 
-    await this.db.execute(
+    await db.execute(
       `UPDATE project SET name = ?, slug = ?, description = ?, updated_at = ? WHERE id = ?`,
       [name, slug, description, updated_at, id]
     );
@@ -147,17 +152,20 @@ All AI agents and human operators collaborating within this project must observe
         action: 'updated',
         actor_id: actorId,
         payload: data as Record<string, unknown>,
-      });
+      }, db);
     }
 
     return updated;
   }
 
-  async delete(id: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+    const db = adapter;
+    const existingRows = await db.query<Project>('SELECT * FROM project WHERE id = ?', [id]);
+    const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Project with ID ${id} not found`);
 
-    await this.db.execute('DELETE FROM project WHERE id = ?', [id]);
+    await db.execute('DELETE FROM project WHERE id = ?', [id]);
 
     if (this.eventService) {
       await this.eventService.create({
@@ -166,7 +174,7 @@ All AI agents and human operators collaborating within this project must observe
         entity_id: id,
         action: 'deleted',
         actor_id: actorId,
-      });
+      }, db);
     }
   }
 

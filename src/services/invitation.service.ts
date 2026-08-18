@@ -109,16 +109,23 @@ export class InvitationService {
    * Accept an invitation and create the workspace_member row.
    * Refuses if already accepted or expired — an invitation is single-use.
    */
-  async accept(invitationId: string, userId: string): Promise<Invitation> {
-    const invitation = await this.getById(invitationId);
+  async accept(invitationId: string, userId: string, adapter?: DatabaseAdapter): Promise<Invitation> {
+    if (!adapter) return this.db.transaction(tx => this.accept(invitationId, userId, tx));
+    const lockClause = adapter.dialect === 'postgres' ? ' FOR UPDATE' : '';
+    const invitationRows = await adapter.query<any>(
+      `SELECT id, workspace_id, email, role_id, expires_at, accepted_at, created_by, created_at
+       FROM invitation WHERE id = ?${lockClause}`,
+      [invitationId],
+    );
+    const invitation = invitationRows[0] as Invitation | undefined;
     if (!invitation) throw new Error('Invitation not found');
     if (invitation.accepted_at) throw new Error('Invitation has already been accepted');
     if (new Date(invitation.expires_at).getTime() <= Date.now()) throw new Error('Invitation has expired');
 
     const now = new Date().toISOString();
 
-    await this.db.execute('UPDATE invitation SET accepted_at = ? WHERE id = ?', [now, invitationId]);
-    await this.db.execute(
+    await adapter.execute('UPDATE invitation SET accepted_at = ? WHERE id = ?', [now, invitationId]);
+    await adapter.execute(
       `INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at, invited_by)
        VALUES (?, ?, ?, ?, ?)`,
       [invitation.workspace_id, userId, invitation.role_id, now, invitation.created_by],

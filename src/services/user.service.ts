@@ -41,8 +41,10 @@ export class UserService {
     subject: string,
     email: string | null,
     displayName?: string | null,
+    adapter?: DatabaseAdapter,
   ): Promise<{ user: AppUser; isNewUser: boolean }> {
-    const existing = await this.db.query<any>(
+    if (!adapter) return this.db.transaction(tx => this.findOrCreateBySubject(provider, subject, email, displayName, tx));
+    const existing = await adapter.query<any>(
       `SELECT u.id, u.email, u.display_name, u.avatar_url, u.status, u.created_at
        FROM identity i JOIN app_user u ON u.id = i.user_id
        WHERE i.provider = ? AND i.subject = ?`,
@@ -51,8 +53,8 @@ export class UserService {
 
     if (existing.length > 0) {
       if (email) {
-        await this.db.execute('UPDATE identity SET email = ? WHERE provider = ? AND subject = ?', [email, provider, subject]);
-        await this.db.execute('UPDATE app_user SET email = ? WHERE id = ?', [email, existing[0].id]);
+        await adapter.execute('UPDATE identity SET email = ? WHERE provider = ? AND subject = ?', [email, provider, subject]);
+        await adapter.execute('UPDATE app_user SET email = ? WHERE id = ?', [email, existing[0].id]);
       }
       return { user: { ...existing[0], email: email || existing[0].email }, isNewUser: false };
     }
@@ -61,12 +63,12 @@ export class UserService {
     const userId = ulid();
     const identityId = ulid();
 
-    await this.db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
-    await this.db.execute(
+    await adapter.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
+    await adapter.execute(
       'INSERT INTO app_user (id, email, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
       [userId, email, displayName || email || 'New User', 'active', now],
     );
-    await this.db.execute(
+    await adapter.execute(
       'INSERT INTO identity (id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?)',
       [identityId, userId, provider, subject, email],
     );
@@ -101,12 +103,14 @@ export class UserService {
    * (so the person shows up in Members, can be @assigned, etc.) instead of
    * leaving them unable to appear as anyone at all.
    */
-  async createLocalUser(displayName: string): Promise<AppUser> {
+  async createLocalUser(displayName: string, adapter?: DatabaseAdapter): Promise<AppUser> {
+    if (!adapter) return this.db.transaction(tx => this.createLocalUser(displayName, tx));
+    const db = adapter;
     const now = new Date().toISOString();
     const userId = ulid();
 
-    await this.db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
-    await this.db.execute(
+    await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
+    await db.execute(
       'INSERT INTO app_user (id, email, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
       [userId, null, displayName, 'active', now],
     );
