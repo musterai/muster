@@ -25,32 +25,21 @@ async function listen(app: express.Express) {
 }
 
 /**
- * Minimal ordered `.dockerignore` evaluator for the paths that the checked-in
- * Compose file is allowed to use for local secrets. It deliberately handles
- * negation, so a future `!secrets/...` rule cannot silently re-include a
- * credential after the broad directory exclusion.
+ * This is intentionally not a partial `.dockerignore` interpreter. Docker
+ * supports shell globs, `**`, negation, and last-match-wins ordering; a
+ * hand-rolled subset can certify an unsafe context. The checked-in deployment
+ * needs no exception rules, so fail closed: the three protected inputs must
+ * be excluded explicitly and no non-comment negation is permitted at all.
  */
-function isExcludedFromDockerContext(filePath: string, dockerignore: string): boolean {
-  const normalizedPath = filePath.replace(/^\.\//, '').replaceAll('\\', '/');
-  let excluded = false;
+function hasFailClosedSecretContextRules(dockerignore: string): boolean {
+  const rules = dockerignore
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && !line.startsWith('#'));
+  const requiredExclusions = ['.env', '.env.*', 'secrets/'];
 
-  for (const sourceLine of dockerignore.split(/\r?\n/)) {
-    const line = sourceLine.trim();
-    if (!line || line.startsWith('#')) continue;
-
-    const negated = line.startsWith('!');
-    const pattern = (negated ? line.slice(1) : line).replace(/^\/+/, '');
-    if (!pattern) continue;
-
-    const directory = pattern.replace(/\/+$/, '');
-    const matches = pattern.endsWith('/')
-      ? normalizedPath === directory || normalizedPath.startsWith(`${directory}/`)
-      : normalizedPath === directory;
-
-    if (matches) excluded = !negated;
-  }
-
-  return excluded;
+  return requiredExclusions.every(rule => rules.includes(rule))
+    && rules.every(rule => !rule.startsWith('!'));
 }
 
 describe('production deployment safety', () => {
@@ -152,10 +141,18 @@ describe('production deployment safety', () => {
     expect(secretFileMatch?.[1]).toBe('secrets/oidc_client_secret');
     const secretSource = secretFileMatch![1];
 
-    expect(isExcludedFromDockerContext(secretSource, dockerignore)).toBe(true);
-    expect(dockerignore).toMatch(/(?:^|\n)secrets\/(?:\n|$)/);
-    expect(dockerignore).toMatch(/(?:^|\n)\.env(?:\n|$)/);
-    expect(dockerignore).toMatch(/(?:^|\n)\.env\.\*(?:\n|$)/);
+    expect(hasFailClosedSecretContextRules(dockerignore)).toBe(true);
+    // Docker's exception rules are glob-capable and last-match-wins. Do not
+    // attempt to emulate them partially: every possible re-inclusion fails
+    // closed, including the literal and wildcard variants of this secret.
+    for (const reinclude of [
+      `!${secretSource}`,
+      '!secrets/*',
+      '!secrets/**',
+      '!.env',
+    ]) {
+      expect(hasFailClosedSecretContextRules(`${dockerignore}\n${reinclude}`)).toBe(false);
+    }
     expect(deploymentDocs).toContain(`create \`${secretSource}\``);
     expect(deploymentDocs).toContain('excluded from the\nDocker build context');
     expect(readme).toContain(`\`${secretSource}\``);
