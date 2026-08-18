@@ -132,17 +132,20 @@ export function createTokenRouter(
         return;
       }
 
+      let revoked = false;
       await db.transaction(async tx => {
-        await tokenService.revoke(req.params.id, tx);
-        await auditService.logAs(auth, {
-          action: 'token.revoke',
-          target_type: 'api_token',
-          target_id: req.params.id,
-          payload: { name: token.name },
-          ip: req.ip,
-        }, tx);
+        revoked = await tokenService.revoke(req.params.id, tx);
+        if (revoked) {
+          await auditService.logAs(auth, {
+            action: 'token.revoke',
+            target_type: 'api_token',
+            target_id: req.params.id,
+            payload: { name: token.name },
+            ip: req.ip,
+          }, tx);
+        }
       });
-      res.status(200).json({ message: 'Token revoked', id: req.params.id });
+      res.status(200).json({ message: revoked ? 'Token revoked' : 'Token already revoked', id: req.params.id });
     } catch (err) {
       next(err);
     }

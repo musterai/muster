@@ -49,8 +49,9 @@ export function createProjectRouter(db: DatabaseAdapter, projectService: Project
 
   router.delete('/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const project = await projectService.getById(req.params.id);
       await db.transaction(async tx => {
+        const projectRows = await tx.query<{ name: string }>('SELECT name FROM project WHERE id = ?', [req.params.id]);
+        const project = projectRows[0];
         await projectService.delete(req.params.id, req.authContext?.principal?.id, tx);
         const auth: AuthContext | undefined = (req as any).authContext;
         await auditService.logAs(auth, {

@@ -483,12 +483,13 @@ export class TokenService {
   /**
    * Revoke a token immediately by setting revoked_at.
    */
-  async revoke(id: string, adapter?: DatabaseAdapter): Promise<void> {
+  async revoke(id: string, adapter?: DatabaseAdapter): Promise<boolean> {
     if (!adapter) return this.db.transaction(tx => this.revoke(id, tx));
-    await adapter.execute(
-      'UPDATE api_token SET revoked_at = ? WHERE id = ?',
+    const result = await adapter.execute(
+      'UPDATE api_token SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
       [new Date().toISOString(), id],
     );
+    return result.changes === 1;
   }
 
   /**

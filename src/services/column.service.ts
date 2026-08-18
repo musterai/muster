@@ -11,12 +11,14 @@ export class ColumnService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateColumn, actorId?: string): Promise<Column> {
+  async create(data: CreateColumn, actorId?: string, adapter?: DatabaseAdapter): Promise<Column> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+    const db = adapter;
     const id = ulid();
 
     let position = data.position;
     if (!position) {
-      const cols = await this.list(data.board_id);
+      const cols = await db.query<Column>('SELECT * FROM "column" WHERE board_id = ? ORDER BY position ASC', [data.board_id]);
       const lastPos = cols.length > 0 ? cols[cols.length - 1].position : '';
       position = rankAfter(lastPos);
     }
@@ -24,7 +26,7 @@ export class ColumnService {
     const wip_limit = data.wip_limit !== undefined ? data.wip_limit : null;
     const is_terminal = data.is_terminal ? 1 : 0;
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [id, data.board_id, data.name, position, wip_limit, is_terminal]
@@ -40,7 +42,7 @@ export class ColumnService {
     };
 
     if (this.eventService) {
-      const boardRows = await this.db.query<{ project_id: string }>('SELECT project_id FROM board WHERE id = ?', [data.board_id]);
+        const boardRows = await db.query<{ project_id: string }>('SELECT project_id FROM board WHERE id = ?', [data.board_id]);
       if (boardRows[0]) {
         await this.eventService.create({
           project_id: boardRows[0].project_id,
@@ -49,7 +51,7 @@ export class ColumnService {
           action: 'created',
           actor_id: actorId,
           payload: { name: col.name, board_id: col.board_id },
-        });
+        }, db);
       }
     }
 
@@ -65,8 +67,11 @@ export class ColumnService {
     return this.db.query<Column>('SELECT * FROM "column" WHERE board_id = ? ORDER BY position ASC', [boardId]);
   }
 
-  async update(id: string, data: UpdateColumn, actorId?: string): Promise<Column> {
-    const existing = await this.getById(id);
+  async update(id: string, data: UpdateColumn, actorId?: string, adapter?: DatabaseAdapter): Promise<Column> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+    const db = adapter;
+    const rows = await db.query<Column>('SELECT * FROM "column" WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) throw new Error(`Column with ID ${id} not found`);
 
     const name = data.name !== undefined ? data.name : existing.name;
@@ -74,7 +79,7 @@ export class ColumnService {
     const position = data.position !== undefined ? data.position : existing.position;
     const is_terminal = data.is_terminal !== undefined ? (data.is_terminal ? 1 : 0) : existing.is_terminal;
 
-    await this.db.execute(
+    await db.execute(
       'UPDATE "column" SET name = ?, wip_limit = ?, position = ?, is_terminal = ? WHERE id = ?',
       [name, wip_limit, position, is_terminal, id]
     );
@@ -82,7 +87,7 @@ export class ColumnService {
     const updated: Column = { ...existing, name, wip_limit, position, is_terminal };
 
     if (this.eventService) {
-      const boardRows = await this.db.query<{ project_id: string }>('SELECT project_id FROM board WHERE id = ?', [existing.board_id]);
+      const boardRows = await db.query<{ project_id: string }>('SELECT project_id FROM board WHERE id = ?', [existing.board_id]);
       if (boardRows[0]) {
         await this.eventService.create({
           project_id: boardRows[0].project_id,
@@ -91,26 +96,29 @@ export class ColumnService {
           action: 'updated',
           actor_id: actorId,
           payload: data as Record<string, unknown>,
-        });
+        }, db);
       }
     }
 
     return updated;
   }
 
-  async delete(id: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+    const db = adapter;
+    const rows = await db.query<Column>('SELECT * FROM "column" WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) throw new Error(`Column with ID ${id} not found`);
 
-    const cards = await this.db.query<{ count: number }>('SELECT COUNT(*) as count FROM card WHERE column_id = ? AND archived = 0', [id]);
+    const cards = await db.query<{ count: number }>('SELECT COUNT(*) as count FROM card WHERE column_id = ? AND archived = 0', [id]);
     if (Number(cards[0]?.count || 0) > 0) {
       throw new Error(`Cannot delete column ${id} because it contains active cards.`);
     }
 
-    await this.db.execute('DELETE FROM "column" WHERE id = ?', [id]);
+    await db.execute('DELETE FROM "column" WHERE id = ?', [id]);
 
     if (this.eventService) {
-      const boardRows = await this.db.query<{ project_id: string }>('SELECT project_id FROM board WHERE id = ?', [existing.board_id]);
+      const boardRows = await db.query<{ project_id: string }>('SELECT project_id FROM board WHERE id = ?', [existing.board_id]);
       if (boardRows[0]) {
         await this.eventService.create({
           project_id: boardRows[0].project_id,
@@ -118,7 +126,7 @@ export class ColumnService {
           entity_id: id,
           action: 'deleted',
           actor_id: actorId,
-        });
+        }, db);
       }
     }
   }

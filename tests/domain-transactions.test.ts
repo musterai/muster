@@ -167,6 +167,45 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     expect((await db.query("SELECT * FROM event WHERE entity_type = 'knowledge_base'")).length).toBe(0);
   });
 
+  it('rolls back board, column, comment, and KB event boundaries', async () => {
+    const events = new EventService(db);
+    const boards = new BoardService(db, events);
+    const projects = new ProjectService(db, events, boards);
+    const project = await projects.create({ name: 'Boundary inventory' });
+    const board = (await boards.list(project.id))[0];
+
+    const failingBoardDb = new FailingAdapter(db, sql => /INSERT INTO event/i.test(sql));
+    await expect(new BoardService(failingBoardDb, new EventService(failingBoardDb)).update(board.id, { name: 'Should roll back' }))
+      .rejects.toThrow('injected failure');
+    expect((await db.query<{ name: string }>('SELECT name FROM board WHERE id = ?', [board.id]))[0].name).toBe(board.name);
+
+    const failingColumnDb = new FailingAdapter(db, sql => /INSERT INTO event/i.test(sql));
+    const { ColumnService } = await import('../src/services/column.service.js');
+    await expect(new ColumnService(failingColumnDb, new EventService(failingColumnDb)).create({ board_id: board.id, name: 'Transient' }))
+      .rejects.toThrow('injected failure');
+    expect((await db.query('SELECT id FROM "column" WHERE board_id = ? AND name = ?', [board.id, 'Transient'])).length).toBe(0);
+
+    const cardColumns = await db.query<{ id: string }>('SELECT id FROM "column" WHERE board_id = ? ORDER BY position LIMIT 1', [board.id]);
+    const cards = new CardService(db, events);
+    const card = await cards.create({ column_id: cardColumns[0].id, title: 'Comment boundary' });
+    const boundaryNow = new Date().toISOString();
+    await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', ['boundary-author', 'user', boundaryNow]);
+    const failingCommentDb = new FailingAdapter(db, sql => /INSERT INTO event/i.test(sql));
+    const { CommentService } = await import('../src/services/comment.service.js');
+    await expect(new CommentService(failingCommentDb, new EventService(failingCommentDb)).create({
+      card_id: card.id, author_id: 'boundary-author', content: 'Transient comment',
+    })).rejects.toThrow('injected failure');
+    expect((await db.query('SELECT id FROM comment WHERE card_id = ?', [card.id])).length).toBe(0);
+
+    const kb = new KBService(db, events);
+    const knowledgeBase = await kb.create({ name: 'Boundary KB', project_ids: [project.id] });
+    const entity = await kb.upsertEntity({ kb_id: knowledgeBase.id, name: 'Original', type: 'service' });
+    const failingKbDb = new FailingAdapter(db, sql => /INSERT INTO event/i.test(sql));
+    await expect(new KBService(failingKbDb, new EventService(failingKbDb)).updateEntity(entity.id, { name: 'Transient' }))
+      .rejects.toThrow('injected failure');
+    expect((await db.query<{ name: string }>('SELECT name FROM kb_entity WHERE id = ?', [entity.id]))[0].name).toBe('Original');
+  });
+
   it('rolls back a committed mutation when its privileged audit insert fails', async () => {
     const projects = new ProjectService(db);
     const project = await projects.create({ name: 'Audit rollback' });
@@ -186,6 +225,30 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
 
     expect(await projects.getById(project.id)).not.toBeNull();
     expect((await db.query('SELECT id FROM audit_log WHERE target_id = ?', [project.id])).length).toBe(0);
+  });
+
+  it('deletes production-wired projects and leaves a workspace-scoped audit tombstone', async () => {
+    const events = new EventService(db);
+    const projects = new ProjectService(db, events);
+    const project = await projects.create({ name: 'Production delete' });
+    await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', ['delete-actor', 'user', new Date().toISOString()]);
+    const audit = new AuditService(db);
+    await db.transaction(async tx => {
+      await projects.delete(project.id, 'delete-actor', tx);
+      await audit.log({
+        workspace_id: workspaceId,
+        actor: { id: 'delete-actor', kind: 'user' },
+        action: 'project.delete',
+        target_type: 'project',
+        target_id: project.id,
+        payload: { name: project.name },
+      }, tx);
+    });
+    expect(await projects.getById(project.id)).toBeNull();
+    expect((await db.query<{ action: string }>('SELECT action FROM audit_log WHERE target_id = ?', [project.id]))[0].action)
+      .toBe('project.delete');
+    expect((await db.query("SELECT id FROM event WHERE entity_type = 'project' AND entity_id = ? AND action = 'deleted'", [project.id])).length)
+      .toBe(0);
   });
 
   it('rolls back token issuance and revocation with their audit records', async () => {
@@ -269,5 +332,45 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     await Promise.all([cards.linkDocument(card.id, document.id), cards.linkDocument(card.id, document.id)]);
     expect((await db.query('SELECT card_id FROM card_document WHERE card_id = ?', [card.id])).length).toBe(1);
     expect((await db.query("SELECT id FROM event WHERE entity_id = ? AND action = 'document_linked'", [card.id])).length).toBe(1);
+  });
+
+  it('uses a scoped adapter for nested services and keeps unrelated root writes outside the transaction', async () => {
+    let resolveStarted!: () => void;
+    const txStarted = new Promise<void>(resolve => { resolveStarted = resolve; });
+    const transaction = db.transaction(async tx => {
+        resolveStarted();
+        await tx.transaction(async nested => {
+          await nested.execute('INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', [
+            'nested-workspace', 'Nested', 'nested', new Date().toISOString(), new Date().toISOString(),
+          ]);
+        });
+        await expect(db.execute(
+          'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+          ['forbidden-root', 'Forbidden', 'forbidden', new Date().toISOString(), new Date().toISOString()],
+        )).rejects.toThrow(/scoped adapter/);
+    });
+    await txStarted;
+    const unrelated = db.execute(
+      'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      ['unrelated-workspace', 'Unrelated', 'unrelated', new Date().toISOString(), new Date().toISOString()],
+    );
+    await unrelated;
+    await transaction;
+    expect((await db.query('SELECT id FROM workspace WHERE id IN (?, ?)', ['nested-workspace', 'unrelated-workspace'])).length).toBe(2);
+  });
+
+  it('runs after-commit callbacks after the FIFO advances and invalidates retained scopes', async () => {
+    let retained: DatabaseAdapter | undefined;
+    await db.transaction(async tx => {
+      retained = tx;
+      tx.afterCommit(async () => {
+        await db.execute(
+          'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+          ['after-commit-workspace', 'After commit', 'after-commit', new Date().toISOString(), new Date().toISOString()],
+        );
+      });
+    });
+    expect((await db.query('SELECT id FROM workspace WHERE id = ?', ['after-commit-workspace'])).length).toBe(1);
+    expect(() => retained!.query('SELECT 1')).toThrow(/no longer active/);
   });
 });

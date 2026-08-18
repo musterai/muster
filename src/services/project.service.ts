@@ -167,15 +167,11 @@ All AI agents and human operators collaborating within this project must observe
 
     await db.execute('DELETE FROM project WHERE id = ?', [id]);
 
-    if (this.eventService) {
-      await this.eventService.create({
-        project_id: id,
-        entity_type: 'project',
-        entity_id: id,
-        action: 'deleted',
-        actor_id: actorId,
-      }, db);
-    }
+    // A deleted project cannot be the target of event.project_id: the event
+    // table intentionally keeps a required project FK and project deletion
+    // cascades its project-scoped feed. Transports record the durable,
+    // workspace-scoped project.delete audit row in this same adapter
+    // transaction after this mutation succeeds.
   }
 
   async getSummary(id: string): Promise<ProjectSummary> {

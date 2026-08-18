@@ -126,12 +126,12 @@ export class KBService {
     if (!adapter) return this.db.transaction(tx => this.linkProject(kbId, projectId, actorId, tx));
     const db = adapter;
     const created_at = new Date().toISOString();
-    await db.execute(
+    const result = await db.execute(
       `INSERT OR IGNORE INTO project_knowledge_base (project_id, kb_id, created_at)
        VALUES (?, ?, ?)`,
       [projectId, kbId, created_at]
     );
-    if (this.eventService) {
+    if (result.changes === 1 && this.eventService) {
       await this.eventService.create({
         project_id: projectId,
         entity_type: 'knowledge_base',
@@ -246,8 +246,10 @@ export class KBService {
     await this.db.execute('DELETE FROM kb_entity WHERE id = ?', [id]);
   }
 
-  async updateEntity(id: string, data: Partial<UpsertKBEntity>, actorId?: string): Promise<KBEntity> {
-    const existing = await this.getEntityById(id);
+  async updateEntity(id: string, data: Partial<UpsertKBEntity>, actorId?: string, adapter?: DatabaseAdapter): Promise<KBEntity> {
+    if (!adapter) return this.db.transaction(tx => this.updateEntity(id, data, actorId, tx));
+    const db = adapter;
+    const existing = await this.getEntityById(id, db);
     if (!existing) throw new Error(`KBEntity with ID ${id} not found`);
 
     const now = new Date().toISOString();
@@ -256,7 +258,7 @@ export class KBService {
     const identifier = data.identifier !== undefined ? data.identifier : existing.identifier;
     const metadataStr = data.metadata ? JSON.stringify(data.metadata) : (existing.metadata ? (typeof existing.metadata === 'string' ? existing.metadata : JSON.stringify(existing.metadata)) : null);
 
-    await this.db.execute(
+    await db.execute(
       `UPDATE kb_entity SET name = ?, type = ?, identifier = ?, metadata = ?, updated_at = ? WHERE id = ?`,
       [name, type, identifier, metadataStr, now, id]
     );
@@ -270,7 +272,7 @@ export class KBService {
       updated_at: now,
     };
 
-    await this.logEventForKb(existing.kb_id, 'entity_updated', id, actorId, { name: updated.name, type: updated.type, kb_id: existing.kb_id });
+    await this.logEventForKb(existing.kb_id, 'entity_updated', id, actorId, { name: updated.name, type: updated.type, kb_id: existing.kb_id }, db);
     return updated;
   }
 
@@ -388,12 +390,13 @@ export class KBService {
     return this.db.query<KBFact>(sql, params);
   }
 
-  async deleteFact(id: string, actorId?: string): Promise<void> {
-    const existingRows = await this.db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
-    if (existingRows[0]) {
-      await this.logEventForKb(existingRows[0].kb_id, 'fact_deleted', id, actorId, { title: existingRows[0].title, kb_id: existingRows[0].kb_id });
-    }
-    await this.db.execute('DELETE FROM kb_fact WHERE id = ?', [id]);
+  async deleteFact(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.deleteFact(id, actorId, tx));
+    const db = adapter;
+    const existingRows = await db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
+    if (!existingRows[0]) return;
+    await db.execute('DELETE FROM kb_fact WHERE id = ?', [id]);
+    await this.logEventForKb(existingRows[0].kb_id, 'fact_deleted', id, actorId, { title: existingRows[0].title, kb_id: existingRows[0].kb_id }, db);
   }
 
   async updateFact(id: string, data: Partial<AddGainedKnowledge>, actorId?: string, adapter?: DatabaseAdapter): Promise<KBFact> {

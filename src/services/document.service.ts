@@ -115,7 +115,8 @@ export class DocumentService {
     if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
     const db = adapter;
     assertMaxLength(data.content, DOCUMENT_CONTENT_MAX_CHARS, 'Document content');
-    const existingRows = await db.query<Document>('SELECT * FROM document WHERE id = ?', [id]);
+    const lockClause = db.dialect === 'postgres' ? ' FOR UPDATE' : '';
+    const existingRows = await db.query<Document>(`SELECT * FROM document WHERE id = ?${lockClause}`, [id]);
     const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);
 
@@ -169,7 +170,8 @@ export class DocumentService {
   async setStatus(id: string, status: 'draft' | 'in_review' | 'approved' | 'archived', actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
     if (!adapter) return this.db.transaction(tx => this.setStatus(id, status, actorId, tx));
     const db = adapter;
-    const existingRows = await db.query<Document>('SELECT * FROM document WHERE id = ?', [id]);
+    const lockClause = db.dialect === 'postgres' ? ' FOR UPDATE' : '';
+    const existingRows = await db.query<Document>(`SELECT * FROM document WHERE id = ?${lockClause}`, [id]);
     const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);
 

@@ -184,6 +184,15 @@ export class UserService {
     return (await this.countAdmins(workspaceId, adapter)) <= 1;
   }
 
+  /** Serialize membership/admin decisions on PostgreSQL before counting. */
+  private async lockWorkspaceMembers(workspaceId: string, adapter: DatabaseAdapter): Promise<void> {
+    if (adapter.dialect !== 'postgres') return;
+    await adapter.query(
+      'SELECT user_id FROM workspace_member WHERE workspace_id = ? FOR UPDATE',
+      [workspaceId],
+    );
+  }
+
   private async operatedAgentIds(
     adapter: DatabaseAdapter,
     workspaceId: string,
@@ -238,6 +247,7 @@ export class UserService {
   async changeMemberRole(workspaceId: string, userId: string, newRoleId: string, adapter?: DatabaseAdapter): Promise<void> {
     if (!adapter) return this.db.transaction(tx => this.changeMemberRole(workspaceId, userId, newRoleId, tx));
     await (async tx => {
+      await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(
         'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
         [workspaceId, userId],
@@ -277,6 +287,7 @@ export class UserService {
   async removeMember(workspaceId: string, userId: string, adapter?: DatabaseAdapter): Promise<void> {
     if (!adapter) return this.db.transaction(tx => this.removeMember(workspaceId, userId, tx));
     await (async tx => {
+      await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(
         'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
         [workspaceId, userId],
