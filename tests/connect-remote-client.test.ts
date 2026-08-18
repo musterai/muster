@@ -57,6 +57,17 @@ describe('MUS-27: remote-client (muster login/logout helpers)', () => {
     await expect(whoAmI('http://127.0.0.1:1', 'x')).rejects.toBeInstanceOf(RemoteError);
   });
 
+  it('does not include bearer token material in a connection error', async () => {
+    const bearer = 'muster_pat_redaction_secret';
+    try {
+      await whoAmI('http://127.0.0.1:1', bearer);
+      throw new Error('expected whoAmI to reject');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RemoteError);
+      expect((err as Error).message).not.toContain(bearer);
+    }
+  });
+
   it('listMyTokens finds the just-pasted token by its prefix, not its secret', async () => {
     const app = express();
     app.get('/api/v1/tokens', (_req, res) => {
