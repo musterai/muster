@@ -23,9 +23,25 @@ type InternalMcpServer = {
   tool: (...args: any[]) => any;
   registerTool: (...args: any[]) => any;
   [mcpPermissionBoundaryInstalled]?: boolean;
+  [mcpPermissionBoundaryState]?: McpPermissionBoundaryState;
 };
 
 const mcpPermissionBoundaryInstalled = Symbol('mcpPermissionBoundaryInstalled');
+const mcpPermissionBoundaryState = Symbol('mcpPermissionBoundaryState');
+
+type McpPermissionBoundaryState = {
+  /** Names deliberately registered through this auth-bound server instance. */
+  toolNames: Set<string>;
+};
+
+/**
+ * SDK calls parse a tool's input before invoking its registered handler. The
+ * boundary also supports direct handler invocation in local tests and legacy
+ * integrations, where no SDK parse occurred. Track values produced by the
+ * exact registered schema so the latter gets a guard parse, while the former
+ * cannot apply non-idempotent Zod transforms a second time.
+ */
+const mcpParsedInputObjects = new WeakMap<object, WeakSet<object>>();
 
 function isZodSchema(value: unknown): value is zod.ZodTypeAny {
   return !!value
@@ -47,17 +63,78 @@ function isZodRawShape(value: unknown): value is zod.ZodRawShape {
  * message verbatim. A root-level generic issue gives clients a stable refusal
  * while still preventing a handler or service from observing the input.
  */
-function safeStrictMcpObjectSchema(shape: zod.ZodRawShape): zod.ZodTypeAny {
+function rejectUnknownMcpObjectKeys(
+  schema: zod.ZodTypeAny,
+  shape: zod.ZodRawShape,
+): zod.ZodTypeAny {
   const knownKeys = new Set(Object.keys(shape));
-  return z.object(shape).passthrough().superRefine((value, context) => {
-    if (Object.keys(value).some((key) => !knownKeys.has(key))) {
+  const unknownKeyGate = z.any().superRefine((value, context) => {
+    if (
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && Object.keys(value).some((key) => !knownKeys.has(key))
+    ) {
       context.addIssue({
         code: zod.ZodIssueCode.custom,
         path: [],
         message: 'Invalid request input',
+        // Do not run the wrapped schema after a rejected property. In
+        // particular, a caller must not receive the original ZodObject's
+        // `unrecognized_keys` issue, which would echo every unknown key.
+        fatal: true,
       });
+      return zod.NEVER;
     }
   });
+  // The gate observes the original request object, then the caller's schema
+  // executes exactly once. This preserves field/object transforms and
+  // refinements instead of rebuilding a modern ZodObject from its shape.
+  return unknownKeyGate.pipe(schema);
+}
+
+function markMcpParsedInputs(schema: zod.ZodTypeAny): zod.ZodTypeAny {
+  const parsedObjects = new WeakSet<object>();
+  const markedSchema = schema.transform((value) => {
+    if (value && typeof value === 'object') {
+      parsedObjects.add(value as object);
+    }
+    return value;
+  });
+  mcpParsedInputObjects.set(markedSchema as object, parsedObjects);
+  return markedSchema;
+}
+
+function wasParsedByRegisteredMcpSchema(
+  schema: zod.ZodTypeAny | undefined,
+  value: unknown,
+): boolean {
+  if (!schema || !value || typeof value !== 'object') return false;
+  return mcpParsedInputObjects.get(schema as object)?.has(value as object) === true;
+}
+
+function safeStrictMcpObjectSchema(shape: zod.ZodRawShape): zod.ZodTypeAny {
+  return rejectUnknownMcpObjectKeys(z.object(shape), shape);
+}
+
+/**
+ * Modern callers can wrap an object in Zod effects (for example
+ * `z.object(...).strict().transform(...)`). Find the underlying input object
+ * without rebuilding the caller's schema, so the raw unknown-key gate still
+ * runs before any effect/refinement and the original parse remains singular.
+ */
+function getMcpObjectShape(schema: zod.ZodTypeAny): zod.ZodRawShape | undefined {
+  if (schema instanceof zod.ZodObject) return schema.shape;
+
+  const definition = (schema as { _def?: Record<string, unknown> })._def;
+  if (!definition) return undefined;
+  for (const candidate of [definition.schema, definition.innerType, definition.type, definition.in]) {
+    if (isZodSchema(candidate)) {
+      const shape = getMcpObjectShape(candidate);
+      if (shape) return shape;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -68,15 +145,16 @@ function safeStrictMcpObjectSchema(shape: zod.ZodRawShape): zod.ZodTypeAny {
  */
 function normalizeMcpInputSchema(value: unknown, assumeEmptyShape = false): zod.ZodTypeAny | undefined {
   if (isZodSchema(value)) {
-    // ZodObject#strict exists in Zod v3 and preserves all refinements. Other
-    // schema kinds (unions, intersections) carry their own object semantics.
-    return typeof (value as { strict?: unknown }).strict === 'function'
-      ? (value as zod.AnyZodObject).strict()
-      : value;
+    // `ZodObject.strict()` leaks unknown key names through the SDK's formatted
+    // validation error. Gate the raw object before parsing instead. Unlike
+    // rebuilding from `.shape`, this retains modern object refinements and
+    // transforms exactly as the caller supplied them.
+    const shape = getMcpObjectShape(value);
+    return markMcpParsedInputs(shape ? rejectUnknownMcpObjectKeys(value, shape) : value);
   }
 
   if (isZodRawShape(value) || (assumeEmptyShape && value && typeof value === 'object' && Object.keys(value as object).length === 0)) {
-    return safeStrictMcpObjectSchema(value as zod.ZodRawShape);
+    return markMcpParsedInputs(safeStrictMcpObjectSchema(value as zod.ZodRawShape));
   }
 
   return undefined;
@@ -90,6 +168,16 @@ function normalizeMcpInputSchema(value: unknown, assumeEmptyShape = false): zod.
 function sdkCompatibleInputSchema(value: unknown): unknown {
   if (isZodSchema(value) && value instanceof zod.ZodObject) return value.shape;
   return value;
+}
+
+/**
+ * The legacy `tool()` overload only takes raw shapes, while modern
+ * `registerTool()` explicitly accepts a complete Zod schema. Passing the
+ * normalized schema through the modern API lets the SDK perform the one and
+ * only parse (including our redacted unknown-key gate).
+ */
+function sdkModernInputSchema(value: unknown, normalized: zod.ZodTypeAny | undefined): unknown {
+  return isZodSchema(value) ? normalized : sdkCompatibleInputSchema(value);
 }
 
 function assertMcpToolIsMapped(toolName: string): void {
@@ -125,18 +213,24 @@ function supplyOpenModeCommentIdentity(
     : args;
 }
 
+type McpToolGuardBinding = {
+  toolName: string;
+  inputSchema: zod.ZodTypeAny | undefined;
+};
+
 function guardMcpToolHandler(
-  toolName: string,
+  binding: McpToolGuardBinding,
   auth: AuthContext,
-  inputSchema: zod.ZodTypeAny | undefined,
   handler: (...args: any[]) => any,
 ): (...args: any[]) => Promise<any> {
   return async (...handlerArgs: any[]) => {
+    const { toolName, inputSchema } = binding;
     let permissionArgs: Record<string, unknown> = {};
     if (inputSchema) {
-      const parsed = await inputSchema.parseAsync(
-        supplyOpenModeCommentIdentity(toolName, auth, handlerArgs[0]),
-      );
+      const rawInput = supplyOpenModeCommentIdentity(toolName, auth, handlerArgs[0]);
+      const parsed = wasParsedByRegisteredMcpSchema(inputSchema, rawInput)
+        ? rawInput
+        : await inputSchema.parseAsync(rawInput);
       handlerArgs[0] = parsed;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         permissionArgs = parsed as Record<string, unknown>;
@@ -156,37 +250,69 @@ type InternalRegisteredTool = {
   update?: (updates: Record<string, unknown>) => unknown;
 };
 
+function assertRegisteredMcpToolInventory(
+  server: McpServer,
+  state: McpPermissionBoundaryState,
+): void {
+  const registered = getRegisteredMcpToolNames(server);
+  const expected = [...state.toolNames].sort();
+  if (registered.join('\u0000') !== expected.join('\u0000')) {
+    throw new Error(
+      `MCP registered-tool inventory changed unexpectedly: expected=[${expected.join(', ')}], actual=[${registered.join(', ')}]`,
+    );
+  }
+  for (const toolName of registered) {
+    assertMcpToolIsMapped(toolName);
+  }
+}
+
 /**
  * SDK registered tools expose `update({ callback })`. Guard that secondary
  * registration path too, otherwise a later callback replacement could undo
  * the central boundary after an initially safe registration.
  */
 function instrumentRegisteredMcpTool(
+  server: McpServer,
+  state: McpPermissionBoundaryState,
   registered: unknown,
-  toolName: string,
+  binding: McpToolGuardBinding,
   auth: AuthContext,
-  initialInputSchema: zod.ZodTypeAny | undefined,
 ): unknown {
   if (!registered || typeof registered !== 'object') return registered;
   const tool = registered as InternalRegisteredTool;
-  if (initialInputSchema) tool.inputSchema = initialInputSchema;
+  if (binding.inputSchema) tool.inputSchema = binding.inputSchema;
 
   const rawUpdate = tool.update?.bind(tool);
   if (!rawUpdate) return registered;
   tool.update = (updates: Record<string, unknown>) => {
-    const hasSchemaUpdate = Object.prototype.hasOwnProperty.call(updates, 'paramsSchema');
+    // The SDK mutates `_registeredTools` before it replaces the callback. A
+    // rename could therefore retain this closure's old permission decision.
+    // Names are intentionally immutable for the lifetime of an auth-bound
+    // server; disabling a tool remains available without weakening policy.
+    if (
+      Object.prototype.hasOwnProperty.call(updates, 'name')
+      && updates.name !== undefined
+      && updates.name !== binding.toolName
+    ) {
+      throw new Error(`MCP tool "${binding.toolName}" cannot be renamed after registration`);
+    }
+
+    const hasSchemaUpdate = Object.prototype.hasOwnProperty.call(updates, 'paramsSchema')
+      && updates.paramsSchema !== undefined;
     const nextInputSchema = hasSchemaUpdate
       ? normalizeMcpInputSchema(updates.paramsSchema, updates.paramsSchema !== undefined)
       : tool.inputSchema;
+    if (hasSchemaUpdate && !nextInputSchema) {
+      throw new Error(`MCP tool "${binding.toolName}" must update with a valid input schema`);
+    }
     const guardedUpdates = { ...updates };
     if (Object.prototype.hasOwnProperty.call(guardedUpdates, 'callback')) {
       if (typeof guardedUpdates.callback !== 'function') {
-        throw new Error(`MCP tool "${toolName}" must update through a function handler guarded by the permission boundary`);
+        throw new Error(`MCP tool "${binding.toolName}" must update through a function handler guarded by the permission boundary`);
       }
       guardedUpdates.callback = guardMcpToolHandler(
-        toolName,
+        binding,
         auth,
-        nextInputSchema,
         guardedUpdates.callback as (...args: any[]) => any,
       );
     }
@@ -194,7 +320,12 @@ function instrumentRegisteredMcpTool(
       guardedUpdates.paramsSchema = sdkCompatibleInputSchema(updates.paramsSchema);
     }
     const result = rawUpdate(guardedUpdates);
+    binding.inputSchema = nextInputSchema;
     if (nextInputSchema) tool.inputSchema = nextInputSchema;
+    // This is deliberately automatic for every successful SDK update, not a
+    // best-effort assertion callers must remember to run after mutating a
+    // registered tool.
+    assertRegisteredMcpToolInventory(server, state);
     return result;
   };
   return registered;
@@ -230,6 +361,10 @@ export function assertMcpToolPermissionInventory(server: McpServer): void {
 export function installMcpPermissionBoundary(server: McpServer, auth: AuthContext): void {
   const internal = server as unknown as InternalMcpServer;
   if (internal[mcpPermissionBoundaryInstalled]) return;
+  const state: McpPermissionBoundaryState = {
+    toolNames: new Set(getRegisteredMcpToolNames(server)),
+  };
+  assertRegisteredMcpToolInventory(server, state);
 
   const rawTool = internal.tool.bind(server);
   internal.tool = (toolName: string, ...rest: any[]) => {
@@ -242,12 +377,16 @@ export function installMcpPermissionBoundary(server: McpServer, auth: AuthContex
 
     const schemaIndex = typeof rest[0] === 'string' ? 1 : 0;
     const inputSchema = normalizeMcpInputSchema(rest[schemaIndex], rest.length === schemaIndex + 2);
-    rest[handlerIndex] = guardMcpToolHandler(toolName, auth, inputSchema, handler);
+    const binding: McpToolGuardBinding = { toolName, inputSchema };
+    rest[handlerIndex] = guardMcpToolHandler(binding, auth, handler);
     const registered = rawTool(toolName, ...rest);
     // The server validates against this field at execution time. Replacing
     // the loose object made from a raw shape is what makes unknown MCP
     // properties a stable rejection rather than silently stripped input.
-    return instrumentRegisteredMcpTool(registered, toolName, auth, inputSchema);
+    state.toolNames.add(toolName);
+    const instrumented = instrumentRegisteredMcpTool(server, state, registered, binding, auth);
+    assertRegisteredMcpToolInventory(server, state);
+    return instrumented;
   };
 
   const rawRegisterTool = internal.registerTool.bind(server);
@@ -257,17 +396,22 @@ export function installMcpPermissionBoundary(server: McpServer, auth: AuthContex
       throw new Error(`MCP tool "${toolName}" must register a function handler through the permission boundary`);
     }
     const inputSchema = normalizeMcpInputSchema(toolConfig.inputSchema, toolConfig.inputSchema !== undefined);
+    const binding: McpToolGuardBinding = { toolName, inputSchema };
     const guardedConfig = inputSchema
-      ? { ...toolConfig, inputSchema: sdkCompatibleInputSchema(toolConfig.inputSchema) }
+      ? { ...toolConfig, inputSchema: sdkModernInputSchema(toolConfig.inputSchema, inputSchema) }
       : toolConfig;
     const registered = rawRegisterTool(
       toolName,
       guardedConfig,
-      guardMcpToolHandler(toolName, auth, inputSchema, handler as (...args: any[]) => any),
+      guardMcpToolHandler(binding, auth, handler as (...args: any[]) => any),
     );
-    return instrumentRegisteredMcpTool(registered, toolName, auth, inputSchema);
+    state.toolNames.add(toolName);
+    const instrumented = instrumentRegisteredMcpTool(server, state, registered, binding, auth);
+    assertRegisteredMcpToolInventory(server, state);
+    return instrumented;
   };
 
+  internal[mcpPermissionBoundaryState] = state;
   internal[mcpPermissionBoundaryInstalled] = true;
 }
 
@@ -827,12 +971,36 @@ All AI agents and human operators collaborating within Muster must follow this p
     agent_id: z.string().optional().describe('Existing Agent ID to re-bind session across runs'),
     name: z.string().optional().describe('Agent name'),
     capabilities: z.union([z.string(), z.array(z.string())]).optional(),
-    status: z.enum(['active', 'idle', 'offline']).optional()
+    status: z.enum(['active', 'idle', 'offline']).optional(),
+    type: z.enum(['ai_agent', 'human']).optional().describe(
+      'Deprecated compatibility field. This endpoint only creates AI agents; human identities are established through OIDC admission.'
+    ),
+    role: z.string().trim().min(1).max(128).regex(/^[A-Za-z][A-Za-z0-9_-]*$/).optional().describe(
+      'Deprecated compatibility field. In authenticated mode the server derives an agent role from the authenticated operator and never trusts this value.'
+    ),
+    secret_token: z.string().min(1).max(2048).optional().describe(
+      'Deprecated compatibility field retained for legacy clients. It is ignored and never persisted or used for authentication.'
+    ),
   }, withPermission('register_agent', auth, async (args) => {
+    const {
+      type: legacyType,
+      role: legacyRole,
+      secret_token: legacySecretToken,
+      ...registration
+    } = args;
+    if (legacyType === 'human') {
+      throw new Error('register_agent only creates AI agent identities; human identities must authenticate through OIDC admission.');
+    }
+    // Explicitly discard historical caller-controlled authority fields before
+    // reaching the domain service. They remain accepted so the documented
+    // AOP registration example works, but neither can select an identity,
+    // authenticated role, or credential.
+    void legacyRole;
+    void legacySecretToken;
     // MUS-23: bind agent to the authenticated operator
     const operatorUserId = auth.principal?.kind === 'user' ? auth.principal.id : undefined;
     const result = await services.agentService.register(
-      args,
+      registration,
       operatorUserId,
       undefined,
       auth.workspace_id || undefined,

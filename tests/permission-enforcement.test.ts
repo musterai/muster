@@ -48,6 +48,9 @@ import {
   Services,
 } from '../src/mcp/server.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { z } from 'zod';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-permission-enforcement.db');
 
@@ -66,6 +69,22 @@ function makeAuth(
     is_operator_override: false,
     role_name: roleName,
   };
+}
+
+async function withInMemoryMcpClient<T>(
+  server: McpServer,
+  action: (client: Client) => Promise<T>,
+): Promise<T> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'muster-boundary-test-client', version: '1.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    return await action(client);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 }
 
 describe('MUS-22: Permission enforcement', () => {
@@ -185,6 +204,101 @@ describe('MUS-22: Permission enforcement', () => {
     await expect((modernServer as any)._registeredTools.create_project.handler({}, {}))
       .rejects.toBeInstanceOf(PermissionDeniedError);
     expect(modernHandlerRan).toBe(false);
+
+    // A registered tool's update path is an SDK-supported second registration
+    // surface. It must not be able to retain `list_projects` read permission
+    // after changing the live registry name to an unmapped or privileged tool.
+    const updateServer = new McpServer({ name: 'update-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(updateServer, auth);
+    let originalListHandlerRan = false;
+    let unmappedReplacementRan = false;
+    let privilegedReplacementRan = false;
+    updateServer.tool('list_projects', {}, async () => {
+      originalListHandlerRan = true;
+      return { content: [{ type: 'text', text: 'safe read' }] };
+    });
+    const registeredListTool = (updateServer as any)._registeredTools.list_projects;
+
+    expect(() => registeredListTool.update({
+      name: 'frontier_unmapped',
+      callback: async () => {
+        unmappedReplacementRan = true;
+        return { content: [{ type: 'text', text: 'must not run' }] };
+      },
+    })).toThrow(/cannot be renamed after registration/);
+    expect((updateServer as any)._registeredTools.frontier_unmapped).toBeUndefined();
+    expect(getRegisteredMcpToolNames(updateServer)).toEqual(['list_projects']);
+
+    expect(() => registeredListTool.update({
+      name: 'delete_project',
+      callback: async () => {
+        privilegedReplacementRan = true;
+        return { content: [{ type: 'text', text: 'must not run' }] };
+      },
+    })).toThrow(/cannot be renamed after registration/);
+    expect((updateServer as any)._registeredTools.delete_project).toBeUndefined();
+    expect(getRegisteredMcpToolNames(updateServer)).toEqual(['list_projects']);
+
+    await (updateServer as any)._registeredTools.list_projects.handler({}, {});
+    expect(originalListHandlerRan).toBe(true);
+    expect(unmappedReplacementRan).toBe(false);
+    expect(privilegedReplacementRan).toBe(false);
+  });
+
+  it('MUS-59: legacy and modern MCP schemas redact unknown keys and run transforms exactly once over the wire', async () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth([], 'observer', 'observer-01');
+    const unknownKeyCanary = 'mcp_modern_unknown_key_canary';
+
+    const legacyServer = new McpServer({ name: 'legacy-zod-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(legacyServer, auth);
+    const legacyInputs: unknown[] = [];
+    legacyServer.tool('list_projects', {
+      value: z.string().transform((value) => `${value}!`),
+    }, async (args) => {
+      legacyInputs.push(args);
+      return { content: [{ type: 'text', text: 'ok' }] };
+    });
+    const legacyTool = (legacyServer as any)._registeredTools.list_projects;
+    const legacyResults = await withInMemoryMcpClient(legacyServer, async (client) => ({
+      initial: await client.callTool({ name: 'list_projects', arguments: { value: 'legacy' } }),
+      updated: await (async () => {
+        legacyTool.update({
+          paramsSchema: { value: z.string().transform((value: string) => `${value}?`) },
+        });
+        return client.callTool({ name: 'list_projects', arguments: { value: 'updated' } });
+      })(),
+      invalid: await client.callTool({
+        name: 'list_projects',
+        arguments: { value: 'updated', [unknownKeyCanary]: true },
+      }),
+    }));
+    expect(legacyResults.initial.isError).not.toBe(true);
+    expect(legacyResults.updated.isError).not.toBe(true);
+    expect(legacyInputs).toEqual([{ value: 'legacy!' }, { value: 'updated?' }]);
+    expect(legacyResults.invalid.isError).toBe(true);
+    expect(JSON.stringify(legacyResults.invalid)).not.toContain(unknownKeyCanary);
+
+    const modernServer = new McpServer({ name: 'modern-zod-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(modernServer, auth);
+    const modernInputs: unknown[] = [];
+    modernServer.registerTool('list_projects', {
+      inputSchema: z.object({ value: z.string() }).strict().transform(({ value }) => ({ value: `${value}!` })),
+    }, async (args) => {
+      modernInputs.push(args);
+      return { content: [{ type: 'text', text: 'ok' }] };
+    });
+    const modernResults = await withInMemoryMcpClient(modernServer, async (client) => ({
+      valid: await client.callTool({ name: 'list_projects', arguments: { value: 'modern' } }),
+      invalid: await client.callTool({
+        name: 'list_projects',
+        arguments: { value: 'modern', [unknownKeyCanary]: true },
+      }),
+    }));
+    expect(modernResults.valid.isError).not.toBe(true);
+    expect(modernInputs).toEqual([{ value: 'modern!' }]);
+    expect(modernResults.invalid.isError).toBe(true);
+    expect(JSON.stringify(modernResults.invalid)).not.toContain(unknownKeyCanary);
   });
 
   it('MUS-59: MCP create_card enforces the shared strict REST constraints before CardService', async () => {
@@ -228,6 +342,46 @@ describe('MUS-22: Permission enforcement', () => {
         expect.objectContaining({ code: 'custom', path: [] }),
       ]));
     }
+  });
+
+  it('MUS-59: documented register_agent compatibility fields are accepted but never select authority', async () => {
+    const services: Services = {
+      projectService,
+      boardService,
+      columnService,
+      cardService,
+      commentService,
+      documentService,
+      agentService,
+      eventService,
+      kbService,
+      roleService,
+    };
+    const server = createMcpServer(services, undefined, OPEN_AUTH_CONTEXT) as any;
+    const registerSpy = vi.spyOn(agentService, 'register');
+    const result = await server._registeredTools.register_agent.handler({
+      name: 'AOP-compatible agent',
+      type: 'ai_agent',
+      role: 'contributor',
+      secret_token: 'legacy-secret-must-not-reach-service',
+      capabilities: ['code', 'testing'],
+    }, {});
+
+    expect(result.content[0].text).not.toContain('legacy-secret-must-not-reach-service');
+    const delegatedPayload = registerSpy.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(delegatedPayload).toMatchObject({
+      name: 'AOP-compatible agent',
+      capabilities: ['code', 'testing'],
+    });
+    expect(delegatedPayload).not.toHaveProperty('type');
+    expect(delegatedPayload).not.toHaveProperty('role');
+    expect(delegatedPayload).not.toHaveProperty('secret_token');
+
+    await expect(server._registeredTools.register_agent.handler({
+      name: 'Attempted human identity',
+      type: 'human',
+      role: 'owner',
+    }, {})).rejects.toThrow(/only creates AI agent identities/);
   });
 
   it('REST routes reference the canonical operation policy catalog', () => {
