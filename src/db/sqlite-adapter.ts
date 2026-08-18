@@ -23,6 +23,10 @@ export class SQLiteAdapter implements DatabaseAdapter {
     this.db = new Database(filepath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    // Keep SQLite's native lock wait short.  A long synchronous busy_timeout
+    // would block the Node event loop and prevent another in-process starter
+    // from reaching COMMIT.  transaction() below retries asynchronously.
+    this.db.pragma('busy_timeout = 50');
   }
 
   async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -41,7 +45,7 @@ export class SQLiteAdapter implements DatabaseAdapter {
 
   async transaction<T>(fn: (adapter: DatabaseAdapter) => Promise<T>): Promise<T> {
     const run = async (): Promise<T> => {
-      this.db.exec('BEGIN IMMEDIATE');
+      await this.beginImmediate();
       try {
         const result = await fn(this);
         this.db.exec('COMMIT');
@@ -59,6 +63,21 @@ export class SQLiteAdapter implements DatabaseAdapter {
     const scheduled = this.txQueue.then(run, run);
     this.txQueue = scheduled.catch(() => undefined);
     return scheduled;
+  }
+
+  private async beginImmediate(): Promise<void> {
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      try {
+        this.db.exec('BEGIN IMMEDIATE');
+        return;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code !== 'SQLITE_BUSY' && code !== 'SQLITE_LOCKED') throw error;
+        if (Date.now() >= deadline) throw error;
+        await new Promise<void>(resolve => setTimeout(resolve, 25));
+      }
+    }
   }
 
   async migrate(sql: string): Promise<void> {
