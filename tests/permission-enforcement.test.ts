@@ -577,6 +577,25 @@ describe('MUS-22: Permission enforcement', () => {
     )).not.toThrow();
   });
 
+  it('allows admitted observers to approve or deny only membership-scoped device login', () => {
+    (config.auth as any).mode = 'enforced';
+    const observer = makeAuth([], 'observer');
+    const unadmitted = makeAuth([], null, undefined, false);
+
+    expect(OPERATION_PERMISSIONS.approve_device_authorization).toBe(WORKSPACE_READ);
+    expect(OPERATION_PERMISSIONS.deny_device_authorization).toBe(WORKSPACE_READ);
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/approve', observer)).not.toThrow();
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/deny', observer)).not.toThrow();
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/approve', unadmitted))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/deny', unadmitted))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+  });
+
   it('requireRestPermission allows workspace.admin through everything', () => {
     (config.auth as any).mode = 'enforced';
     const auth = makeAuth(['workspace.admin']);
