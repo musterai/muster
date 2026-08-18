@@ -289,11 +289,10 @@ function instrumentRegisteredMcpTool(
     // rename could therefore retain this closure's old permission decision.
     // Names are intentionally immutable for the lifetime of an auth-bound
     // server; disabling a tool remains available without weakening policy.
-    if (
-      Object.prototype.hasOwnProperty.call(updates, 'name')
-      && updates.name !== undefined
-      && updates.name !== binding.toolName
-    ) {
+    const hasNameUpdate = Object.prototype.hasOwnProperty.call(updates, 'name')
+      && updates.name !== undefined;
+    const removesTool = hasNameUpdate && updates.name === null;
+    if (hasNameUpdate && !removesTool && updates.name !== binding.toolName) {
       throw new Error(`MCP tool "${binding.toolName}" cannot be renamed after registration`);
     }
 
@@ -320,8 +319,16 @@ function instrumentRegisteredMcpTool(
       guardedUpdates.paramsSchema = sdkCompatibleInputSchema(updates.paramsSchema);
     }
     const result = rawUpdate(guardedUpdates);
-    binding.inputSchema = nextInputSchema;
-    if (nextInputSchema) tool.inputSchema = nextInputSchema;
+    if (removesTool) {
+      // `RegisteredTool.remove()` is implemented by the SDK as
+      // `update({ name: null })`. Mirror the SDK's successful deletion in the
+      // boundary inventory, including when a callback is supplied in the same
+      // update (the detached callback is never reachable through the server).
+      state.toolNames.delete(binding.toolName);
+    } else {
+      binding.inputSchema = nextInputSchema;
+      if (nextInputSchema) tool.inputSchema = nextInputSchema;
+    }
     // This is deliberately automatic for every successful SDK update, not a
     // best-effort assertion callers must remember to run after mutating a
     // registered tool.
@@ -361,8 +368,14 @@ export function assertMcpToolPermissionInventory(server: McpServer): void {
 export function installMcpPermissionBoundary(server: McpServer, auth: AuthContext): void {
   const internal = server as unknown as InternalMcpServer;
   if (internal[mcpPermissionBoundaryInstalled]) return;
+  const existingToolNames = getRegisteredMcpToolNames(server);
+  if (existingToolNames.length > 0) {
+    throw new Error(
+      `MCP permission boundary must be installed before tool registration: existing=[${existingToolNames.join(', ')}]`,
+    );
+  }
   const state: McpPermissionBoundaryState = {
-    toolNames: new Set(getRegisteredMcpToolNames(server)),
+    toolNames: new Set(),
   };
   assertRegisteredMcpToolInventory(server, state);
 

@@ -245,6 +245,82 @@ describe('MUS-22: Permission enforcement', () => {
     expect(privilegedReplacementRan).toBe(false);
   });
 
+  it('MUS-59: installing the MCP boundary after a privileged tool was registered fails closed', () => {
+    (config.auth as any).mode = 'enforced';
+    const observerAuth = makeAuth([], 'observer', 'observer-01');
+    const server = new McpServer({ name: 'late-boundary-test', version: '1.0.0' });
+    let privilegedHandlerRan = false;
+
+    server.tool('delete_project', {}, async () => {
+      privilegedHandlerRan = true;
+      return { content: [{ type: 'text', text: 'must not run' }] };
+    });
+
+    expect(() => installMcpPermissionBoundary(server, observerAuth))
+      .toThrow(/must be installed before tool registration.*delete_project/);
+    // A repeated attempt remains fail-closed: the rejected installation did
+    // not mark itself installed or silently adopt the unguarded SDK handler.
+    expect(() => installMcpPermissionBoundary(server, observerAuth))
+      .toThrow(/must be installed before tool registration.*delete_project/);
+    expect(privilegedHandlerRan).toBe(false);
+  });
+
+  it('MUS-59: guarded tool removal is idempotent and keeps the runtime inventory synchronized', async () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth([WORKSPACE_READ], 'observer', 'observer-01');
+    const server = new McpServer({ name: 'remove-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(server, auth);
+    let originalHandlerRan = false;
+    const registeredTool = server.tool('list_projects', {}, async () => {
+      originalHandlerRan = true;
+      return { content: [{ type: 'text', text: 'safe read' }] };
+    });
+
+    expect(getRegisteredMcpToolNames(server)).toEqual(['list_projects']);
+    expect(() => registeredTool.remove()).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual([]);
+    expect(() => registeredTool.remove()).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual([]);
+
+    const removedCall = await withInMemoryMcpClient(server, (client) => client.callTool({
+      name: 'list_projects',
+      arguments: {},
+    }));
+    expect(removedCall.isError).toBe(true);
+    expect(originalHandlerRan).toBe(false);
+  });
+
+  it('MUS-59: update with a null name and replacement callback leaves no callable tool', async () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth([WORKSPACE_READ], 'observer', 'observer-01');
+    const server = new McpServer({ name: 'remove-update-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(server, auth);
+    let originalHandlerRan = false;
+    let replacementHandlerRan = false;
+    const registeredTool = server.tool('list_projects', {}, async () => {
+      originalHandlerRan = true;
+      return { content: [{ type: 'text', text: 'safe read' }] };
+    });
+
+    expect(() => registeredTool.update({
+      name: null,
+      callback: async () => {
+        replacementHandlerRan = true;
+        return { content: [{ type: 'text', text: 'must not run' }] };
+      },
+    })).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual([]);
+    expect((server as any)._registeredTools.list_projects).toBeUndefined();
+
+    const removedCall = await withInMemoryMcpClient(server, (client) => client.callTool({
+      name: 'list_projects',
+      arguments: {},
+    }));
+    expect(removedCall.isError).toBe(true);
+    expect(originalHandlerRan).toBe(false);
+    expect(replacementHandlerRan).toBe(false);
+  });
+
   it('MUS-59: legacy and modern MCP schemas redact unknown keys and run transforms exactly once over the wire', async () => {
     (config.auth as any).mode = 'enforced';
     const auth = makeAuth([], 'observer', 'observer-01');
