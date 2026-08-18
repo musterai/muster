@@ -410,7 +410,8 @@ describe('Atomic card claiming and lease expiry', () => {
 
       const auth: AuthContext = {
         principal: { kind: 'user', id: 'real-authenticated-user' },
-        workspace_id: null,
+        workspace_id: 'test-ws-01',
+        is_workspace_member: true,
         permissions: ['comment.create'],
         is_operator_override: false,
         role_name: null,
