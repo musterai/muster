@@ -40,6 +40,15 @@ describe('LexoRank Algorithm', () => {
     expect(() => rankBetween('a', 'aa')).toThrow(/No rank exists/);
   });
 
+  it('reports exhaustion instead of exceeding the declared maximum rank length', () => {
+    const maxA = 'a'.repeat(256);
+    const maxAdjacent = 'a' + 'z'.repeat(255);
+    const maxZ = 'z'.repeat(256);
+    expect(() => rankBetween(maxAdjacent, 'b')).toThrow(/No rank exists/);
+    expect(() => rankAfter(maxZ)).toThrow(/No rank exists/);
+    expect(() => rankBefore(maxA)).toThrow(/No rank exists/);
+  });
+
   it('rejects malformed ranks and reversed neighbours', () => {
     expect(() => rankBetween('A', 'z')).toThrow(/lowercase/);
     expect(() => rankBetween('a!', 'z')).toThrow(/lowercase/);

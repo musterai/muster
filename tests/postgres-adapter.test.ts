@@ -217,6 +217,35 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
       expect(targetRows).toHaveLength(2);
       expect(targetRows.every(row => isCanonicalRank(row.position))).toBe(true);
       expect(targetRows.map(row => row.column_id)).toEqual(['col-rank-a', 'col-rank-b']);
+
+      // Opposite cross-lane moves contend for the same two lane rows. The
+      // canonical [lane-id] lock order must serialize them without a
+      // PostgreSQL deadlock cycle.
+      const reverseA = await serviceA.create({ column_id: 'col-rank-a', title: 'Reverse A' });
+      const reverseB = await serviceA.create({ column_id: 'col-rank-b', title: 'Reverse B' });
+      let reverseTimeout!: ReturnType<typeof setTimeout>;
+      const reverseTimeoutPromise = new Promise<never>((_, reject) => {
+        reverseTimeout = setTimeout(() => reject(new Error('opposite cross-lane move timed out')), 5_000);
+      });
+      try {
+        await Promise.race([
+          raceAtBarrier([
+            () => serviceA.move(reverseA.id, { target_column_id: 'col-rank-b', position: 'z' }),
+            () => serviceB.move(reverseB.id, { target_column_id: 'col-rank-a', position: 'z' }),
+          ]),
+          reverseTimeoutPromise,
+        ]);
+      } finally {
+        clearTimeout(reverseTimeout);
+      }
+      const finalCounts = await adapter.query<{ column_id: string; count: number | string }>(
+        'SELECT column_id, COUNT(*) AS count FROM card WHERE column_id IN (?, ?) GROUP BY column_id ORDER BY column_id',
+        ['col-rank-a', 'col-rank-b'],
+      );
+      expect(finalCounts.map(row => [row.column_id, Number(row.count)])).toEqual([
+        ['col-rank-a', 2],
+        ['col-rank-b', 2],
+      ]);
     } finally {
       await second.close();
     }

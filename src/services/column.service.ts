@@ -34,6 +34,12 @@ export class ColumnService {
     );
   }
 
+  private async lockBoard(boardId: string, db: DatabaseAdapter): Promise<void> {
+    if (db.dialect === 'postgres') {
+      await db.query<{ id: string }>('SELECT id FROM board WHERE id = ? FOR UPDATE', [boardId]);
+    }
+  }
+
   private orderWithPosition(columns: Column[], column: Column, position?: string): Column[] {
     const ordered = [...columns];
     if (position === undefined) {
@@ -60,6 +66,7 @@ export class ColumnService {
     const is_terminal = data.is_terminal ? 1 : 0;
 
     return this.db.transaction(async tx => {
+      await this.lockBoard(data.board_id, tx);
       const columns = await this.orderedColumns(data.board_id, tx);
       const draft: Column = {
         id,
@@ -112,6 +119,10 @@ export class ColumnService {
     this.assertPosition(data.position);
 
     return this.db.transaction(async tx => {
+      const hintRows = await tx.query<Pick<Column, 'board_id'>>('SELECT board_id FROM "column" WHERE id = ?', [id]);
+      const hint = hintRows[0];
+      if (!hint) throw new Error(`Column with ID ${id} not found`);
+      await this.lockBoard(hint.board_id, tx);
       const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
       const rows = await tx.query<Column>(`SELECT * FROM "column" WHERE id = ?${lockClause}`, [id]);
       const existing = rows[0];

@@ -73,12 +73,15 @@ abstract class BasePostgresAdapter implements DatabaseAdapter {
   }
 
   abstract transaction<T>(fn: (adapter: DatabaseAdapter) => Promise<T>): Promise<T>;
+  abstract afterCommit(callback: () => void | Promise<void>): void;
   abstract migrate(sql: string): Promise<void>;
   abstract close(): Promise<void>;
 }
 
 /** Bound to one already-checked-out client for the lifetime of an open transaction — every call inside must run on this same connection to see uncommitted writes and hold the same locks. */
 class PostgresTransactionAdapter extends BasePostgresAdapter {
+  private readonly afterCommitCallbacks: Array<() => void | Promise<void>> = [];
+
   constructor(private readonly client: pg.PoolClient) {
     super();
   }
@@ -105,6 +108,20 @@ class PostgresTransactionAdapter extends BasePostgresAdapter {
   async close(): Promise<void> {
     // The pool owns this client's lifecycle — released by transaction(), not here.
   }
+
+  afterCommit(callback: () => void | Promise<void>): void {
+    this.afterCommitCallbacks.push(callback);
+  }
+
+  async runAfterCommit(): Promise<void> {
+    for (const callback of this.afterCommitCallbacks) {
+      try {
+        await callback();
+      } catch (error) {
+        console.error('Error in after-commit callback:', error);
+      }
+    }
+  }
 }
 
 export class PostgresAdapter extends BasePostgresAdapter {
@@ -126,6 +143,7 @@ export class PostgresAdapter extends BasePostgresAdapter {
       const txAdapter = new PostgresTransactionAdapter(client);
       const result = await fn(txAdapter);
       await client.query('COMMIT');
+      await txAdapter.runAfterCommit();
       return result;
     } catch (err) {
       try {
@@ -147,5 +165,9 @@ export class PostgresAdapter extends BasePostgresAdapter {
 
   async close(): Promise<void> {
     await this.pool.end();
+  }
+
+  afterCommit(callback: () => void | Promise<void>): void {
+    void callback();
   }
 }

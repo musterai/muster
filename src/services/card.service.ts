@@ -4,7 +4,7 @@ import { Card, CardAssignee, CardDetails, CreateCard, UpdateCard, MoveCard, Labe
 import { EventService } from './event.service.js';
 import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { formatCardKey } from '../shared/card-key.js';
-import { CardRuleError, NotFoundError, ValidationError } from '../shared/errors.js';
+import { CardRuleError, ConflictError, NotFoundError, ValidationError } from '../shared/errors.js';
 import { config } from '../config/index.js';
 import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.js';
 import { assertHttpUrl } from '../shared/url.js';
@@ -12,6 +12,20 @@ import { canonicalizeCardLink } from './helpers/card-links.helper.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
+const MAX_MOVE_RETRIES = 3;
+const MOVE_RETRY_DELAY_MS = 10;
+
+class MoveRetryError extends Error {
+  constructor() {
+    super('card changed lanes while its move was being serialized');
+    this.name = 'MoveRetryError';
+  }
+}
+
+function isRetryablePostgresError(error: unknown): boolean {
+  const code = (error as { code?: string }).code;
+  return code === '40P01' || code === '40001';
+}
 
 interface ColumnCapacity {
   id: string;
@@ -569,7 +583,10 @@ export class CardService {
 
   async move(id: string, data: MoveCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
     const cardId = await resolveCardId(this.db, id);
-    await this.db.transaction(async (tx) => {
+    let completed = false;
+    for (let attempt = 0; attempt < MAX_MOVE_RETRIES; attempt++) {
+      try {
+        await this.db.transaction(async (tx) => {
       const overrideRules: Array<Record<string, unknown>> = [];
       let moveEvent: {
         projectId: string;
@@ -582,23 +599,27 @@ export class CardService {
         cardKey: string;
         cardTitle: string;
       } | null = null;
-      const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
-      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
-      const existing = rows[0];
-      if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
-
-      const target_column_id = data.target_column_id || existing.column_id;
-
-      // Every cross-lane move reads and rewrites both lanes. Lock the lane
-      // rows in one canonical order before either snapshot is read so two
-      // opposite/crossing moves cannot observe stale source membership or
-      // deadlock while acquiring source and target in different orders.
+      // Read the source without locking, acquire every lane lock in canonical
+      // order, then lock the card. Every writer that rewrites lane peers uses
+      // this lane-before-card protocol; it prevents card/column wait cycles.
+      const initialRows = await tx.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
+      const initial = initialRows[0];
+      if (!initial) throw new NotFoundError(`Card with ID ${cardId} not found`);
+      const initialTarget = data.target_column_id || initial.column_id;
       if (tx.dialect === 'postgres') {
-        const laneIds = [...new Set([existing.column_id, target_column_id])].sort();
+        const laneIds = [...new Set([initial.column_id, initialTarget])].sort();
         for (const laneId of laneIds) {
           await tx.query<{ id: string }>('SELECT id FROM "column" WHERE id = ? FOR UPDATE', [laneId]);
         }
       }
+
+      const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
+      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
+      const existing = rows[0];
+      if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
+      if (tx.dialect === 'postgres' && existing.column_id !== initial.column_id) throw new MoveRetryError();
+
+      const target_column_id = data.target_column_id || existing.column_id;
 
       const capacity = await this.getColumnCapacity(target_column_id, tx);
       const isColumnChange = target_column_id !== existing.column_id;
@@ -718,7 +739,24 @@ export class CardService {
         await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules }, tx);
       }
 
-    });
+        });
+        completed = true;
+        break;
+      } catch (error) {
+        const retryable = this.db.dialect === 'postgres' && (error instanceof MoveRetryError || isRetryablePostgresError(error));
+        if (!retryable || attempt === MAX_MOVE_RETRIES - 1) {
+          if (retryable) {
+            throw new ConflictError('Card move conflicted with concurrent lane changes; retry the move.', {
+              operation: 'move',
+              retryable: true,
+            });
+          }
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, MOVE_RETRY_DELAY_MS * (attempt + 1)));
+      }
+    }
+    if (!completed) throw new ConflictError('Card move could not be serialized; retry the move.', { retryable: true });
 
     return this.getById(cardId);
   }

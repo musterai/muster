@@ -69,7 +69,7 @@ export function rankBetween(before: string | null, after: string | null): string
     const candidate = rankBefore(after);
     // `rankBefore('a')` historically returns `0a`. Keep that transport hint
     // for the drag client; CardService canonicalizes it before persistence.
-    if (candidate < after && /^[0-9a-z]+$/.test(candidate)) return candidate;
+    if (candidate < after && /^[0-9a-z]+$/.test(candidate) && candidate.length <= MAX_RANK_LENGTH) return candidate;
     throw new RankError('RANK_SPACE_EXHAUSTED', `No rank exists before ${after}`);
   }
   if (before && !after) return rankAfter(before);
@@ -101,7 +101,11 @@ export function rankBetween(before: string | null, after: string | null): string
 
   // Adjacent characters still have room after the lower suffix while staying
   // below the higher character (a, b -> am; az, b -> azzm).
-  return prefix + str1[i] + rankAfter(str1.slice(i + 1));
+  const candidate = prefix + str1[i] + rankAfter(str1.slice(i + 1));
+  if (!isValidRank(candidate)) {
+    throw new RankError('RANK_SPACE_EXHAUSTED', `No rank exists between ${str1} and ${str2}`);
+  }
+  return candidate;
 }
 
 export function rankAfter(rank: string): string {
@@ -119,7 +123,11 @@ export function rankAfter(rank: string): string {
       return newRank;
     }
   }
-  return newRank + 'm';
+  const candidate = newRank + 'm';
+  if (candidate.length > MAX_RANK_LENGTH) {
+    throw new RankError('RANK_SPACE_EXHAUSTED', `No rank exists after ${rank}`);
+  }
+  return candidate;
 }
 
 /** Retain the historical prepend helper; CardService normalizes before persistence. */
@@ -129,7 +137,11 @@ export function rankBefore(rank: string): string {
     const charIndex = ALPHABET.indexOf(rank[i]);
     if (charIndex > 0) return rank.substring(0, i) + ALPHABET[charIndex - 1];
   }
-  return '0' + rank;
+  const candidate = '0' + rank;
+  if (candidate.length > MAX_RANK_LENGTH) {
+    throw new RankError('RANK_SPACE_EXHAUSTED', `No rank exists before ${rank}`);
+  }
+  return candidate;
 }
 
 function encodeRank(value: bigint, width: number): string {

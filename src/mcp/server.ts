@@ -358,7 +358,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   server.tool('move_card', {
     card_id: cardReferenceSchema,
     target_column_id: z.string().optional(),
-    position: z.string().optional(),
+    position: z.string().max(256).regex(/^(?:[a-z]+|0[a-z]+)$/).optional(),
     operator_override: z.boolean().optional().describe('Explicitly bypass card WIP and blocker rules when the authenticated caller has operator override authority'),
   }, withPermission('move_card', auth, async ({ card_id, target_column_id, position, operator_override }) => {
     // Layer 2 scope check: if the principal doesn't have card.assign_others,

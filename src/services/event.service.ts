@@ -49,13 +49,18 @@ export class EventService {
       created_at,
     };
 
-    for (const listener of this.listeners) {
-      try {
-        await listener(event);
-      } catch (err) {
-        console.error('Error in event listener:', err);
+    // Durable event rows are inserted inside the caller's transaction, but
+    // external delivery must wait until COMMIT. Otherwise a later event
+    // failure can roll back the move while SSE clients already saw it.
+    db.afterCommit(async () => {
+      for (const listener of this.listeners) {
+        try {
+          await listener(event);
+        } catch (err) {
+          console.error('Error in event listener:', err);
+        }
       }
-    }
+    });
 
     return event;
   }

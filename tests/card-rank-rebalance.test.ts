@@ -103,10 +103,15 @@ describe('transactional card rank rebalancing', () => {
     const { columns } = await lanes();
     const card = await cardService.create({ column_id: columns[0].id, title: 'Atomic completion' });
     let calls = 0;
+    const broadcasts: string[] = [];
+    const realEvents = new EventService(db, event => {
+      broadcasts.push(event.action);
+    });
     const failingEvents = {
-      create: async () => {
+      create: async (data: Parameters<EventService['create']>[0], transaction?: DatabaseAdapter) => {
         calls += 1;
         if (calls === 2) throw new Error('completion event write failed');
+        return realEvents.create(data, transaction);
       },
     } as unknown as EventService;
     const transactionalService = new CardService(db, failingEvents);
@@ -123,6 +128,7 @@ describe('transactional card rank rebalancing', () => {
     expect(isCanonicalRank(unchanged[0].position)).toBe(true);
     const events = await db.query<{ action: string }>('SELECT action FROM event WHERE entity_id = ?', [card.id]);
     expect(events).toHaveLength(0);
+    expect(broadcasts).toHaveLength(0);
   });
 
   it('rolls back a move and override audit event as one transaction', async () => {
@@ -168,5 +174,30 @@ describe('transactional card rank rebalancing', () => {
     );
     expect(rows[0].id).toBe(columns[2].id);
     expect(rows.every(row => isCanonicalRank(row.position))).toBe(true);
+  });
+
+  it('repairs untouched invalid and duplicate ranks during startup migration backfill', async () => {
+    const { columns } = await lanes();
+    const cards = await Promise.all([
+      cardService.create({ column_id: columns[0].id, title: 'Legacy one' }),
+      cardService.create({ column_id: columns[0].id, title: 'Legacy two' }),
+    ]);
+    await db.execute('UPDATE "column" SET position = ? WHERE id IN (?, ?)', ['!', columns[0].id, columns[1].id]);
+    await db.execute('UPDATE card SET position = ? WHERE id IN (?, ?)', ['!', cards[0].id, cards[1].id]);
+
+    await new Migrator(db, path.join(process.cwd(), 'src/db/migrations')).run();
+
+    const repairedColumns = await db.query<{ position: string }>(
+      'SELECT position FROM "column" WHERE board_id = (SELECT board_id FROM "column" WHERE id = ?) ORDER BY position, id',
+      [columns[0].id],
+    );
+    const repairedCards = await db.query<{ position: string }>(
+      'SELECT position FROM card WHERE column_id = ? ORDER BY position, id',
+      [columns[0].id],
+    );
+    expect(repairedColumns.every(row => isCanonicalRank(row.position))).toBe(true);
+    expect(new Set(repairedColumns.map(row => row.position)).size).toBe(repairedColumns.length);
+    expect(repairedCards.every(row => isCanonicalRank(row.position))).toBe(true);
+    expect(new Set(repairedCards.map(row => row.position)).size).toBe(repairedCards.length);
   });
 });
