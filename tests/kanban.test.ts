@@ -129,4 +129,8 @@ describe('computeReorderedPosition (column drag-and-drop reordering)', () => {
     expect(position > columns[1].position).toBe(true);
     expect(position < columns[2].position).toBe(true);
   });
+
+  it('returns a server repair hint when adjacent legacy ranks exhaust client space', () => {
+    expect(computeReorderedPosition([{ position: 'a' }, { position: 'aa' }, { position: 'z' }], 2, 1)).toBe('a');
+  });
 });

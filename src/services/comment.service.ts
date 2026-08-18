@@ -13,13 +13,15 @@ export class CommentService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateComment): Promise<Comment> {
+  async create(data: CreateComment, adapter?: DatabaseAdapter): Promise<Comment> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, tx));
+    const db = adapter;
     assertMaxLength(data.content, CARD_TEXT_MAX_CHARS, 'Comment content');
-    const cardId = await resolveCardId(this.db, data.card_id);
+    const cardId = await resolveCardId(db, data.card_id);
     const id = ulid();
     const created_at = new Date().toISOString();
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO comment (id, card_id, author_id, content, created_at)
        VALUES (?, ?, ?, ?, ?)`,
       [id, cardId, data.author_id, data.content, created_at]
@@ -33,7 +35,7 @@ export class CommentService {
       created_at,
     };
 
-    await this.recordEvent(cardId, 'commented', data.author_id, { comment_id: id, content: data.content });
+    await this.recordEvent(cardId, 'commented', data.author_id, { comment_id: id, content: data.content }, db);
 
     return comment;
   }
@@ -48,30 +50,36 @@ export class CommentService {
     return rows[0] || null;
   }
 
-  async update(id: string, content: string, actorId?: string): Promise<Comment> {
+  async update(id: string, content: string, actorId?: string, adapter?: DatabaseAdapter): Promise<Comment> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, content, actorId, tx));
+    const db = adapter;
     assertMaxLength(content, CARD_TEXT_MAX_CHARS, 'Comment content');
-    const existing = await this.getById(id);
+    const rows = await db.query<Comment>('SELECT * FROM comment WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) {
       throw new Error(`Comment ${id} not found`);
     }
 
-    await this.db.execute('UPDATE comment SET content = ? WHERE id = ?', [content, id]);
+    await db.execute('UPDATE comment SET content = ? WHERE id = ?', [content, id]);
     const updated: Comment = { ...existing, content };
 
-    await this.recordEvent(existing.card_id, 'comment_updated', actorId, { comment_id: id, content });
+    await this.recordEvent(existing.card_id, 'comment_updated', actorId, { comment_id: id, content }, db);
 
     return updated;
   }
 
-  async delete(id: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+    const db = adapter;
+    const rows = await db.query<Comment>('SELECT * FROM comment WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) {
       throw new Error(`Comment ${id} not found`);
     }
 
-    await this.db.execute('DELETE FROM comment WHERE id = ?', [id]);
+    await db.execute('DELETE FROM comment WHERE id = ?', [id]);
 
-    await this.recordEvent(existing.card_id, 'comment_deleted', actorId, { comment_id: id });
+    await this.recordEvent(existing.card_id, 'comment_deleted', actorId, { comment_id: id }, db);
   }
 
   /**
@@ -90,13 +98,14 @@ export class CommentService {
     action: string,
     actorId: string | undefined,
     payload: Record<string, unknown>,
+    adapter: DatabaseAdapter,
   ): Promise<void> {
     if (!this.eventService) return;
 
-    const cardRows = await this.db.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
+    const cardRows = await adapter.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
     if (!cardRows[0]) return;
 
-    const projRows = await this.db.query<{ project_id: string }>(
+    const projRows = await adapter.query<{ project_id: string }>(
       'SELECT b.project_id FROM "column" col JOIN board b ON col.board_id = b.id WHERE col.id = ?',
       [cardRows[0].column_id]
     );
@@ -109,6 +118,6 @@ export class CommentService {
       action,
       actor_id: actorId,
       payload,
-    });
+    }, adapter);
   }
 }

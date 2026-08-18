@@ -27,6 +27,14 @@ export interface OAuthClient {
   token_endpoint_auth_method: string;
 }
 
+export interface OAuthClientRegistration {
+  client_name?: string;
+  redirect_uris: string[];
+  token_endpoint_auth_method?: string;
+  grant_types?: string[];
+  response_types?: string[];
+}
+
 export interface AuthorizeParams {
   clientId: string;
   redirectUri: string;
@@ -44,16 +52,33 @@ export type TokenResult =
 
 /** Loopback redirect URIs (RFC 8252 §7.3) may vary in port even if not pre-registered with that exact port. */
 function isLoopbackHost(host: string): boolean {
-  return host === '127.0.0.1' || host === '[::1]' || host === 'localhost';
+  if (host === '::1' || host === '[::1]') return true;
+  const parts = host.split('.');
+  return parts.length === 4 && parts[0] === '127' && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
+export function isSecureOAuthRedirectUri(raw: string): boolean {
+  if (raw.length === 0 || raw.length > 2048 || /[\u0000-\u001F\u007F\\]/.test(raw)) return false;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username || parsed.password || parsed.hash) return false;
+    if (parsed.protocol === 'https:') return true;
+    return parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function redirectUriMatches(registered: string, requested: string): boolean {
+  // Revalidate stored metadata so a legacy unsafe registration cannot remain
+  // usable after upgrading to the hardened policy.
+  if (!isSecureOAuthRedirectUri(registered) || !isSecureOAuthRedirectUri(requested)) return false;
   if (registered === requested) return true;
   try {
     const r = new URL(registered);
     const q = new URL(requested);
     if (!isLoopbackHost(r.hostname) || !isLoopbackHost(q.hostname)) return false;
-    return r.protocol === q.protocol && r.pathname === q.pathname && r.search === q.search;
+    return r.protocol === q.protocol && r.hostname === q.hostname && r.pathname === q.pathname && r.search === q.search;
   } catch {
     return false;
   }
@@ -78,19 +103,35 @@ export class McpOAuthService {
     private auditService?: AuditService,
   ) {}
 
-  async registerClient(data: { client_name?: string; redirect_uris: string[]; token_endpoint_auth_method?: string }): Promise<OAuthClient> {
-    if (!Array.isArray(data.redirect_uris) || data.redirect_uris.length === 0) {
-      throw new Error('redirect_uris is required and must be a non-empty array');
+  async registerClient(data: OAuthClientRegistration): Promise<OAuthClient> {
+    if (data.client_name !== undefined && (typeof data.client_name !== 'string' || data.client_name.length > 200)) {
+      throw new Error('client_name must be 200 characters or fewer');
+    }
+    if (!Array.isArray(data.redirect_uris) || data.redirect_uris.length === 0 || data.redirect_uris.length > 20) {
+      throw new Error('redirect_uris is required and must contain between 1 and 20 entries');
+    }
+    if (new Set(data.redirect_uris).size !== data.redirect_uris.length) {
+      throw new Error('redirect_uris must not contain duplicates');
     }
     for (const uri of data.redirect_uris) {
-      try {
-        const parsed = new URL(uri);
-        if (parsed.protocol !== 'https:' && !isLoopbackHost(parsed.hostname) && parsed.protocol !== 'http:') {
-          throw new Error(`Invalid redirect_uri: ${uri}`);
-        }
-      } catch {
+      if (typeof uri !== 'string' || !isSecureOAuthRedirectUri(uri)) {
         throw new Error(`Invalid redirect_uri: ${uri}`);
       }
+    }
+    if (data.token_endpoint_auth_method !== undefined && data.token_endpoint_auth_method !== 'none') {
+      throw new Error('Only token_endpoint_auth_method "none" is supported');
+    }
+    if (data.grant_types && (
+      data.grant_types.length === 0 ||
+      new Set(data.grant_types).size !== data.grant_types.length ||
+      data.grant_types.some(value => value !== 'authorization_code' && value !== 'refresh_token')
+    )) {
+      throw new Error('grant_types may contain only authorization_code and refresh_token');
+    }
+    if (data.response_types && (
+      data.response_types.length !== 1 || data.response_types[0] !== 'code'
+    )) {
+      throw new Error('response_types must be ["code"]');
     }
 
     const clientId = `mcp_${crypto.randomBytes(16).toString('hex')}`;
@@ -242,7 +283,10 @@ export class McpOAuthService {
 
       const tokenService = this.tokenServiceFor(tx);
       if (row.current_api_token_id) {
-        await tokenService.revoke(row.current_api_token_id);
+        // This refresh rotation already owns the transaction. Passing its
+        // adapter is required on SQLite: starting a nested transaction would
+        // queue behind this callback, which is waiting for the nested call.
+        await tokenService.revoke(row.current_api_token_id, tx);
       }
 
       try {
@@ -277,7 +321,7 @@ export class McpOAuthService {
     const auditService = this.auditServiceFor(db);
     for (const row of rows) {
       if (row.current_api_token_id) {
-        await tokenService.revoke(row.current_api_token_id);
+        await tokenService.revoke(row.current_api_token_id, db);
         await auditService?.log({
           workspace_id: row.workspace_id,
           actor: { id: row.agent_principal_id, kind: 'agent' },
@@ -315,11 +359,13 @@ export class McpOAuthService {
           params.workspaceId,
           params.agentPrincipalId,
           tokenData,
+          db,
         )
       : await tokenService.issueForCurrentAgentOwner(
           params.agentPrincipalId,
           params.workspaceId,
           tokenData,
+          db,
         );
 
     const refreshToken = crypto.randomBytes(32).toString('hex');

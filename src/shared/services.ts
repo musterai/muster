@@ -18,6 +18,7 @@ import type {
   McpOAuthService,
   AuditService,
 } from '../services/index.js';
+import type { DatabaseAdapter } from '../db/adapter.js';
 
 /**
  * Transport-neutral application service container.
@@ -26,6 +27,8 @@ import type {
  * contract. No transport is the composition root for another transport.
  */
 export interface Services {
+  /** Root adapter used by transports that must compose mutation + audit atomically. */
+  db?: DatabaseAdapter;
   projectService: ProjectService;
   boardService: BoardService;
   columnService: ColumnService;

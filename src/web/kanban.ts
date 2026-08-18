@@ -1,5 +1,5 @@
 import { Card } from './types.js';
-import { rankBetween } from '../shared/lexorank.js';
+import { RankError, rankBefore, rankBetween } from '../shared/lexorank.js';
 
 export type CardDateSortOrder = 'newest' | 'oldest';
 
@@ -73,5 +73,23 @@ export const computeReorderedPosition = (
 
   const before = reordered[destinationIndex - 1];
   const after = reordered[destinationIndex + 1];
-  return rankBetween(before?.position ?? null, after?.position ?? null);
+  try {
+    return rankBetween(before?.position ?? null, after?.position ?? null);
+  } catch (error) {
+    // Adjacent legacy ranks such as `a`/`aa` have no representable
+    // fractional rank. Preserve the insertion intent as a server-side hint;
+    // CardService will rebalance the affected lane transactionally. This
+    // keeps drag/drop usable while the canonical rank is repaired server-side.
+    if (!(error instanceof RankError) || error.code !== 'RANK_SPACE_EXHAUSTED') throw error;
+    if (before) return before.position;
+    if (after) {
+      try {
+        return rankBefore(after.position);
+      } catch (fallbackError) {
+        if (!(fallbackError instanceof RankError) || fallbackError.code !== 'RANK_SPACE_EXHAUSTED') throw fallbackError;
+        return after.position;
+      }
+    }
+    return 'm';
+  }
 };

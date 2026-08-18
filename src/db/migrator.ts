@@ -5,6 +5,7 @@ import path from 'node:path';
 import { DatabaseAdapter } from './adapter.js';
 import { deriveKeyPrefix, formatCardKey } from '../shared/card-key.js';
 import { deriveSlug } from '../shared/slug.js';
+import { rebalanceRanks } from '../shared/lexorank.js';
 
 /**
  * The schema is the clean-slate schema described by the approved multi-user
@@ -43,6 +44,7 @@ type AppliedMigration = {
 };
 
 type ColumnTarget = { table: string; column: string };
+type IndexTarget = { table: string; index: string };
 
 // 001 is the approved squash and already contains these columns.  The later
 // files remain in the repository so an older pre-squash database can be
@@ -98,11 +100,16 @@ const INITIAL_SCHEMA_TABLES = [
   'kb_relation',
 ];
 
-const LATER_SCHEMA_TABLES = [
-  'device_grant',
-  'oauth_client',
-  'oauth_authorization_code',
-  'oauth_refresh_token',
+const CREDENTIAL_INDEXES: IndexTarget[] = [
+  { table: 'api_token', index: 'idx_api_token_token_hash' },
+  { table: 'session', index: 'idx_session_token_hash' },
+  { table: 'invitation', index: 'idx_invitation_token_hash' },
+  { table: 'invitation', index: 'idx_invitation_pending_email' },
+];
+
+const EVENT_ORDER_INDEXES: IndexTarget[] = [
+  { table: 'event', index: 'idx_event_order' },
+  { table: 'event', index: 'idx_event_project_order' },
 ];
 
 function checksum(sql: string): string {
@@ -204,6 +211,7 @@ export class Migrator {
       }
       if (await this.hasTables(tx, ['project', 'board', 'column', 'card'])) {
         await this.backfillCardKeys(tx);
+        await this.repairLegacyRanks(tx);
       }
     });
   }
@@ -284,9 +292,15 @@ export class Migrator {
       );
     }
 
-    const allLaterTablesPresent = await this.hasTables(tx, LATER_SCHEMA_TABLES);
-    const allColumnsPresent = await this.hasColumns(tx, Object.values(SATISFIED_BY_SQUASH).flat());
-    const baselineMigrations = allLaterTablesPresent && allColumnsPresent ? migrations : migrations.filter(migration => migration.id === '001-initial.sql');
+    // Adopt only the contiguous prefix that the schema can prove it has.
+    // In particular, a pre-ledger database through 007 has no event_order
+    // column or sequence yet. Recording every migration there would cause
+    // startup to skip 009 and make the next event write fail at runtime.
+    const baselineMigrations: MigrationFile[] = [];
+    for (const migration of migrations) {
+      if (!(await this.isMigrationSatisfiedBySchema(tx, migration))) break;
+      baselineMigrations.push(migration);
+    }
 
     const now = new Date().toISOString();
     for (const migration of baselineMigrations) {
@@ -400,9 +414,71 @@ export class Migrator {
     return rows.length > 0;
   }
 
+  private async hasIndexes(tx: DatabaseAdapter, targets: IndexTarget[]): Promise<boolean> {
+    for (const target of targets) {
+      if (!(await this.indexExists(tx, target))) return false;
+    }
+    return true;
+  }
+
+  private async indexExists(tx: DatabaseAdapter, target: IndexTarget): Promise<boolean> {
+    if (tx.dialect === 'sqlite') {
+      const rows = await tx.query<{ name: string }>(`PRAGMA index_list("${target.table}")`);
+      return rows.some(row => row.name === target.index);
+    }
+    const rows = await tx.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = ? AND indexname = ?`,
+      [target.table, target.index],
+    );
+    return rows.length > 0;
+  }
+
+  private async hasInitializedEventOrderSchema(tx: DatabaseAdapter): Promise<boolean> {
+    const hasStructure = await this.hasTables(tx, ['event', 'event_order_sequence'])
+      && await this.hasColumns(tx, [
+        { table: 'event', column: 'event_order' },
+        { table: 'event_order_sequence', column: 'next_order' },
+      ])
+      && await this.hasIndexes(tx, EVENT_ORDER_INDEXES);
+    if (!hasStructure) return false;
+
+    const sequence = await tx.query<{ id: number }>(
+      'SELECT id FROM event_order_sequence WHERE id = 1 LIMIT 1',
+    );
+    return sequence.length === 1;
+  }
+
+  /**
+   * A no-ledger database can be adopted only if it proves each migration in
+   * order.  This deliberately treats a partially applied migration as not
+   * adopted; migration execution will then either finish a supported shape or
+   * fail visibly instead of recording a false history row.
+   */
+  private async isMigrationSatisfiedBySchema(tx: DatabaseAdapter, migration: MigrationFile): Promise<boolean> {
+    switch (migration.id) {
+      case '001-initial.sql':
+        return this.hasTables(tx, INITIAL_SCHEMA_TABLES);
+      case '002-invitation-created-at.sql':
+      case '005-audit-log.sql':
+      case '006-terminal-columns.sql':
+      case '007-project-board-slugs.sql':
+        return this.hasColumns(tx, SATISFIED_BY_SQUASH[migration.id]);
+      case '003-device-grant.sql':
+        return this.hasTables(tx, ['device_grant']);
+      case '004-mcp-oauth.sql':
+        return this.hasTables(tx, ['oauth_client', 'oauth_authorization_code', 'oauth_refresh_token']);
+      case '008-credential-indexes.sql':
+        return this.hasIndexes(tx, CREDENTIAL_INDEXES);
+      case '009-event-order.sql':
+        return this.hasInitializedEventOrderSchema(tx);
+      default:
+        return false;
+    }
+  }
+
   private async isSatisfiedByExistingSchema(tx: DatabaseAdapter, migration: MigrationFile): Promise<boolean> {
-    const targets = SATISFIED_BY_SQUASH[migration.id];
-    return !!targets && await this.hasColumns(tx, targets);
+    return this.isMigrationSatisfiedBySchema(tx, migration);
   }
 
   /**
@@ -487,6 +563,46 @@ export class Migrator {
 
     for (const [projectId, seq] of seqByProject) {
       await db.execute(`UPDATE project SET card_seq = ? WHERE id = ?`, [seq, projectId]);
+    }
+  }
+
+  /**
+   * Repair every lane at startup, not only lanes touched by a new move. The
+   * ordered id tie-break makes duplicate/legacy values stable and the whole
+   * pass runs under the startup transaction/lock, so no reader observes a
+   * partially repaired lane.
+   */
+  private async repairLegacyRanks(db: DatabaseAdapter): Promise<void> {
+    const columns = await db.query<{ id: string; board_id: string; position: string }>(
+      `SELECT id, board_id, position FROM "column" ORDER BY board_id, position, id`,
+    );
+    const columnsByBoard = new Map<string, typeof columns>();
+    for (const column of columns) {
+      const boardColumns = columnsByBoard.get(column.board_id) || [];
+      boardColumns.push(column);
+      columnsByBoard.set(column.board_id, boardColumns);
+    }
+    for (const boardColumns of columnsByBoard.values()) {
+      const ranks = rebalanceRanks(boardColumns.length);
+      for (let index = 0; index < boardColumns.length; index++) {
+        await db.execute('UPDATE "column" SET position = ? WHERE id = ?', [ranks[index], boardColumns[index].id]);
+      }
+    }
+
+    const cards = await db.query<{ id: string; column_id: string; position: string }>(
+      `SELECT id, column_id, position FROM card ORDER BY column_id, position, id`,
+    );
+    const cardsByColumn = new Map<string, typeof cards>();
+    for (const card of cards) {
+      const laneCards = cardsByColumn.get(card.column_id) || [];
+      laneCards.push(card);
+      cardsByColumn.set(card.column_id, laneCards);
+    }
+    for (const laneCards of cardsByColumn.values()) {
+      const ranks = rebalanceRanks(laneCards.length);
+      for (let index = 0; index < laneCards.length; index++) {
+        await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], laneCards[index].id]);
+      }
     }
   }
 }

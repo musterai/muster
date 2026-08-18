@@ -19,7 +19,7 @@ import { Migrator } from '../src/db/migrator.js';
 import { TokenService } from '../src/services/token.service.js';
 import { AgentService } from '../src/services/agent.service.js';
 import { RoleService } from '../src/services/role.service.js';
-import { McpOAuthService, redirectUriMatches, verifyPkce } from '../src/services/mcp-oauth.service.js';
+import { McpOAuthService, isSecureOAuthRedirectUri, redirectUriMatches, verifyPkce } from '../src/services/mcp-oauth.service.js';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-mcp-oauth.db');
 const RESOURCE = 'https://muster.example.com/mcp';
@@ -103,6 +103,37 @@ describe('MUS-29: McpOAuthService', () => {
   it('registration rejects an empty or malformed redirect_uris list', async () => {
     await expect(oauthService.registerClient({ redirect_uris: [] })).rejects.toThrow();
     await expect(oauthService.registerClient({ redirect_uris: ['not-a-url'] })).rejects.toThrow();
+  });
+
+  it.each([
+    'http://remote.example/callback',
+    'http://localhost:5555/callback',
+    'https://user:password@example.com/callback',
+    'https://example.com/callback#fragment',
+    'custom-scheme:/callback',
+  ])('registration rejects unsafe redirect URI %s', async redirectUri => {
+    await expect(oauthService.registerClient({ redirect_uris: [redirectUri] })).rejects.toThrow('Invalid redirect_uri');
+  });
+
+  it('registration validates duplicates and declared grant/response metadata', async () => {
+    await expect(oauthService.registerClient({
+      redirect_uris: ['https://client.example/callback', 'https://client.example/callback'],
+    })).rejects.toThrow('duplicates');
+    await expect(oauthService.registerClient({
+      redirect_uris: ['https://client.example/callback'],
+      grant_types: ['client_credentials'],
+    })).rejects.toThrow('grant_types');
+    await expect(oauthService.registerClient({
+      redirect_uris: ['https://client.example/callback'],
+      response_types: ['token'],
+    })).rejects.toThrow('response_types');
+
+    const client = await oauthService.registerClient({
+      redirect_uris: ['https://client.example/callback'],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+    });
+    expect(client.redirect_uris).toEqual(['https://client.example/callback']);
   });
 
   it('completes the full code exchange end-to-end', async () => {
@@ -203,16 +234,28 @@ describe('MUS-29: redirect_uri validation (RFC 8252 loopback flexibility)', () =
 
   it('loopback redirect URIs may vary in port even if not pre-registered with that exact port', () => {
     expect(redirectUriMatches('http://127.0.0.1:5555/callback', 'http://127.0.0.1:63412/callback')).toBe(true);
-    expect(redirectUriMatches('http://localhost:5555/callback', 'http://localhost:9999/callback')).toBe(true);
+    expect(redirectUriMatches('http://[::1]:5555/callback', 'http://[::1]:9999/callback')).toBe(true);
   });
 
   it('loopback flexibility does not relax the path or scheme', () => {
     expect(redirectUriMatches('http://127.0.0.1:5555/callback', 'http://127.0.0.1:9999/other')).toBe(false);
     expect(redirectUriMatches('http://127.0.0.1:5555/callback', 'https://127.0.0.1:5555/callback')).toBe(false);
+    expect(redirectUriMatches('http://127.0.0.1:5555/callback', 'http://127.0.0.2:5555/callback')).toBe(false);
+    expect(redirectUriMatches('http://127.0.0.1:5555/callback', 'http://[::1]:5555/callback')).toBe(false);
   });
 
   it('a loopback registration cannot be satisfied by a non-loopback request', () => {
     expect(redirectUriMatches('http://127.0.0.1:5555/callback', 'http://evil.com:5555/callback')).toBe(false);
+  });
+});
+
+describe('MUS-63: OAuth redirect transport validation', () => {
+  it('allows HTTPS and literal loopback HTTP only', () => {
+    expect(isSecureOAuthRedirectUri('https://client.example/callback')).toBe(true);
+    expect(isSecureOAuthRedirectUri('http://127.0.0.1:49152/callback')).toBe(true);
+    expect(isSecureOAuthRedirectUri('http://[::1]:49152/callback')).toBe(true);
+    expect(isSecureOAuthRedirectUri('http://localhost:49152/callback')).toBe(false);
+    expect(isSecureOAuthRedirectUri('http://client.example/callback')).toBe(false);
   });
 });
 

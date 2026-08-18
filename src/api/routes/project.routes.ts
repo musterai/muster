@@ -5,8 +5,9 @@ import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
 import { validateRequest } from '../middleware/validate.js';
 import { idParamsSchema, projectCreateSchema, projectUpdateSchema } from '../schemas.js';
+import { DatabaseAdapter } from '../../db/adapter.js';
 
-export function createProjectRouter(projectService: ProjectService, auditService: AuditService): Router {
+export function createProjectRouter(db: DatabaseAdapter, projectService: ProjectService, auditService: AuditService): Router {
   const router = Router();
 
   router.get('/', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
@@ -48,15 +49,18 @@ export function createProjectRouter(projectService: ProjectService, auditService
 
   router.delete('/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const project = await projectService.getById(req.params.id);
-      await projectService.delete(req.params.id);
-      const auth: AuthContext | undefined = (req as any).authContext;
-      await auditService.logAs(auth, {
-        action: 'project.delete',
-        target_type: 'project',
-        target_id: req.params.id,
-        payload: project ? { name: project.name } : undefined,
-        ip: req.ip,
+      await db.transaction(async tx => {
+        const projectRows = await tx.query<{ name: string }>('SELECT name FROM project WHERE id = ?', [req.params.id]);
+        const project = projectRows[0];
+        await projectService.delete(req.params.id, req.authContext?.principal?.id, tx);
+        const auth: AuthContext | undefined = (req as any).authContext;
+        await auditService.logAs(auth, {
+          action: 'project.delete',
+          target_type: 'project',
+          target_id: req.params.id,
+          payload: project ? { name: project.name } : undefined,
+          ip: req.ip,
+        }, tx);
       });
       res.status(204).end();
     } catch (err) {

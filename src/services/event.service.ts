@@ -38,11 +38,11 @@ export class EventService {
 
   /**
    * Return a bounded, project-scoped event tail after an existing event ID.
-   * Event IDs are ULIDs and therefore provide the stable ordering used by the
-   * SSE Last-Event-ID cursor. A cursor from another project, a deleted event,
-   * or an otherwise stale cursor is intentionally indistinguishable: callers
-   * receive an empty live-tail resume rather than event metadata or an
-   * unbounded replay.
+   * `event_order` is allocated by the database and defines the stable
+   * Last-Event-ID successor relation. A cursor from another project, a
+   * deleted event, or an otherwise stale cursor is intentionally
+   * indistinguishable: callers receive an empty live-tail resume rather than
+   * event metadata or an unbounded replay.
    */
   async listAfterId(projectId: string, eventId: string, limit = 100): Promise<EventResumeResult> {
     const boundedLimit = Number.isFinite(limit)
@@ -79,13 +79,18 @@ export class EventService {
     };
   }
 
+  /**
+   * Persist through a transaction-scoped adapter when a domain mutation owns
+   * one. The durable event and its sequence allocation share that boundary;
+   * listener delivery is registered on the same adapter and therefore runs
+   * only after the outer transaction commits.
+   */
   async create(data: CreateEvent, transactionDb?: DatabaseAdapter): Promise<Event> {
     const id = ulid();
     const created_at = new Date().toISOString();
     const payload = data.payload ? JSON.stringify(data.payload) : null;
 
-    let event: Event | null = null;
-    const persist = async (tx: DatabaseAdapter): Promise<void> => {
+    const persist = async (tx: DatabaseAdapter): Promise<Event> => {
       const sequence = await tx.query<{ next_order: number | string }>(
         `SELECT next_order FROM event_order_sequence WHERE id = 1${tx.dialect === 'postgres' ? ' FOR UPDATE' : ''}`,
       );
@@ -100,7 +105,7 @@ export class EventService {
         [id, data.project_id, data.entity_type, data.entity_id, data.action, data.actor_id || null, payload, created_at, eventOrder]
       );
 
-      event = {
+      const event: Event = {
         id,
         project_id: data.project_id,
         entity_type: data.entity_type,
@@ -110,23 +115,25 @@ export class EventService {
         payload: data.payload || null,
         created_at,
       };
+
+      const notify = async (): Promise<void> => {
+        for (const listener of this.listeners) {
+          try {
+            await listener(event);
+          } catch (err) {
+            console.error('Error in event listener:', err);
+          }
+        }
+      };
+      if (tx.afterCommit) await tx.afterCommit(notify);
+      else await notify();
+      return event;
     };
-    // Callers already inside a domain transaction pass its adapter through so
-    // SQLite does not queue a nested transaction behind itself (and Postgres
-    // keeps the event order allocation in the same transaction).
-    if (transactionDb) await persist(transactionDb);
-    else await this.db.transaction(persist);
-    if (!event) throw new Error('Event persistence did not produce an event');
 
-    for (const listener of this.listeners) {
-      try {
-        await listener(event);
-      } catch (err) {
-        console.error('Error in event listener:', err);
-      }
-    }
-
-    return event;
+    // Root writes need one transaction for sequence allocation and insert;
+    // nested callers already hold a scoped adapter and must join it rather
+    // than queueing a second SQLite transaction or publishing early.
+    return transactionDb ? persist(transactionDb) : this.db.transaction(persist);
   }
 
   async list(projectId: string, options: { entity_type?: string; entity_id?: string; since?: string; limit?: number } = {}): Promise<Event[]> {
