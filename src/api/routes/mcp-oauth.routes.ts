@@ -79,6 +79,13 @@ function parseRedirectUri(raw: unknown): string | null {
   }
 }
 
+/** Preserve registered query parameters while adding protocol response data. */
+function appendRedirectParameters(redirectUri: string, parameters: URLSearchParams): string {
+  const redirect = new URL(redirectUri);
+  for (const [name, value] of parameters) redirect.searchParams.set(name, value);
+  return redirect.toString();
+}
+
 export function createMcpOAuthRouter(
   db: DatabaseAdapter,
   oauthService: McpOAuthService,
@@ -147,7 +154,7 @@ export function createMcpOAuthRouter(
       if (qs.has('error')) {
         if (typeof req.query.state === 'string') qs.set('state', req.query.state);
         qs.set('iss', config.oidc.publicUrl);
-        res.redirect(`${redirectUri}?${qs.toString()}`);
+        res.redirect(appendRedirectParameters(redirectUri, qs));
         return;
       }
 
@@ -218,7 +225,7 @@ export function createMcpOAuthRouter(
 
       if (decision !== 'approve') {
         qs.set('error', 'access_denied');
-        res.json({ redirect_uri: `${redirectUri}?${qs.toString()}` });
+        res.json({ redirect_uri: appendRedirectParameters(redirectUri, qs) });
         return;
       }
 
@@ -262,7 +269,7 @@ export function createMcpOAuthRouter(
       });
 
       qs.set('code', code);
-      res.json({ redirect_uri: `${redirectUri}?${qs.toString()}` });
+      res.json({ redirect_uri: appendRedirectParameters(redirectUri, qs) });
     } catch (err) {
       next(err);
     }

@@ -457,6 +457,10 @@ describe('MUS-63: same-origin post-auth redirect validation', () => {
     '/%5c%5cevil.example',
     '/%2f%2fevil.example',
     '/%252f%252fevil.example',
+    '/%2e%2e//evil.example',
+    '/a/../..///evil.example',
+    '/%2e/%2e%2e//evil.example',
+    '/%252e%252e%252f%252fevil.example',
     'https://evil.example/path',
     '/safe\nLocation: https://evil.example',
   ])('rejects browser-ambiguous destination %j', value => {
