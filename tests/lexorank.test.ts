@@ -34,6 +34,8 @@ describe('LexoRank Algorithm', () => {
     expect(mid > 'a').toBe(true);
     expect(mid < 'c').toBe(true);
     expect(mid).toBe('b');
+    const adjacentMid = rankBetween('a', 'b');
+    expect('a' < adjacentMid && adjacentMid < 'b').toBe(true);
   });
   it('reports exhausted adjacent prefix space instead of returning an out-of-range rank', () => {
     expect(() => rankBetween('a', 'aa')).toThrowError(RankError);
@@ -107,7 +109,7 @@ describe('LexoRank Algorithm', () => {
 
   it('supports long midpoint insertion sequences with periodic rebalancing', () => {
     let ranks = ['a', 'z'];
-    for (let i = 0; i < 1_000; i++) {
+    for (let i = 0; i < 5_000; i++) {
       if (i > 0 && i % 5 === 0) {
         ranks = rebalanceRanks(ranks.length);
         expect(ranks.every(isCanonicalRank)).toBe(true);

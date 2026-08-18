@@ -191,13 +191,14 @@ describe('transactional card rank rebalancing', () => {
       'SELECT position FROM "column" WHERE board_id = (SELECT board_id FROM "column" WHERE id = ?) ORDER BY position, id',
       [columns[0].id],
     );
-    const repairedCards = await db.query<{ position: string }>(
-      'SELECT position FROM card WHERE column_id = ? ORDER BY position, id',
+    const repairedCards = await db.query<{ id: string; position: string }>(
+      'SELECT id, position FROM card WHERE column_id = ? ORDER BY position, id',
       [columns[0].id],
     );
     expect(repairedColumns.every(row => isCanonicalRank(row.position))).toBe(true);
     expect(new Set(repairedColumns.map(row => row.position)).size).toBe(repairedColumns.length);
     expect(repairedCards.every(row => isCanonicalRank(row.position))).toBe(true);
     expect(new Set(repairedCards.map(row => row.position)).size).toBe(repairedCards.length);
+    expect(new Set(repairedCards.map(row => row.id))).toEqual(new Set(cards.map(card => card.id)));
   });
 });
