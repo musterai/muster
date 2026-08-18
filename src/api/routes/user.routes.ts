@@ -51,14 +51,16 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
       if (targetRole) {
         assertPermissionsGrantable(req.authContext || OPEN_AUTH_CONTEXT, targetRole.permissions);
       }
-      await userService.changeMemberRole(req.params.workspaceId, req.params.userId, req.body.role_id);
-      await auditService.logAs(req.authContext, {
-        workspace_id: req.params.workspaceId,
-        action: 'member.role_change',
-        target_type: 'app_user',
-        target_id: req.params.userId,
-        payload: { role_id: req.body.role_id, role_name: targetRole?.name },
-        ip: req.ip,
+      await db.transaction(async tx => {
+        await userService.changeMemberRole(req.params.workspaceId, req.params.userId, req.body.role_id, tx);
+        await auditService.logAs(req.authContext, {
+          workspace_id: req.params.workspaceId,
+          action: 'member.role_change',
+          target_type: 'app_user',
+          target_id: req.params.userId,
+          payload: { role_id: req.body.role_id, role_name: targetRole?.name },
+          ip: req.ip,
+        }, tx);
       });
       const members = await userService.listMembers(req.params.workspaceId);
       res.json(members.find(m => m.id === req.params.userId) || null);
@@ -70,13 +72,15 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
   router.delete('/workspaces/:workspaceId/members/:userId', ...validateRequest({ params: workspaceMemberParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       requireWorkspacePathScope(req);
-      await userService.removeMember(req.params.workspaceId, req.params.userId);
-      await auditService.logAs(req.authContext, {
-        workspace_id: req.params.workspaceId,
-        action: 'member.remove',
-        target_type: 'app_user',
-        target_id: req.params.userId,
-        ip: req.ip,
+      await db.transaction(async tx => {
+        await userService.removeMember(req.params.workspaceId, req.params.userId, tx);
+        await auditService.logAs(req.authContext, {
+          workspace_id: req.params.workspaceId,
+          action: 'member.remove',
+          target_type: 'app_user',
+          target_id: req.params.userId,
+          ip: req.ip,
+        }, tx);
       });
       res.status(204).send();
     } catch (err) {

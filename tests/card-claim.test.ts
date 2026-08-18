@@ -230,6 +230,46 @@ describe('Atomic card claiming and lease expiry', () => {
     expect(events.some(e => e.action === 'claim_expired')).toBe(true);
   });
 
+  it('rolls back an expired lease when event persistence fails', async () => {
+    const project = await projectService.create({ name: 'Sweep rollback project' });
+    const boards = await boardService.list(project.id);
+    const columns = await columnService.list(boards[0].id);
+    const card = await cardService.create({ column_id: columns[0].id, title: 'Keep my lease' });
+    const agent = await agentService.register({ name: 'Still alive' });
+    await cardService.claim(card.id, agent.id, 1);
+    await db.execute('UPDATE card SET claim_expires_at = ? WHERE id = ?', [
+      new Date(Date.now() - 1000).toISOString(), card.id,
+    ]);
+
+    eventService.create = async () => { throw new Error('injected event failure'); };
+    await expect(cardService.releaseExpiredLeases()).rejects.toThrow('injected event failure');
+
+    const retained = await cardService.getById(card.id);
+    expect(retained.claimed_by).toBe(agent.id);
+    expect(retained.claim_expires_at).not.toBeNull();
+    expect((await db.query('SELECT id FROM event WHERE entity_id = ? AND action = ?', [card.id, 'claim_expired'])).length).toBe(0);
+  });
+
+  it('concurrent expiry sweepers release once and emit one event', async () => {
+    const project = await projectService.create({ name: 'Concurrent sweep project' });
+    const boards = await boardService.list(project.id);
+    const columns = await columnService.list(boards[0].id);
+    const card = await cardService.create({ column_id: columns[0].id, title: 'Sweep once' });
+    const agent = await agentService.register({ name: 'Expired holder' });
+    await cardService.claim(card.id, agent.id, 1);
+    await db.execute('UPDATE card SET claim_expires_at = ? WHERE id = ?', [
+      new Date(Date.now() - 1000).toISOString(), card.id,
+    ]);
+
+    const [first, second] = await Promise.all([
+      cardService.releaseExpiredLeases(),
+      cardService.releaseExpiredLeases(),
+    ]);
+    expect([first, second].filter(ids => ids.includes(card.id)).length).toBe(1);
+    const events = await eventService.list(project.id, { entity_id: card.id });
+    expect(events.filter(event => event.action === 'claim_expired')).toHaveLength(1);
+  });
+
   it('claiming an unclaimed card by an unrelated agent does not affect other cards', async () => {
     const card = await makeCard();
     const other = await makeCard('Untouched card');

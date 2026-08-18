@@ -41,8 +41,10 @@ export class UserService {
     subject: string,
     email: string | null,
     displayName?: string | null,
+    adapter?: DatabaseAdapter,
   ): Promise<{ user: AppUser; isNewUser: boolean }> {
-    const existing = await this.db.query<any>(
+    if (!adapter) return this.db.transaction(tx => this.findOrCreateBySubject(provider, subject, email, displayName, tx));
+    const existing = await adapter.query<any>(
       `SELECT u.id, u.email, u.display_name, u.avatar_url, u.status, u.created_at
        FROM identity i JOIN app_user u ON u.id = i.user_id
        WHERE i.provider = ? AND i.subject = ?`,
@@ -51,8 +53,8 @@ export class UserService {
 
     if (existing.length > 0) {
       if (email) {
-        await this.db.execute('UPDATE identity SET email = ? WHERE provider = ? AND subject = ?', [email, provider, subject]);
-        await this.db.execute('UPDATE app_user SET email = ? WHERE id = ?', [email, existing[0].id]);
+        await adapter.execute('UPDATE identity SET email = ? WHERE provider = ? AND subject = ?', [email, provider, subject]);
+        await adapter.execute('UPDATE app_user SET email = ? WHERE id = ?', [email, existing[0].id]);
       }
       return { user: { ...existing[0], email: email || existing[0].email }, isNewUser: false };
     }
@@ -61,12 +63,12 @@ export class UserService {
     const userId = ulid();
     const identityId = ulid();
 
-    await this.db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
-    await this.db.execute(
+    await adapter.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
+    await adapter.execute(
       'INSERT INTO app_user (id, email, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
       [userId, email, displayName || email || 'New User', 'active', now],
     );
-    await this.db.execute(
+    await adapter.execute(
       'INSERT INTO identity (id, user_id, provider, subject, email) VALUES (?, ?, ?, ?, ?)',
       [identityId, userId, provider, subject, email],
     );
@@ -101,12 +103,14 @@ export class UserService {
    * (so the person shows up in Members, can be @assigned, etc.) instead of
    * leaving them unable to appear as anyone at all.
    */
-  async createLocalUser(displayName: string): Promise<AppUser> {
+  async createLocalUser(displayName: string, adapter?: DatabaseAdapter): Promise<AppUser> {
+    if (!adapter) return this.db.transaction(tx => this.createLocalUser(displayName, tx));
+    const db = adapter;
     const now = new Date().toISOString();
     const userId = ulid();
 
-    await this.db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
-    await this.db.execute(
+    await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
+    await db.execute(
       'INSERT INTO app_user (id, email, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
       [userId, null, displayName, 'active', now],
     );
@@ -119,17 +123,17 @@ export class UserService {
     return rows.length === 0;
   }
 
-  async isWorkspaceMember(workspaceId: string, userId: string): Promise<boolean> {
-    const rows = await this.db.query<any>(
+  async isWorkspaceMember(workspaceId: string, userId: string, adapter: DatabaseAdapter = this.db): Promise<boolean> {
+    const rows = await adapter.query<any>(
       'SELECT 1 FROM workspace_member WHERE workspace_id = ? AND user_id = ? LIMIT 1',
       [workspaceId, userId],
     );
     return rows.length > 0;
   }
 
-  async addWorkspaceMember(workspaceId: string, userId: string, roleId: string, invitedBy?: string | null): Promise<void> {
+  async addWorkspaceMember(workspaceId: string, userId: string, roleId: string, invitedBy?: string | null, adapter: DatabaseAdapter = this.db): Promise<void> {
     const now = new Date().toISOString();
-    await this.db.execute(
+    await adapter.execute(
       'INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at, invited_by) VALUES (?, ?, ?, ?, ?)',
       [workspaceId, userId, roleId, now, invitedBy || null],
     );
@@ -178,6 +182,15 @@ export class UserService {
     const permissions: string[] = roleRows[0] ? JSON.parse(roleRows[0].permissions_json) : [];
     if (!permissions.includes('workspace.admin')) return false;
     return (await this.countAdmins(workspaceId, adapter)) <= 1;
+  }
+
+  /** Serialize membership/admin decisions on PostgreSQL before counting. */
+  private async lockWorkspaceMembers(workspaceId: string, adapter: DatabaseAdapter): Promise<void> {
+    if (adapter.dialect !== 'postgres') return;
+    await adapter.query(
+      'SELECT user_id FROM workspace_member WHERE workspace_id = ? FOR UPDATE',
+      [workspaceId],
+    );
   }
 
   private async operatedAgentIds(
@@ -231,8 +244,10 @@ export class UserService {
   }
 
   /** Change a member's role. Refuses to demote the last remaining admin — a workspace must always keep an owner. */
-  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string): Promise<void> {
-    await this.db.transaction(async tx => {
+  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.changeMemberRole(workspaceId, userId, newRoleId, tx));
+    await (async tx => {
+      await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(
         'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
         [workspaceId, userId],
@@ -259,7 +274,7 @@ export class UserService {
       );
       const agentIds = await this.operatedAgentIds(tx, workspaceId, userId);
       await this.revokeWorkspaceCredentials(tx, workspaceId, userId, agentIds);
-    });
+    })(adapter);
   }
 
   /**
@@ -269,8 +284,10 @@ export class UserService {
    * "Unassigned" group rather than being deleted or left pointing at a
    * principal no longer in the workspace.
    */
-  async removeMember(workspaceId: string, userId: string): Promise<void> {
-    await this.db.transaction(async tx => {
+  async removeMember(workspaceId: string, userId: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.removeMember(workspaceId, userId, tx));
+    await (async tx => {
+      await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(
         'SELECT role_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
         [workspaceId, userId],
@@ -314,6 +331,6 @@ export class UserService {
       // to other workspaces, and historical comments require the principal FK
       // to remain intact. With no membership or live credentials, this
       // workspace becomes inaccessible immediately.
-    });
+    })(adapter);
   }
 }

@@ -12,17 +12,21 @@ export class BoardService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateBoard, actorId?: string): Promise<Board> {
+  async create(data: CreateBoard, actorId?: string, adapter?: DatabaseAdapter): Promise<Board> {
+    if (!adapter) {
+      return this.db.transaction(tx => this.create(data, actorId, tx));
+    }
+    const db = adapter;
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
-    const existingSlugs = await this.db.query<{ slug: string }>(
+    const existingSlugs = await db.query<{ slug: string }>(
       `SELECT slug FROM board WHERE project_id = ? AND slug IS NOT NULL`,
       [data.project_id]
     );
     const slug = deriveSlug(data.name, new Set(existingSlugs.map(b => b.slug)));
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO board (id, project_id, name, slug, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [id, data.project_id, data.name, slug, created_at, updated_at]
@@ -67,7 +71,7 @@ export class BoardService {
       const colId = ulid();
       const pos = rankAfter(lastRank);
       lastRank = pos;
-      await this.db.execute(
+      await db.execute(
         `INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal) VALUES (?, ?, ?, ?, ?, ?)`,
         [colId, id, col.name, pos, col.wip_limit, col.is_terminal ? 1 : 0]
       );
@@ -81,7 +85,7 @@ export class BoardService {
         action: 'created',
         actor_id: actorId,
         payload: { name: board.name },
-      });
+      }, db);
     }
 
     return board;
@@ -96,8 +100,11 @@ export class BoardService {
     return this.db.query<Board>('SELECT * FROM board WHERE project_id = ? ORDER BY created_at ASC', [projectId]);
   }
 
-  async update(id: string, data: UpdateBoard, actorId?: string): Promise<Board> {
-    const existing = await this.getById(id);
+  async update(id: string, data: UpdateBoard, actorId?: string, adapter?: DatabaseAdapter): Promise<Board> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+    const db = adapter;
+    const rows = await db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) throw new Error(`Board with ID ${id} not found`);
 
     const name = data.name !== undefined ? data.name : existing.name;
@@ -105,14 +112,14 @@ export class BoardService {
     let slug = existing.slug;
 
     if (!slug) {
-      const existingSlugs = await this.db.query<{ slug: string }>(
+      const existingSlugs = await db.query<{ slug: string }>(
         `SELECT slug FROM board WHERE project_id = ? AND id != ? AND slug IS NOT NULL`,
         [existing.project_id, id]
       );
       slug = deriveSlug(name, new Set(existingSlugs.map(b => b.slug)));
     }
 
-    await this.db.execute('UPDATE board SET name = ?, slug = ?, updated_at = ? WHERE id = ?', [name, slug, updated_at, id]);
+    await db.execute('UPDATE board SET name = ?, slug = ?, updated_at = ? WHERE id = ?', [name, slug, updated_at, id]);
 
     const updated: Board = { ...existing, name, slug, updated_at };
 
@@ -124,17 +131,20 @@ export class BoardService {
         action: 'updated',
         actor_id: actorId,
         payload: { name },
-      });
+      }, db);
     }
 
     return updated;
   }
 
-  async delete(id: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+    const db = adapter;
+    const rows = await db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) throw new Error(`Board with ID ${id} not found`);
 
-    await this.db.execute('DELETE FROM board WHERE id = ?', [id]);
+    await db.execute('DELETE FROM board WHERE id = ?', [id]);
 
     if (this.eventService) {
       await this.eventService.create({
@@ -143,7 +153,7 @@ export class BoardService {
         entity_id: id,
         action: 'deleted',
         actor_id: actorId,
-      });
+      }, db);
     }
   }
 
