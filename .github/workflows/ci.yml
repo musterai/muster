@@ -1,4 +1,4 @@
-name: Muster v2.0 CI
+name: MusterAI CI
 
 on:
   push:
