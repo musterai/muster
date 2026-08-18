@@ -1,3 +1,4 @@
+# Generated artifacts and local development state.
 node_modules
 dist
 public
@@ -5,5 +6,11 @@ data
 scratch
 .git
 .github
-.env
 *.log
+
+# Compose reads local deployment configuration and mounts credentials at
+# runtime. Neither belongs in `COPY . .`, the Docker build context, or a
+# cached builder layer. Keep these rules in sync with docker-compose.yml.
+.env
+.env.*
+secrets/

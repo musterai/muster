@@ -24,6 +24,35 @@ async function listen(app: express.Express) {
   return { server, url: `http://127.0.0.1:${address.port}` };
 }
 
+/**
+ * Minimal ordered `.dockerignore` evaluator for the paths that the checked-in
+ * Compose file is allowed to use for local secrets. It deliberately handles
+ * negation, so a future `!secrets/...` rule cannot silently re-include a
+ * credential after the broad directory exclusion.
+ */
+function isExcludedFromDockerContext(filePath: string, dockerignore: string): boolean {
+  const normalizedPath = filePath.replace(/^\.\//, '').replaceAll('\\', '/');
+  let excluded = false;
+
+  for (const sourceLine of dockerignore.split(/\r?\n/)) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const negated = line.startsWith('!');
+    const pattern = (negated ? line.slice(1) : line).replace(/^\/+/, '');
+    if (!pattern) continue;
+
+    const directory = pattern.replace(/\/+$/, '');
+    const matches = pattern.endsWith('/')
+      ? normalizedPath === directory || normalizedPath.startsWith(`${directory}/`)
+      : normalizedPath === directory;
+
+    if (matches) excluded = !negated;
+  }
+
+  return excluded;
+}
+
 describe('production deployment safety', () => {
   it('keeps liveness independent and readiness metadata-free', async () => {
     const app = express();
@@ -108,5 +137,27 @@ describe('production deployment safety', () => {
     expect(dockerfile).not.toContain('FROM node:20-');
     expect(deploymentDocs).toMatch(/If it overlaps an existing\s+Docker network/);
     expect(deploymentDocs).toContain('Never solve an overlap by');
+  });
+
+  it('keeps the documented Compose OIDC secret outside the Docker build context', () => {
+    const root = process.cwd();
+    const compose = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+    const dockerignore = fs.readFileSync(path.join(root, '.dockerignore'), 'utf8');
+    const deploymentDocs = fs.readFileSync(path.join(root, 'docs/deployment.md'), 'utf8');
+    const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+
+    // The expression is scoped to the top-level Compose secret declaration,
+    // rather than the similarly named service-level `secrets:` list.
+    const secretFileMatch = compose.match(/^ {2}oidc_client_secret:\s*\n^ {4}file:\s*\.\/([^\s#]+)\s*$/m);
+    expect(secretFileMatch?.[1]).toBe('secrets/oidc_client_secret');
+    const secretSource = secretFileMatch![1];
+
+    expect(isExcludedFromDockerContext(secretSource, dockerignore)).toBe(true);
+    expect(dockerignore).toMatch(/(?:^|\n)secrets\/(?:\n|$)/);
+    expect(dockerignore).toMatch(/(?:^|\n)\.env(?:\n|$)/);
+    expect(dockerignore).toMatch(/(?:^|\n)\.env\.\*(?:\n|$)/);
+    expect(deploymentDocs).toContain(`create \`${secretSource}\``);
+    expect(deploymentDocs).toContain('excluded from the\nDocker build context');
+    expect(readme).toContain(`\`${secretSource}\``);
   });
 });

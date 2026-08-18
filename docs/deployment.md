@@ -73,7 +73,11 @@ the pinned `172.30.0.2` address.
 
 Copy `.env.example` to `.env`, create `secrets/oidc_client_secret` with mode
 `0600`, then set `MUSTER_PUBLIC_HOST`, `ACME_EMAIL`, the OIDC values, and the
-pinned owner subject. Compose derives `MUSTER_PUBLIC_URL` as
+pinned owner subject. Both `.env`/`.env.*` and `secrets/` are excluded from the
+Docker build context by `.dockerignore`: Compose reads them on the host and
+mounts the client secret only at runtime, so it cannot be copied by the
+Dockerfile or retained in a builder cache layer. Keep the secret outside source
+files and never pass it as a Docker build argument. Compose derives `MUSTER_PUBLIC_URL` as
 `https://${MUSTER_PUBLIC_HOST}`, so OIDC redirects, cookie policy, CORS, and
 the Caddy certificate hostname cannot drift apart. `MUSTER_PROXY_BIND_ADDRESS`
 defaults to `127.0.0.1`, so the example is not exposed on all host interfaces.

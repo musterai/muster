@@ -323,8 +323,10 @@ Health probes run inside the app container at `/api/v1/health/live` and
 
 The checked-in `docker-compose.yml` has a fixed-address Caddy edge, requires
 enforced OIDC plus a pinned bootstrap owner, and reads the client secret from
-`secrets/oidc_client_secret`. See [docs/deployment.md](docs/deployment.md) for
-the exact proxy topology and forwarded-header trust configuration.
+`secrets/oidc_client_secret`. Local `.env` values and that `secrets/` directory
+are excluded from Docker's build context, so the secret is mounted only at
+runtime. See [docs/deployment.md](docs/deployment.md) for the exact proxy
+topology and forwarded-header trust configuration.
 
 ---
 
