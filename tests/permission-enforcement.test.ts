@@ -28,6 +28,7 @@ import {
 } from '../src/services/index.js';
 import {
   TOOL_PERMISSIONS,
+  OPERATION_PERMISSIONS,
   PermissionDeniedError,
   requirePermission,
   requireRestPermission,
@@ -166,6 +167,38 @@ describe('MUS-22: Permission enforcement', () => {
     const mappedNames = Object.keys(TOOL_PERMISSIONS);
     const unknownMappings = mappedNames.filter(n => !registeredTools.includes(n));
     expect(unknownMappings, `TOOL_PERMISSIONS has stale entries: ${unknownMappings.join(', ')}`).toEqual([]);
+  });
+
+  it('REST routes reference the canonical operation policy catalog', () => {
+    for (const route of REST_ROUTE_PERMISSIONS) {
+      expect(
+        route.operation in OPERATION_PERMISSIONS,
+        `${route.method} ${String(route.pattern)} references unknown operation ${route.operation}`,
+      ).toBe(true);
+    }
+  });
+
+  it('equivalent MCP and REST operations resolve through the same policy decisions', () => {
+    const equivalentOperations = [
+      'list_projects',
+      'create_project',
+      'update_project',
+      'delete_project',
+      'get_board',
+      'create_card',
+      'move_card',
+      'add_comment',
+      'list_documents',
+      'set_document_status',
+      'list_agents',
+      'get_activity',
+    ] as const;
+
+    for (const operation of equivalentOperations) {
+      expect(TOOL_PERMISSIONS[operation]).toBe(OPERATION_PERMISSIONS[operation]);
+    }
+    expect(resolvePermission(OPERATION_PERMISSIONS.set_document_status, { status: 'approved' })).toBe('doc.approve');
+    expect(resolvePermission(OPERATION_PERMISSIONS.set_document_status, { status: 'in_review' })).toBe('doc.submit_review');
   });
 
   it('search_cards exposes validated project-scoped title search through MCP', async () => {

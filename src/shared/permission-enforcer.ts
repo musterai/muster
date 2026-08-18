@@ -55,7 +55,7 @@ export const WORKSPACE_READ = 'workspace.read' as const;
 export type AccessRequirement = Permission | typeof WORKSPACE_READ;
 export type PermissionSpec = AccessRequirement | ((args: Record<string, unknown>) => AccessRequirement);
 
-export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
+export const OPERATION_PERMISSIONS = {
   // ── Project Tools ──
   list_projects: WORKSPACE_READ,
   create_project: 'project.create',
@@ -150,7 +150,57 @@ export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
   // ── Event Tools ──
   get_activity: WORKSPACE_READ,
 
-  };
+  // ── REST-only operations ──
+  // These remain named operations in the same policy catalog so their access
+  // decisions cannot drift into a second, transport-specific permission map.
+  health_check: WORKSPACE_READ,
+  list_users: WORKSPACE_READ,
+  update_member: 'member.manage',
+  remove_member: 'member.manage',
+  list_tokens: WORKSPACE_READ,
+  create_token: WORKSPACE_READ,
+  revoke_token: WORKSPACE_READ,
+  lookup_device_authorization: WORKSPACE_READ,
+  approve_device_authorization: 'project.create',
+  deny_device_authorization: 'project.create',
+  get_oauth_authorization_details: WORKSPACE_READ,
+  consent_oauth_authorization: 'project.create',
+  get_audit_log: 'workspace.admin',
+  list_invitations: 'member.invite',
+  create_invitation: 'member.invite',
+  delete_invitation: 'member.invite',
+
+} satisfies Record<string, PermissionSpec>;
+
+export type OperationName = keyof typeof OPERATION_PERMISSIONS;
+
+/**
+ * Backwards-compatible export for callers and tests that enumerate MCP tool
+ * decisions. Permissions themselves live exclusively in
+ * OPERATION_PERMISSIONS; REST routes reference operation names below.
+ */
+const REST_ONLY_OPERATIONS = new Set<OperationName>([
+  'health_check',
+  'list_users',
+  'update_member',
+  'remove_member',
+  'list_tokens',
+  'create_token',
+  'revoke_token',
+  'lookup_device_authorization',
+  'approve_device_authorization',
+  'deny_device_authorization',
+  'get_oauth_authorization_details',
+  'consent_oauth_authorization',
+  'get_audit_log',
+  'list_invitations',
+  'create_invitation',
+  'delete_invitation',
+]);
+
+export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = Object.fromEntries(
+  Object.entries(OPERATION_PERMISSIONS).filter(([operation]) => !REST_ONLY_OPERATIONS.has(operation as OperationName)),
+);
 
 // ============================================================
 // REST ROUTE PERMISSIONS — map HTTP method + path pattern to permission
@@ -159,7 +209,7 @@ export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
 export interface RoutePattern {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   pattern: RegExp | string;
-  permission: PermissionSpec;
+  operation: OperationName;
   /** Public routes are intentionally unauthenticated and must be exact. */
   public?: boolean;
 }
@@ -172,124 +222,128 @@ export interface RoutePattern {
  */
 export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   // ── Health (always public) ──
-  { method: 'GET', pattern: /^\/api\/v1\/health$/, permission: WORKSPACE_READ, public: true },
+  { method: 'GET', pattern: /^\/api\/v1\/health$/, operation: 'health_check', public: true },
 
   // ── Projects ──
-  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/summary$/, permission: WORKSPACE_READ },
-  { method: 'GET', pattern: /^\/api\/v1\/projects(?:\/[^/]+)?$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /^\/api\/v1\/projects$/, permission: 'project.create' },
-  { method: 'PUT', pattern: /^\/api\/v1\/projects\/[^/]+$/, permission: 'project.update' },
-  { method: 'DELETE', pattern: /^\/api\/v1\/projects\/[^/]+$/, permission: 'project.delete' },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/summary$/, operation: 'get_project_summary' },
+  { method: 'GET', pattern: /^\/api\/v1\/projects(?:\/[^/]+)?$/, operation: 'list_projects' },
+  { method: 'POST', pattern: /^\/api\/v1\/projects$/, operation: 'create_project' },
+  { method: 'PUT', pattern: /^\/api\/v1\/projects\/[^/]+$/, operation: 'update_project' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/projects\/[^/]+$/, operation: 'delete_project' },
 
   // ── Boards ──
-  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/(?:boards|all-boards)$/, permission: WORKSPACE_READ },
-  { method: 'GET', pattern: /^\/api\/v1\/boards\/[^/]+$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /^\/api\/v1\/projects\/[^/]+\/boards$/, permission: 'board.manage' },
-  { method: 'PUT', pattern: /^\/api\/v1\/boards\/[^/]+$/, permission: 'board.manage' },
-  { method: 'DELETE', pattern: /^\/api\/v1\/boards\/[^/]+$/, permission: 'board.manage' },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/(?:boards|all-boards)$/, operation: 'list_boards' },
+  { method: 'GET', pattern: /^\/api\/v1\/boards\/[^/]+$/, operation: 'get_board' },
+  { method: 'POST', pattern: /^\/api\/v1\/projects\/[^/]+\/boards$/, operation: 'create_board' },
+  { method: 'PUT', pattern: /^\/api\/v1\/boards\/[^/]+$/, operation: 'update_board' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/boards\/[^/]+$/, operation: 'delete_board' },
 
   // ── Columns ──
-  { method: 'POST', pattern: /^\/api\/v1\/boards\/[^/]+\/columns$/, permission: 'board.manage' },
-  { method: 'PUT', pattern: /^\/api\/v1\/columns\/[^/]+$/, permission: 'board.manage' },
-  { method: 'DELETE', pattern: /^\/api\/v1\/columns\/[^/]+$/, permission: 'board.manage' },
+  { method: 'POST', pattern: /^\/api\/v1\/boards\/[^/]+\/columns$/, operation: 'create_column' },
+  { method: 'PUT', pattern: /^\/api\/v1\/columns\/[^/]+$/, operation: 'update_column' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/columns\/[^/]+$/, operation: 'delete_column' },
 
   // ── Cards ──
-  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/cards\/search$/, permission: WORKSPACE_READ },
-  { method: 'GET', pattern: /^\/api\/v1\/(?:projects\/[^/]+|boards\/[^/]+)\/cards$/, permission: WORKSPACE_READ },
-  { method: 'GET', pattern: /^\/api\/v1\/cards\/[^/]+(?:\/work-links)?$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /\/columns\/[^/]+\/cards$/, permission: 'card.create' },
-  { method: 'PUT', pattern: /\/cards\/[^/]+$/, permission: 'card.update' },
-  { method: 'PATCH', pattern: /\/cards\/[^/]+\/move$/, permission: 'card.move' },
-  { method: 'DELETE', pattern: /\/cards\/[^/]+$/, permission: 'card.delete' },
-  { method: 'POST', pattern: /\/cards\/[^/]+\/claim$/, permission: 'card.claim' },
-  { method: 'POST', pattern: /\/cards\/[^/]+\/assignees$/, permission: 'card.assign_others' },
-  { method: 'DELETE', pattern: /\/cards\/[^/]+\/assignees\/[^/]+$/, permission: 'card.assign_others' },
-  { method: 'POST', pattern: /\/cards\/[^/]+\/labels$/, permission: 'card.update' },
-  { method: 'DELETE', pattern: /\/cards\/[^/]+\/labels\/[^/]+$/, permission: 'card.update' },
-  { method: 'POST', pattern: /\/cards\/[^/]+\/comments$/, permission: 'comment.create' },
-  { method: 'PUT', pattern: /\/cards\/[^/]+\/comments\/[^/]+$/, permission: 'comment.update' },
-  { method: 'DELETE', pattern: /\/cards\/[^/]+\/comments\/[^/]+$/, permission: 'comment.delete' },
-  { method: 'POST', pattern: /\/cards\/[^/]+\/documents$/, permission: 'card.update' },
-  { method: 'DELETE', pattern: /\/cards\/[^/]+\/documents\/[^/]+$/, permission: 'card.update' },
-  { method: 'POST', pattern: /\/cards\/[^/]+\/links$/, permission: 'card.update' },
-  { method: 'DELETE', pattern: /\/cards\/[^/]+\/links\/[^/]+$/, permission: 'card.update' },
-  { method: 'POST', pattern: /\/cards\/[^/]+\/work-links$/, permission: 'card.update' },
-  { method: 'DELETE', pattern: /\/cards\/[^/]+\/work-links\/[^/]+$/, permission: 'card.update' },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/cards\/search$/, operation: 'search_cards' },
+  { method: 'GET', pattern: /^\/api\/v1\/(?:projects\/[^/]+|boards\/[^/]+)\/cards$/, operation: 'list_cards' },
+  { method: 'GET', pattern: /^\/api\/v1\/cards\/[^/]+$/, operation: 'get_card' },
+  { method: 'GET', pattern: /^\/api\/v1\/cards\/[^/]+\/work-links$/, operation: 'list_work_links' },
+  { method: 'POST', pattern: /^\/api\/v1\/columns\/[^/]+\/cards$/, operation: 'create_card' },
+  { method: 'PUT', pattern: /^\/api\/v1\/cards\/[^/]+$/, operation: 'update_card' },
+  { method: 'PATCH', pattern: /^\/api\/v1\/cards\/[^/]+\/move$/, operation: 'move_card' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/cards\/[^/]+$/, operation: 'delete_card' },
+  { method: 'POST', pattern: /^\/api\/v1\/cards\/[^/]+\/claim$/, operation: 'claim_card' },
+  { method: 'POST', pattern: /^\/api\/v1\/cards\/[^/]+\/assignees$/, operation: 'assign_card' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/cards\/[^/]+\/assignees\/[^/]+$/, operation: 'unassign_card' },
+  { method: 'POST', pattern: /^\/api\/v1\/cards\/[^/]+\/labels$/, operation: 'add_label' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/cards\/[^/]+\/labels\/[^/]+$/, operation: 'remove_label' },
+  { method: 'POST', pattern: /^\/api\/v1\/cards\/[^/]+\/comments$/, operation: 'add_comment' },
+  { method: 'PUT', pattern: /^\/api\/v1\/cards\/[^/]+\/comments\/[^/]+$/, operation: 'update_comment' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/cards\/[^/]+\/comments\/[^/]+$/, operation: 'delete_comment' },
+  { method: 'POST', pattern: /^\/api\/v1\/cards\/[^/]+\/documents$/, operation: 'link_document_to_card' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/cards\/[^/]+\/documents\/[^/]+$/, operation: 'unlink_document_from_card' },
+  { method: 'POST', pattern: /^\/api\/v1\/cards\/[^/]+\/links$/, operation: 'link_card' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/cards\/[^/]+\/links\/[^/]+$/, operation: 'unlink_card' },
+  { method: 'POST', pattern: /^\/api\/v1\/cards\/[^/]+\/work-links$/, operation: 'add_work_link' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/cards\/[^/]+\/work-links\/[^/]+$/, operation: 'remove_work_link' },
 
   // ── Documents ──
-  { method: 'GET', pattern: /^\/api\/v1\/documents\/[^/]+\/versions$/, permission: WORKSPACE_READ },
-  { method: 'GET', pattern: /^\/api\/v1\/documents\/[^/]+$/, permission: WORKSPACE_READ },
-  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/documents$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /\/projects\/[^/]+\/documents$/, permission: 'doc.create' },
-  { method: 'PUT', pattern: /\/documents\/[^/]+$/, permission: 'doc.update' },
-  { method: 'DELETE', pattern: /\/documents\/[^/]+$/, permission: 'doc.delete' },
+  { method: 'GET', pattern: /^\/api\/v1\/documents\/[^/]+\/versions$/, operation: 'get_document_history' },
+  { method: 'GET', pattern: /^\/api\/v1\/documents\/[^/]+$/, operation: 'get_document' },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/documents$/, operation: 'list_documents' },
+  { method: 'POST', pattern: /^\/api\/v1\/projects\/[^/]+\/documents$/, operation: 'create_document' },
+  { method: 'PUT', pattern: /^\/api\/v1\/documents\/[^/]+$/, operation: 'update_document' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/documents\/[^/]+$/, operation: 'delete_document' },
   {
     method: 'PATCH',
     pattern: /^\/api\/v1\/documents\/[^/]+\/status$/,
-    permission: args => args.status === 'approved' ? 'doc.approve' : 'doc.submit_review',
+    operation: 'set_document_status',
   },
 
   // ── Agents ──
-  { method: 'GET', pattern: /^\/api\/v1\/agents$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/agents$/, operation: 'list_agents' },
 
   // ── Users (MUS-32) — read-only workspace member list ──
-  { method: 'GET', pattern: /^\/api\/v1\/users$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/users$/, operation: 'list_users' },
 
   // ── Members (MUS-26) — role change and removal ──
-  { method: 'PUT', pattern: /\/workspaces\/[^/]+\/members\/[^/]+$/, permission: 'member.manage' },
-  { method: 'DELETE', pattern: /\/workspaces\/[^/]+\/members\/[^/]+$/, permission: 'member.manage' },
-  { method: 'POST', pattern: /^\/api\/v1\/agents$/, permission: 'agent.register' },
-  { method: 'POST', pattern: /\/agents\/[^/]+\/heartbeat$/, permission: WORKSPACE_READ },
-  { method: 'PUT', pattern: /\/agents\/[^/]+$/, permission: 'agent.register' },
-  { method: 'DELETE', pattern: /\/agents\/[^/]+$/, permission: 'agent.manage_others' },
+  { method: 'PUT', pattern: /^\/api\/v1\/workspaces\/[^/]+\/members\/[^/]+$/, operation: 'update_member' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/workspaces\/[^/]+\/members\/[^/]+$/, operation: 'remove_member' },
+  { method: 'POST', pattern: /^\/api\/v1\/agents$/, operation: 'register_agent' },
+  { method: 'POST', pattern: /^\/api\/v1\/agents\/[^/]+\/heartbeat$/, operation: 'heartbeat' },
+  { method: 'PUT', pattern: /^\/api\/v1\/agents\/[^/]+$/, operation: 'update_agent' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/agents\/[^/]+$/, operation: 'unregister_agent' },
 
   // ── Roles ──
-  { method: 'GET', pattern: /\/workspaces\/[^/]+\/roles/, permission: 'role.manage' },
-  { method: 'GET', pattern: /\/roles\/[^/]+$/, permission: 'role.manage' },
-  { method: 'POST', pattern: /\/workspaces\/[^/]+\/roles$/, permission: 'role.manage' },
-  { method: 'POST', pattern: /\/roles\/[^/]+\/clone$/, permission: 'role.manage' },
-  { method: 'PUT', pattern: /\/roles\/[^/]+$/, permission: 'role.manage' },
-  { method: 'DELETE', pattern: /\/roles\/[^/]+$/, permission: 'role.manage' },
+  { method: 'GET', pattern: /^\/api\/v1\/workspaces\/[^/]+\/roles$/, operation: 'list_roles' },
+  { method: 'GET', pattern: /^\/api\/v1\/roles\/[^/]+$/, operation: 'get_role' },
+  { method: 'POST', pattern: /^\/api\/v1\/workspaces\/[^/]+\/roles$/, operation: 'create_role' },
+  { method: 'POST', pattern: /^\/api\/v1\/roles\/[^/]+\/clone$/, operation: 'clone_role' },
+  { method: 'PUT', pattern: /^\/api\/v1\/roles\/[^/]+$/, operation: 'update_role' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/roles\/[^/]+$/, operation: 'delete_role' },
 
   // ── KB ──
-  { method: 'GET', pattern: /^\/api\/v1\/kbs(?:\/[^/]+(?:\/(?:entities|facts))?|\/(?:graph|search|entity-knowledge))?$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /\/kbs$/, permission: 'kb.write' },
-  { method: 'POST', pattern: /\/kbs\/[^/]+\/link$/, permission: 'kb.write' },
-  { method: 'POST', pattern: /\/kbs\/[^/]+\/unlink$/, permission: 'kb.write' },
-  { method: 'POST', pattern: /\/kbs\/entities$/, permission: 'kb.write' },
-  { method: 'PUT', pattern: /\/kbs\/entities\/[^/]+$/, permission: 'kb.write' },
-  { method: 'DELETE', pattern: /\/kbs\/entities\/[^/]+$/, permission: 'kb.write' },
-  { method: 'POST', pattern: /\/kbs\/facts$/, permission: 'kb.write' },
-  { method: 'PUT', pattern: /\/kbs\/facts\/[^/]+$/, permission: 'kb.write' },
-  { method: 'DELETE', pattern: /\/kbs\/facts\/[^/]+$/, permission: 'kb.write' },
-  { method: 'POST', pattern: /\/kbs\/relations$/, permission: 'kb.write' },
-  { method: 'DELETE', pattern: /\/kbs\/relations\/[^/]+$/, permission: 'kb.write' },
-  { method: 'DELETE', pattern: /\/kbs\/[^/]+$/, permission: 'kb.write' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs$/, operation: 'list_knowledge_bases' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs\/search$/, operation: 'search_knowledge' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs\/entity-knowledge$/, operation: 'get_entity_knowledge' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs\/(?:graph|[^/]+(?:\/(?:entities|facts))?)$/, operation: 'get_entity_knowledge' },
+  { method: 'POST', pattern: /^\/api\/v1\/kbs$/, operation: 'create_knowledge_base' },
+  { method: 'POST', pattern: /^\/api\/v1\/kbs\/[^/]+\/link$/, operation: 'link_knowledge_base' },
+  { method: 'POST', pattern: /^\/api\/v1\/kbs\/[^/]+\/unlink$/, operation: 'link_knowledge_base' },
+  { method: 'POST', pattern: /^\/api\/v1\/kbs\/entities$/, operation: 'upsert_kb_entity' },
+  { method: 'PUT', pattern: /^\/api\/v1\/kbs\/entities\/[^/]+$/, operation: 'update_kb_entity' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/kbs\/entities\/[^/]+$/, operation: 'update_kb_entity' },
+  { method: 'POST', pattern: /^\/api\/v1\/kbs\/facts$/, operation: 'add_gained_knowledge' },
+  { method: 'PUT', pattern: /^\/api\/v1\/kbs\/facts\/[^/]+$/, operation: 'update_gained_knowledge' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/kbs\/facts\/[^/]+$/, operation: 'update_gained_knowledge' },
+  { method: 'POST', pattern: /^\/api\/v1\/kbs\/relations$/, operation: 'add_kb_relation' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/kbs\/relations\/[^/]+$/, operation: 'add_kb_relation' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/kbs\/[^/]+$/, operation: 'create_knowledge_base' },
 
   // ── Events ──
-  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/events(?:\/stream)?$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/events(?:\/stream)?$/, operation: 'get_activity' },
 
   // ── Tokens (MUS-24) ──
-  { method: 'GET', pattern: /^\/api\/v1\/tokens$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /^\/api\/v1\/tokens$/, permission: WORKSPACE_READ },
-  { method: 'DELETE', pattern: /^\/api\/v1\/tokens\/[^/]+$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/tokens$/, operation: 'list_tokens' },
+  { method: 'POST', pattern: /^\/api\/v1\/tokens$/, operation: 'create_token' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/tokens\/[^/]+$/, operation: 'revoke_token' },
 
   // ── Device Authorization Grant (MUS-28) — device/code and token are exempted in permissionGuard; these three run as the signed-in approver ──
-  { method: 'GET', pattern: /^\/api\/v1\/oauth\/device\/lookup$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /^\/api\/v1\/oauth\/device\/approve$/, permission: 'project.create' },
-  { method: 'POST', pattern: /^\/api\/v1\/oauth\/device\/deny$/, permission: 'project.create' },
+  { method: 'GET', pattern: /^\/api\/v1\/oauth\/device\/lookup$/, operation: 'lookup_device_authorization' },
+  { method: 'POST', pattern: /^\/api\/v1\/oauth\/device\/approve$/, operation: 'approve_device_authorization' },
+  { method: 'POST', pattern: /^\/api\/v1\/oauth\/device\/deny$/, operation: 'deny_device_authorization' },
 
   // ── MCP-native OAuth (MUS-29) — register/authorize are exempted in permissionGuard; these two run as the signed-in approver ──
-  { method: 'GET', pattern: /^\/api\/v1\/oauth\/authorize\/details$/, permission: WORKSPACE_READ },
-  { method: 'POST', pattern: /^\/api\/v1\/oauth\/authorize\/consent$/, permission: 'project.create' },
+  { method: 'GET', pattern: /^\/api\/v1\/oauth\/authorize\/details$/, operation: 'get_oauth_authorization_details' },
+  { method: 'POST', pattern: /^\/api\/v1\/oauth\/authorize\/consent$/, operation: 'consent_oauth_authorization' },
 
   // ── Audit log (MUS-30) — admin-only; a security record, not a collaboration feed ──
-  { method: 'GET', pattern: /^\/api\/v1\/workspaces\/[^/]+\/audit-log$/, permission: 'workspace.admin' },
+  { method: 'GET', pattern: /^\/api\/v1\/workspaces\/[^/]+\/audit-log$/, operation: 'get_audit_log' },
 
   // ── Invitations (MUS-25) — auth/login/callback/logout/me are exempted in permissionGuard ──
-  { method: 'GET', pattern: /\/workspaces\/[^/]+\/invitations$/, permission: 'member.invite' },
-  { method: 'POST', pattern: /\/workspaces\/[^/]+\/invitations$/, permission: 'member.invite' },
-  { method: 'DELETE', pattern: /\/invitations\/[^/]+$/, permission: 'member.invite' },
+  { method: 'GET', pattern: /^\/api\/v1\/workspaces\/[^/]+\/invitations$/, operation: 'list_invitations' },
+  { method: 'POST', pattern: /^\/api\/v1\/workspaces\/[^/]+\/invitations$/, operation: 'create_invitation' },
+  { method: 'DELETE', pattern: /^\/api\/v1\/invitations\/[^/]+$/, operation: 'delete_invitation' },
 ];
 
 // ============================================================
@@ -378,7 +432,7 @@ export function requireRestPermission(
 
     if (route.public) return;
 
-    const required = resolvePermission(route.permission, args);
+    const required = resolvePermission(OPERATION_PERMISSIONS[route.operation], args);
 
     if (required === WORKSPACE_READ) {
       if (auth.is_workspace_member) return;
