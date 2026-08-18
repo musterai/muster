@@ -10,6 +10,7 @@ export const DEFAULT_SSE_LIMITS = {
   maxPrincipalClients: 4,
   maxIpClients: 20,
   maxWorkspaceClients: 50,
+  maxResumeEvents: 100,
   maxQueuedEvents: 100,
   maxQueuedBytes: 256 * 1024,
   backpressureTimeoutMs: 30_000,
@@ -21,6 +22,7 @@ export interface SSELimits {
   maxPrincipalClients: number;
   maxIpClients: number;
   maxWorkspaceClients: number;
+  maxResumeEvents: number;
   maxQueuedEvents: number;
   maxQueuedBytes: number;
   backpressureTimeoutMs: number;
@@ -31,6 +33,11 @@ export interface SSEClientIdentity {
   principalId?: string | null;
   ip?: string | null;
   workspaceId?: string | null;
+}
+
+export interface SSEClientOptions {
+  /** Hold live frames until a persisted Last-Event-ID replay is complete. */
+  replaying?: boolean;
 }
 
 export type SSECapacityScope = 'global' | 'principal' | 'ip' | 'workspace';
@@ -57,6 +64,7 @@ interface Client {
   res: Response;
   queue: string[];
   queuedBytes: number;
+  replaying: boolean;
   backpressured: boolean;
   slowTimer: NodeJS.Timeout | null;
   onDrain: () => void;
@@ -129,6 +137,11 @@ function frameEvent(event: Event): string {
   return `id: ${event.id}\ndata: ${JSON.stringify(toSSEEvent(event))}\n\n`;
 }
 
+function eventIdFromFrame(data: string): string | null {
+  const match = /^id: ([^\n]*)\n/.exec(data);
+  return match?.[1] || null;
+}
+
 export class SSEManager {
   private clients: Client[] = [];
   private pingInterval: NodeJS.Timeout;
@@ -149,7 +162,7 @@ export class SSEManager {
     // they must not add work to an already bounded event queue.
     this.pingInterval = setInterval(() => {
       for (const client of [...this.clients]) {
-        if (client.backpressured || client.queue.length > 0) continue;
+        if (client.replaying || client.backpressured || client.queue.length > 0) continue;
         this.write(client, ': keep-alive\n\n', false);
       }
     }, this.limits.keepAliveIntervalMs);
@@ -161,6 +174,7 @@ export class SSEManager {
     clientId: string,
     res: Response,
     identity: SSEClientIdentity = {},
+    options: SSEClientOptions = {},
   ): SSEAddClientResult {
     const principalId = identity.principalId || null;
     const ip = identity.ip || null;
@@ -186,6 +200,7 @@ export class SSEManager {
       res,
       queue: [],
       queuedBytes: 0,
+      replaying: options.replaying === true,
       backpressured: false,
       slowTimer: null,
       onDrain: () => this.flush(client),
@@ -199,6 +214,53 @@ export class SSEManager {
     res.once('close', client.onClose);
     res.once('error', client.onError);
     return { accepted: true };
+  }
+
+  /**
+   * Finish a client's bounded Last-Event-ID replay. Live frames are held in
+   * the same bounded queue while the database cursor is being read, then the
+   * replay is placed ahead of those live frames so reconnects remain ordered.
+   */
+  completeReplay(clientId: string, events: Event[]): void {
+    const client = this.clients.find(candidate => candidate.id === clientId);
+    if (!client || client.closed || !client.replaying) return;
+
+    const maxResumeEvents = Number.isFinite(this.limits.maxResumeEvents)
+      ? Math.max(0, Math.floor(this.limits.maxResumeEvents))
+      : 0;
+    const replayEvents = events
+      .filter(event => event.project_id === client.projectId)
+      .slice(0, maxResumeEvents);
+    const replayIds = new Set(replayEvents.map(event => event.id));
+    let queuedLiveBytes = 0;
+    const queuedLiveFrames = client.queue.filter(frame => {
+      const eventId = eventIdFromFrame(frame);
+      if (eventId && replayIds.has(eventId)) return false;
+      queuedLiveBytes += Buffer.byteLength(frame);
+      return true;
+    });
+    const replayFrames = replayEvents
+      .map(frameEvent);
+    const replayBytes = replayFrames.reduce((total, frame) => total + Buffer.byteLength(frame), 0);
+    const queuedEvents = queuedLiveFrames.length + replayFrames.length;
+    if (
+      queuedEvents > this.limits.maxQueuedEvents ||
+      queuedLiveBytes + replayBytes > this.limits.maxQueuedBytes
+    ) {
+      this.metrics.eventsDropped += queuedEvents;
+      this.metrics.backpressureDrops += 1;
+      this.disconnect(client, true);
+      return;
+    }
+
+    client.queue = [...replayFrames, ...queuedLiveFrames];
+    client.queuedBytes = queuedLiveBytes + replayBytes;
+    client.replaying = false;
+
+    // If a live write already caused backpressure while the cursor was being
+    // read, the existing drain listener owns flushing. Otherwise flush the
+    // replay followed by any live frames that arrived during the read.
+    if (!client.backpressured) this.flush(client);
   }
 
   removeClient(clientId: string): void {
@@ -246,13 +308,14 @@ export class SSEManager {
 
   private enqueue(client: Client, data: string): void {
     if (client.closed) return;
-    if (client.backpressured || client.queue.length > 0) {
+    if (client.replaying || client.backpressured || client.queue.length > 0) {
       const bytes = Buffer.byteLength(data);
       if (
         client.queue.length >= this.limits.maxQueuedEvents ||
         client.queuedBytes + bytes > this.limits.maxQueuedBytes
       ) {
-        this.metrics.eventsDropped += 1;
+        // The queued frames are discarded together with the triggering frame.
+        this.metrics.eventsDropped += client.queue.length + 1;
         this.metrics.backpressureDrops += 1;
         this.disconnect(client, true);
         return;

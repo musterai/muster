@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import type { Response } from 'express';
-import { createEventRouter } from '../src/api/routes/event.routes.js';
+import { createEventRouter, getTrustedSSEClientIp, parseLastEventId } from '../src/api/routes/event.routes.js';
 import { SSEManager, toSSEEvent } from '../src/realtime/sse.js';
 import type { Event } from '../src/shared/types.js';
 import type { EventService } from '../src/services/event.service.js';
@@ -35,7 +35,7 @@ class FakeResponse extends EventEmitter {
 
 const asResponse = (response: FakeResponse) => response as unknown as Response;
 
-function event(payload: Record<string, unknown>): Event {
+function event(payload: Record<string, unknown>, overrides: Partial<Event> = {}): Event {
   return {
     id: 'evt-1',
     project_id: 'project-1',
@@ -45,6 +45,7 @@ function event(payload: Record<string, unknown>): Event {
     actor_id: 'agent-1',
     payload,
     created_at: '2026-08-18T00:00:00.000Z',
+    ...overrides,
   };
 }
 
@@ -112,7 +113,47 @@ describe('MUS-68: bounded SSE delivery', () => {
     value.broadcast('project-1', event({ card_title: 'four' }));
 
     expect(response.ended).toBe(true);
-    expect(value.getStats()).toMatchObject({ activeClients: 0, backpressureDrops: 1 });
+    expect(value.getStats()).toMatchObject({ activeClients: 0, eventsDropped: 3, backpressureDrops: 1 });
+  });
+
+  it('replays bounded cursor events before live frames that arrive during the read', () => {
+    const value = manager({ maxResumeEvents: 2, maxQueuedEvents: 4, maxQueuedBytes: 100_000 });
+    const response = new FakeResponse();
+    expect(value.addClient(
+      'project-1',
+      'resume',
+      asResponse(response),
+      { ip: 'ip-1' },
+      { replaying: true },
+    )).toEqual({ accepted: true });
+
+    value.broadcast('project-1', event({ card_title: 'duplicate-live' }, { id: 'evt-old-2' }));
+    value.broadcast('project-1', event({ card_title: 'live' }, { id: 'evt-live' }));
+    expect(response.writes).toHaveLength(0);
+
+    value.completeReplay('resume', [
+      event({ card_title: 'old-1' }, { id: 'evt-old-1' }),
+      event({ card_title: 'old-2' }, { id: 'evt-old-2' }),
+      event({ card_title: 'old-3' }, { id: 'evt-old-3' }),
+    ]);
+
+    expect(response.writes).toHaveLength(3);
+    expect(response.writes[0]).toContain('id: evt-old-1');
+    expect(response.writes[1]).toContain('id: evt-old-2');
+    expect(response.writes[2]).toContain('id: evt-live');
+    expect(value.getStats()).toMatchObject({ eventsSent: 3, eventsDropped: 0 });
+  });
+
+  it('keeps malformed cursors bounded and uses only the socket peer for IP caps', () => {
+    expect(parseLastEventId('01ARZ3NDEKTSV4RRFFQ69G5FAV')).toBe('01ARZ3NDEKTSV4RRFFQ69G5FAV');
+    expect(parseLastEventId('contains whitespace')).toBeNull();
+    expect(parseLastEventId('x'.repeat(129))).toBeNull();
+
+    const request = {
+      socket: { remoteAddress: '127.0.0.1' },
+      ip: '198.51.100.99',
+    } as unknown as import('express').Request;
+    expect(getTrustedSSEClientIp(request)).toBe('127.0.0.1');
   });
 
   it('flushes bounded queued events after drain and cleans up on close', () => {
@@ -194,6 +235,48 @@ describe('MUS-68: bounded SSE delivery', () => {
       expect(response.headers.get('retry-after')).toBe('30');
       expect(await response.json()).toMatchObject({ error: 'sse_capacity_exceeded', scope: 'global' });
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('replays an authorized persisted tail through the stream before closing', async () => {
+    const value = manager();
+    const app = express();
+    app.use((req, _res, next) => {
+      (req as any).authContext = {
+        principal: null,
+        workspace_id: null,
+        is_workspace_member: false,
+        permissions: [],
+        is_operator_override: false,
+        role_name: null,
+      };
+      next();
+    });
+    const eventService = {
+      getProjectWorkspaceId: async () => 'workspace-a',
+      listAfterId: async () => ({
+        status: 'available' as const,
+        truncated: false,
+        events: [event({ card_title: 'resumed' }, { id: 'evt-resumed' })],
+      }),
+    } as unknown as EventService;
+    app.use('/api/v1', createEventRouter(eventService, value));
+    const server = app.listen(0, '127.0.0.1');
+    try {
+      await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+      const port = (server.address() as AddressInfo).port;
+      const response = await fetch(`http://127.0.0.1:${port}/api/v1/projects/project-1/events/stream`, {
+        headers: { 'Last-Event-ID': 'evt-cursor' },
+      });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      const chunk = await reader.read();
+      expect(new TextDecoder().decode(chunk.value)).toContain('id: evt-resumed');
+      value.close();
+      await reader.cancel();
+    } finally {
+      value.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

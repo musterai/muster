@@ -5,6 +5,13 @@ import { Event, CreateEvent } from '../shared/types.js';
 
 export type EventCallback = (event: Event) => void | Promise<void>;
 
+export interface EventResumeResult {
+  /** `unavailable` covers malformed/stale/foreign cursors without disclosure. */
+  status: 'available' | 'unavailable';
+  events: Event[];
+  truncated: boolean;
+}
+
 export class EventService {
   private listeners: EventCallback[] = [];
 
@@ -27,6 +34,48 @@ export class EventService {
       [projectId],
     );
     return rows[0]?.workspace_id || null;
+  }
+
+  /**
+   * Return a bounded, project-scoped event tail after an existing event ID.
+   * Event IDs are ULIDs and therefore provide the stable ordering used by the
+   * SSE Last-Event-ID cursor. A cursor from another project, a deleted event,
+   * or an otherwise stale cursor is intentionally indistinguishable: callers
+   * receive an empty live-tail resume rather than event metadata or an
+   * unbounded replay.
+   */
+  async listAfterId(projectId: string, eventId: string, limit = 100): Promise<EventResumeResult> {
+    const boundedLimit = Number.isFinite(limit)
+      ? Math.min(100, Math.max(1, Math.floor(limit)))
+      : 100;
+    const cursor = await this.db.query<{ id: string }>(
+      'SELECT id FROM event WHERE project_id = ? AND id = ? LIMIT 1',
+      [projectId, eventId],
+    );
+    if (cursor.length === 0) {
+      return { status: 'unavailable', events: [], truncated: false };
+    }
+
+    const rows = await this.db.query<any>(
+      `SELECT e.*, COALESCE(a.name, u.display_name) as actor_name, p.kind as actor_kind
+         FROM event e
+         LEFT JOIN principal p ON e.actor_id = p.id
+         LEFT JOIN agent a ON e.actor_id = a.id
+         LEFT JOIN app_user u ON e.actor_id = u.id
+        WHERE e.project_id = ? AND e.id > ?
+        ORDER BY e.id ASC
+        LIMIT ?`,
+      [projectId, eventId, boundedLimit + 1],
+    );
+    const truncated = rows.length > boundedLimit;
+    return {
+      status: 'available',
+      truncated,
+      events: rows.slice(0, boundedLimit).map(r => ({
+        ...r,
+        payload: r.payload ? JSON.parse(r.payload) : null,
+      })),
+    };
   }
 
   async create(data: CreateEvent): Promise<Event> {

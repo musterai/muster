@@ -146,6 +146,16 @@ dropped events, dropped clients, backpressure drops, and capacity rejections)
 are available through its process-local `getStats()` observability hook; event
 bodies are never included in logs or those counters.
 
+Each activity frame carries its persisted event ID. On reconnect, a bounded
+`Last-Event-ID` cursor is accepted only for the requested project and replays
+up to the first 100 successors oldest-first while live frames are held in the
+same bounded queue. Missing, foreign, malformed, or overlong cursors reset to
+the live tail without disclosing whether an event exists; a replay never scans
+or buffers an unbounded history. The per-IP cap deliberately uses the direct
+socket peer because this deployment does not enable Express `trust proxy`;
+behind a reverse proxy, all connections from that proxy therefore share its
+cap until an explicit trusted-proxy policy is configured.
+
 ## Environment variables
 
 | Variable | Default | Description |
