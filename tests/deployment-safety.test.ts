@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createHealthRouter } from '../src/api/routes/health.routes.js';
 
 function probeDb(shouldFail = false) {
@@ -35,6 +37,11 @@ describe('production deployment safety', () => {
       const ready = await fetch(`${url}/api/v1/health/ready`);
       expect(ready.status).toBe(503);
       expect(await ready.json()).toEqual({ status: 'not_ready' });
+
+      // Compatibility does not make the old telemetry endpoint public again.
+      const legacy = await fetch(`${url}/api/v1/health`);
+      expect(legacy.status).toBe(503);
+      expect(await legacy.json()).toEqual({ status: 'not_ready' });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -70,5 +77,36 @@ describe('production deployment safety', () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it('pins the Compose proxy topology, origin derivation, and maintained container bases', () => {
+    const root = process.cwd();
+    const compose = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+    const caddyfile = fs.readFileSync(path.join(root, 'Caddyfile'), 'utf8');
+    const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
+    const deploymentDocs = fs.readFileSync(path.join(root, 'docs/deployment.md'), 'utf8');
+    const serverBlock = compose.slice(compose.indexOf('  muster-server:'), compose.indexOf('  muster-proxy:'));
+    const proxyBlock = compose.slice(compose.indexOf('  muster-proxy:'), compose.indexOf('\nvolumes:'));
+
+    expect(serverBlock).toContain('MUSTER_TRUST_PROXY=172.30.0.2');
+    expect(serverBlock).toContain('MUSTER_PUBLIC_URL=https://${MUSTER_PUBLIC_HOST:?Set the public DNS hostname}');
+    expect(serverBlock).toContain('ipv4_address: 172.30.0.3');
+    expect(serverBlock).not.toContain('ports:');
+    expect(serverBlock).not.toContain('MUSTER_TRUST_PROXY=127.0.0.1');
+
+    expect(proxyBlock).toContain('image: caddy:2.11.4-alpine');
+    expect(proxyBlock).toContain('ipv4_address: 172.30.0.2');
+    expect(proxyBlock).toContain('${MUSTER_PROXY_BIND_ADDRESS:-127.0.0.1}:443:443');
+    expect(compose).toContain('internal: true');
+    expect(compose).toContain('subnet: 172.30.0.0/29');
+    expect(caddyfile).toContain('reverse_proxy muster-backend:6878');
+    expect(caddyfile).toContain('header_up -X-Forwarded-For');
+    expect(caddyfile).toContain('header_up X-Forwarded-For {remote_host}');
+
+    expect(dockerfile).toContain('FROM node:24.18.1-alpine3.23 AS builder');
+    expect(dockerfile).toContain('FROM node:24.18.1-alpine3.23 AS runner');
+    expect(dockerfile).not.toContain('FROM node:20-');
+    expect(deploymentDocs).toMatch(/If it overlaps an existing\s+Docker network/);
+    expect(deploymentDocs).toContain('Never solve an overlap by');
   });
 });

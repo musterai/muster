@@ -1,9 +1,9 @@
 # docker-compose.yml - Muster
 #
-# Secure-by-default deployment example. The app listens on all interfaces
-# inside the container, but the host publication is loopback-only. Put a
-# TLS-terminating reverse proxy on the host/private network in front of it.
-# Copy .env.example to .env and provide real OIDC values before starting.
+# Secure-by-default deployment example. Caddy is the only public edge; Muster
+# has no host port and accepts forwarded headers solely from Caddy's fixed
+# address on the dedicated internal network. Copy .env.example to .env and
+# provide real DNS/OIDC values before starting.
 
 services:
   muster-server:
@@ -12,19 +12,22 @@ services:
       dockerfile: Dockerfile
     container_name: muster-platform
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6878:6878"
+    expose:
+      - "6878"
     environment:
       - MUSTER_PORT=6878
       - MUSTER_HOST=0.0.0.0
       - MUSTER_AUTH_MODE=enforced
       - MUSTER_DB_PATH=/app/data/muster.db
-      - MUSTER_PUBLIC_URL=${MUSTER_PUBLIC_URL:?Set the external HTTPS origin}
+      # The public URL is derived from the exact hostname Caddy certificates.
+      # Keeping one source prevents redirect/cookie origin drift.
+      - MUSTER_PUBLIC_URL=https://${MUSTER_PUBLIC_HOST:?Set the public DNS hostname}
       - MUSTER_OIDC_ISSUER=${MUSTER_OIDC_ISSUER:?Set the OIDC issuer URL}
       - MUSTER_OIDC_CLIENT_ID=${MUSTER_OIDC_CLIENT_ID:?Set the OIDC client ID}
       - MUSTER_OIDC_CLIENT_SECRET_FILE=/run/secrets/oidc_client_secret
       - MUSTER_BOOTSTRAP_OWNER_SUBJECT=${MUSTER_BOOTSTRAP_OWNER_SUBJECT:?Set the pinned bootstrap owner subject}
-      - MUSTER_TRUST_PROXY=127.0.0.1,::1
+      # Exact Caddy service IP on muster-internal; never a Docker bridge CIDR.
+      - MUSTER_TRUST_PROXY=172.30.0.2
     volumes:
       - muster-data:/app/data
     secrets:
@@ -35,11 +38,60 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    networks:
+      muster-internal:
+        ipv4_address: 172.30.0.3
+        aliases:
+          - muster-backend
+      muster-egress: {}
+
+  muster-proxy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on:
+      muster-server:
+        condition: service_healthy
+    # Loopback is the safe default. Set MUSTER_PROXY_BIND_ADDRESS to one
+    # deliberate public interface only when this Caddy container is the TLS
+    # edge; do not put a second host proxy in front of it without a separate
+    # reviewed client-IP trust chain.
+    ports:
+      - "${MUSTER_PROXY_BIND_ADDRESS:-127.0.0.1}:80:80"
+      - "${MUSTER_PROXY_BIND_ADDRESS:-127.0.0.1}:443:443"
+    environment:
+      - MUSTER_PUBLIC_HOST=${MUSTER_PUBLIC_HOST:?Set the public DNS hostname}
+      - ACME_EMAIL=${ACME_EMAIL:?Set the ACME contact email}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      muster-internal:
+        ipv4_address: 172.30.0.2
+      muster-egress: {}
 
 volumes:
   muster-data:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
     driver: local
 
 secrets:
   oidc_client_secret:
     file: ./secrets/oidc_client_secret
+
+networks:
+  # Only Caddy and Muster share this network. It is isolated from external
+  # containers and has pinned /32 peers, so Express can trust Caddy exactly.
+  muster-internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/29
+  # Required for OIDC discovery/JWKS and Caddy's ACME traffic. It is never
+  # used as a trusted proxy network.
+  muster-egress:
+    driver: bridge

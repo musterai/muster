@@ -1,5 +1,7 @@
-# Stage 1: Build Frontend & Backend TypeScript
-FROM node:20-alpine AS builder
+# Stage 1: Build Frontend & Backend TypeScript. MUS-80 owns the broader Node
+# support-policy change; this production image deliberately uses a maintained
+# LTS line rather than extending the Node 20 image lifecycle.
+FROM node:24.18.1-alpine3.23 AS builder
 
 WORKDIR /app
 
@@ -14,7 +16,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Production Runtime
-FROM node:20-alpine AS runner
+FROM node:24.18.1-alpine3.23 AS runner
 
 WORKDIR /app
 ENV NODE_ENV=production

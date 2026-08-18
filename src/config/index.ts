@@ -124,8 +124,15 @@ export function resolveListenerConfig(env: NodeJS.ProcessEnv = process.env): Lis
 
 function readSecret(env: NodeJS.ProcessEnv, name: string): string | null {
   const direct = env[name]?.trim();
-  if (direct) return direct;
   const fileName = env[`${name}_FILE`]?.trim();
+  // A direct secret and a mounted secret are two different sources of
+  // authority. Choosing one by precedence makes an accidental stale value
+  // silently win, so fail before opening a listener and never echo either
+  // the value or the filesystem path in the error.
+  if (direct && fileName) {
+    throw new Error(`Ambiguous ${name} configuration: set either ${name} or ${name}_FILE, not both`);
+  }
+  if (direct) return direct;
   if (!fileName) return null;
   try {
     const value = fs.readFileSync(fileName, 'utf8').trim();
@@ -138,18 +145,33 @@ function readSecret(env: NodeJS.ProcessEnv, name: string): string | null {
 }
 
 function validateProxyAddress(value: string): string {
-  const [address, prefix] = value.split('/');
+  const parts = value.split('/');
+  if (parts.length > 2) {
+    throw new Error(`MUSTER_TRUST_PROXY contains an invalid address "${value}"`);
+  }
+  const [address, prefix] = parts;
   const ipVersion = net.isIP(address);
   if (!ipVersion) throw new Error(`MUSTER_TRUST_PROXY contains an invalid address "${value}"`);
   if (prefix !== undefined) {
-    if (!/^\d+$/.test(prefix) || Number(prefix) > (ipVersion === 4 ? 32 : 128)) {
+    const fullPrefix = ipVersion === 4 ? 32 : 128;
+    if (!/^\d+$/.test(prefix) || Number(prefix) > fullPrefix) {
       throw new Error(`MUSTER_TRUST_PROXY contains an invalid CIDR "${value}"`);
+    }
+    if (Number(prefix) !== fullPrefix) {
+      throw new Error(`MUSTER_TRUST_PROXY must name a single IP address, not a CIDR range: "${value}"`);
     }
   }
   return value;
 }
 
-/** Parse an explicit reverse-proxy allowlist; an empty list means trust none. */
+/**
+ * Parse an explicit reverse-proxy allowlist; an empty list means trust none.
+ *
+ * A broad Docker/private subnet turns every container on that network into a
+ * trusted proxy. Service addresses can change, so Compose pins the one proxy
+ * peer it needs and this parser accepts only a single IP (/32 or /128 is the
+ * same single host), never an address range.
+ */
 export function resolveTrustedProxies(env: NodeJS.ProcessEnv = process.env): string[] {
   const raw = env.MUSTER_TRUST_PROXY?.trim();
   if (!raw) return [];
@@ -186,11 +208,16 @@ export function validateDeploymentConfig(
   const oidcIssuer = env.MUSTER_OIDC_ISSUER?.trim() || null;
   const oidcClientId = env.MUSTER_OIDC_CLIENT_ID?.trim() || null;
   const oidcClientSecret = readSecret(env, 'MUSTER_OIDC_CLIENT_SECRET');
+  const bootstrapOwnerSubject = env.MUSTER_BOOTSTRAP_OWNER_SUBJECT?.trim() || null;
+  if (bootstrapOwnerSubject && /[\r\n]/.test(bootstrapOwnerSubject)) {
+    throw new Error('MUSTER_BOOTSTRAP_OWNER_SUBJECT must not contain newlines');
+  }
   if (listener.authMode === 'enforced') {
     const missing = [
       !oidcIssuer && 'MUSTER_OIDC_ISSUER',
       !oidcClientId && 'MUSTER_OIDC_CLIENT_ID',
       !oidcClientSecret && 'MUSTER_OIDC_CLIENT_SECRET',
+      !bootstrapOwnerSubject && 'MUSTER_BOOTSTRAP_OWNER_SUBJECT',
     ].filter(Boolean);
     if (missing.length > 0) {
       throw new Error(`Enforced authentication requires ${missing.join(', ')}`);
@@ -203,10 +230,6 @@ export function validateDeploymentConfig(
     }
   }
 
-  const bootstrapOwnerSubject = env.MUSTER_BOOTSTRAP_OWNER_SUBJECT?.trim() || null;
-  if (bootstrapOwnerSubject && /[\r\n]/.test(bootstrapOwnerSubject)) {
-    throw new Error('MUSTER_BOOTSTRAP_OWNER_SUBJECT must not contain newlines');
-  }
   return {
     publicUrl,
     oidcIssuer,

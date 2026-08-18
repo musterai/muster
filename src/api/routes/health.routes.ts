@@ -5,7 +5,6 @@ import { validateRequest } from '../middleware/validate.js';
 
 export function createHealthRouter(db: DatabaseAdapter): Router {
   const router = Router();
-  const startTime = Date.now();
 
   // Liveness deliberately does not touch the database or expose workspace
   // metadata: an orchestrator can distinguish a running process from a ready
@@ -14,7 +13,7 @@ export function createHealthRouter(db: DatabaseAdapter): Router {
     res.status(200).json({ status: 'alive' });
   });
 
-  router.get('/health/ready', ...validateRequest(), async (_req: Request, res: Response) => {
+  const readiness = async (_req: Request, res: Response): Promise<void> => {
     try {
       await db.query('SELECT 1');
       res.status(200).json({ status: 'ready' });
@@ -23,34 +22,14 @@ export function createHealthRouter(db: DatabaseAdapter): Router {
       // readiness response.
       res.status(503).json({ status: 'not_ready' });
     }
-  });
+  };
 
-  router.get('/health', ...validateRequest(), async (_req: Request, res: Response) => {
-    try {
-      // Test DB query latency
-      const t0 = Date.now();
-      await db.query('SELECT 1');
-      const latencyMs = Date.now() - t0;
+  router.get('/health/ready', ...validateRequest(), readiness);
 
-      res.json({
-        status: 'ok',
-        version: '1.0.0',
-        uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
-        timestamp: new Date().toISOString(),
-        database: {
-          status: 'connected',
-          driver: 'better-sqlite3',
-          mode: 'wal',
-          latency_ms: latencyMs,
-        },
-      });
-    } catch {
-      res.status(503).json({
-        status: 'unhealthy',
-        timestamp: new Date().toISOString(),
-      });
-    }
-  });
+  // Keep the legacy URL public only as a compatibility alias for the safe
+  // readiness contract. It must never disclose version, uptime, database
+  // driver/mode, paths, or timing to unauthenticated callers.
+  router.get('/health', ...validateRequest(), readiness);
 
   return router;
 }

@@ -21,7 +21,7 @@ export const PUBLIC_ROUTE_INVENTORY = [
   // Safe liveness information contains no workspace data.
   { method: 'GET', path: '/api/v1/health/live', purpose: 'liveness' },
   { method: 'GET', path: '/api/v1/health/ready', purpose: 'readiness' },
-  { method: 'GET', path: '/api/v1/health', purpose: 'legacy_health' },
+  { method: 'GET', path: '/api/v1/health', purpose: 'legacy_readiness_alias' },
 
   // Human OIDC bootstrap and session introspection/logout.
   { method: 'GET', path: '/api/v1/auth/login', purpose: 'oidc_login' },

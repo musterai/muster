@@ -154,10 +154,58 @@ describe('Listener and authentication configuration', () => {
       .toThrow('MUSTER_OIDC_ISSUER');
   });
 
-  it('accepts only explicit proxy IPs and CIDRs', () => {
-    expect(resolveTrustedProxies({ MUSTER_TRUST_PROXY: '127.0.0.1, ::1, 10.0.0.0/8' }))
-      .toEqual(['127.0.0.1', '::1', '10.0.0.0/8']);
+  it('requires a pinned bootstrap owner for every enforced listener but preserves zero-config loopback open mode', () => {
+    expect(() => validateDeploymentConfig({ MUSTER_HOST: 'localhost' })).not.toThrow();
+
+    const enforced = {
+      MUSTER_HOST: 'localhost',
+      MUSTER_AUTH_MODE: 'enforced',
+      MUSTER_PUBLIC_URL: 'http://localhost:6878',
+      MUSTER_OIDC_ISSUER: 'https://id.example.test',
+      MUSTER_OIDC_CLIENT_ID: 'muster',
+      MUSTER_OIDC_CLIENT_SECRET: 'secret',
+    };
+    expect(() => validateDeploymentConfig(enforced)).toThrow('MUSTER_BOOTSTRAP_OWNER_SUBJECT');
+    expect(() => validateDeploymentConfig({
+      ...enforced,
+      MUSTER_HOST: '0.0.0.0',
+      MUSTER_PUBLIC_URL: 'https://muster.example.test',
+    })).toThrow('MUSTER_BOOTSTRAP_OWNER_SUBJECT');
+    expect(validateDeploymentConfig({ ...enforced, MUSTER_BOOTSTRAP_OWNER_SUBJECT: 'oidc-subject' }))
+      .toMatchObject({ bootstrapOwnerSubject: 'oidc-subject' });
+  });
+
+  it('rejects ambiguous OIDC secret sources without leaking a secret or path', () => {
+    const secret = 'inline-secret-must-not-appear';
+    const secretPath = '/private/oidc/client-secret-must-not-appear';
+    let thrown: unknown;
+    try {
+      validateDeploymentConfig({
+        MUSTER_HOST: '0.0.0.0',
+        MUSTER_AUTH_MODE: 'enforced',
+        MUSTER_PUBLIC_URL: 'https://muster.example.test',
+        MUSTER_OIDC_ISSUER: 'https://id.example.test',
+        MUSTER_OIDC_CLIENT_ID: 'muster',
+        MUSTER_OIDC_CLIENT_SECRET: secret,
+        MUSTER_OIDC_CLIENT_SECRET_FILE: secretPath,
+        MUSTER_BOOTSTRAP_OWNER_SUBJECT: 'oidc-subject',
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    expect(message).toContain('Ambiguous MUSTER_OIDC_CLIENT_SECRET configuration');
+    expect(message).not.toContain(secret);
+    expect(message).not.toContain(secretPath);
+  });
+
+  it('accepts only exact proxy peers, never a private-network range', () => {
+    expect(resolveTrustedProxies({ MUSTER_TRUST_PROXY: '127.0.0.1, ::1, 172.30.0.2/32' }))
+      .toEqual(['127.0.0.1', '::1', '172.30.0.2/32']);
     expect(() => resolveTrustedProxies({ MUSTER_TRUST_PROXY: '0.0.0.0/33' })).toThrow('invalid CIDR');
+    expect(() => resolveTrustedProxies({ MUSTER_TRUST_PROXY: '10.0.0.0/8' })).toThrow('single IP address');
+    expect(() => resolveTrustedProxies({ MUSTER_TRUST_PROXY: '172.30.0.0/29' })).toThrow('single IP address');
     expect(() => resolveTrustedProxies({ MUSTER_TRUST_PROXY: 'proxy.internal' })).toThrow('invalid address');
   });
 

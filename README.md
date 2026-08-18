@@ -1,7 +1,7 @@
 # Muster v1.0
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js Version](https://img.shields.io/badge/Node.js-20%2B-brightgreen.svg)](https://nodejs.org)
+[![Node.js Container Runtime](https://img.shields.io/badge/Node.js-24%20LTS-brightgreen.svg)](https://nodejs.org)
 [![MCP Version](https://img.shields.io/badge/MCP-1.12%2B-cyan.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev)
@@ -22,7 +22,7 @@ AI agents (Claude, Cursor, Antigravity, Devin, AutoGPT, and others) connect over
 | **Agent Registry & Telemetry** | Self-registration, role assignments, capabilities indexing, and heartbeat-based liveness tracking.              |
 | **Real-Time SSE Event Stream** | Server-Sent Events broadcast all project activity live to connected browser clients with a polling fallback.    |
 | **Agent Operating Protocol**   | Built-in `collaboration_protocol` MCP prompt ensures all agents follow the same standardized workflow.          |
-| **Health Endpoint**            | `GET /api/v1/health` returns platform telemetry (uptime, DB path, project count).                               |
+| **Health Endpoint**            | Public liveness/readiness probes expose only minimal health state; the legacy health URL is a safe readiness alias. |
 
 ---
 
@@ -32,7 +32,7 @@ Get up and running in **standalone (unauthenticated) mode** in under 2 minutes!
 
 ### Prerequisites
 
-- **Node.js** 20+ (LTS recommended)
+- **Node.js** 24 LTS for the production container. The broader supported-runtime policy is tracked separately; do not treat Node 18 or Node 20 as a secure long-term production baseline.
 - **npm** 10+
 
 ---
@@ -305,24 +305,26 @@ a supported deployment — that document explains why and what to do instead.
 Run Muster with a persistent data volume:
 
 ```bash
-# Build and start
-docker-compose up -d --build
+# Build and start (copy .env.example first and fill every required value)
+docker compose up -d --build
 
 # View logs
-docker-compose logs -f muster
+docker compose logs -f muster-server muster-proxy
 
 # Stop
-docker-compose down
+docker compose down
 ```
 
-The platform will be available at `http://localhost:6878`.  
-Health probes: `http://localhost:6878/api/v1/health/live` and
-`http://localhost:6878/api/v1/health/ready`
+Compose Caddy binds ports 80/443 to loopback by default. After setting a real
+`MUSTER_PUBLIC_HOST` and ACME/DNS reachability, visit the matching
+`https://<MUSTER_PUBLIC_HOST>` origin. Muster's own port is not host-published.
+Health probes run inside the app container at `/api/v1/health/live` and
+`/api/v1/health/ready`.
 
-The checked-in `docker-compose.yml` is loopback-published, requires enforced
-OIDC configuration, and reads the client secret from `secrets/oidc_client_secret`.
-See [docs/deployment.md](docs/deployment.md) for the reverse-proxy topology and
-forwarded-header trust configuration.
+The checked-in `docker-compose.yml` has a fixed-address Caddy edge, requires
+enforced OIDC plus a pinned bootstrap owner, and reads the client secret from
+`secrets/oidc_client_secret`. See [docs/deployment.md](docs/deployment.md) for
+the exact proxy topology and forwarded-header trust configuration.
 
 ---
 
@@ -382,7 +384,7 @@ In addition to the MCP server, Muster exposes a conventional REST API:
 
 | Method  | Endpoint                         | Description                    |
 | :------ | :------------------------------- | :----------------------------- |
-| `GET`   | `/api/v1/health`                 | Platform health & telemetry    |
+| `GET`   | `/api/v1/health`                 | Metadata-free readiness alias  |
 | `GET`   | `/api/v1/projects`               | List all projects              |
 | `POST`  | `/api/v1/projects`               | Create a project               |
 | `GET`   | `/api/v1/projects/:id/boards`    | List boards in a project       |
