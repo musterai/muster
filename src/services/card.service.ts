@@ -789,22 +789,35 @@ export class CardService {
   }
 
   /** Release leases past their expiry so the board doesn't hold a card forever for a dead agent. */
-  async releaseExpiredLeases(): Promise<string[]> {
+  async releaseExpiredLeases(adapter?: DatabaseAdapter): Promise<string[]> {
+    if (!adapter) return this.db.transaction(tx => this.releaseExpiredLeases(tx));
+
     const nowIso = new Date().toISOString();
-    const expired = await this.db.query<Card>(
-      `SELECT * FROM card WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
+    // The transaction boundary serializes SQLite sweepers (BEGIN IMMEDIATE).
+    // PostgreSQL needs row locks because independent pool clients can sweep
+    // concurrently; the expiry predicate is re-evaluated after any waiter is
+    // released, so a second sweeper sees the first one's conditional update.
+    const lockClause = adapter.dialect === 'postgres' ? ' FOR UPDATE' : '';
+    const expired = await adapter.query<Card>(
+      `SELECT * FROM card WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?${lockClause}`,
       [nowIso]
     );
+    const released: string[] = [];
 
     for (const card of expired) {
       const updated_at = new Date().toISOString();
-      await this.db.execute(
-        `UPDATE card SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, updated_at = ? WHERE id = ?`,
-        [updated_at, card.id]
+      const result = await adapter.execute(
+        `UPDATE card SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, updated_at = ?
+         WHERE id = ? AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
+        [updated_at, card.id, nowIso]
       );
+      // Keep the event and the state transition in this transaction. A
+      // concurrent sweeper that lost the conditional update emits nothing.
+      if (result.changes !== 1) continue;
+      released.push(card.id);
 
       if (this.eventService) {
-        const projectId = await this.getProjectIdForColumn(card.column_id);
+        const projectId = await this.getProjectIdForColumn(card.column_id, adapter);
         if (projectId) {
           await this.eventService.create({
             project_id: projectId,
@@ -812,12 +825,12 @@ export class CardService {
             entity_id: card.id,
             action: 'claim_expired',
             payload: { previously_claimed_by: card.claimed_by },
-          });
+          }, adapter);
         }
       }
     }
 
-    return expired.map(c => c.id);
+    return released;
   }
 
   async addLabel(idOrKey: string, labelId: string, actorId?: string): Promise<void> {

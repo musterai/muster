@@ -15,6 +15,8 @@ import { KBService } from '../src/services/kb.service.js';
 import { AuditService } from '../src/services/audit.service.js';
 import { TokenService } from '../src/services/token.service.js';
 import type { AuthContext } from '../src/shared/auth-context.js';
+import { createMcpServer } from '../src/mcp/server.js';
+import type { Services } from '../src/shared/services.js';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-domain-transactions.db');
 
@@ -372,5 +374,102 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     });
     expect((await db.query('SELECT id FROM workspace WHERE id = ?', ['after-commit-workspace'])).length).toBe(1);
     expect(() => retained!.query('SELECT 1')).toThrow(/no longer active/);
+  });
+
+  it('keeps MCP audit atomic, uses result target IDs, and refuses missing db before mutation', async () => {
+    const events = new EventService(db);
+    const projectService = new ProjectService(db, events);
+    const boardService = new BoardService(db, events);
+    const columnService = new (await import('../src/services/column.service.js')).ColumnService(db, events);
+    const cardService = new CardService(db, events);
+    const commentService = new (await import('../src/services/comment.service.js')).CommentService(db, events);
+    const documentService = new DocumentService(db, events);
+    const agentService = new (await import('../src/services/agent.service.js')).AgentService(db, events);
+    const kbService = new KBService(db, events);
+    const roleService = new RoleService(db, events);
+    const auditService = new AuditService(db);
+    await db.execute(
+      'INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)',
+      ['mcp-audit-actor', 'user', new Date().toISOString()],
+    );
+    const services = {
+      db,
+      projectService,
+      boardService,
+      columnService,
+      cardService,
+      commentService,
+      documentService,
+      agentService,
+      eventService: events,
+      kbService,
+      roleService,
+      tokenService: {} as TokenService,
+      sessionService: {} as Services['sessionService'],
+      oidcService: {} as Services['oidcService'],
+      invitationService: {} as Services['invitationService'],
+      userService: {} as Services['userService'],
+      deviceGrantService: {} as Services['deviceGrantService'],
+      mcpOAuthService: {} as Services['mcpOAuthService'],
+      auditService,
+    } satisfies Services;
+    const auth: AuthContext = {
+      principal: { id: 'mcp-audit-actor', kind: 'user' },
+      workspace_id: workspaceId,
+      is_workspace_member: true,
+      permissions: [],
+      is_operator_override: false,
+      role_name: null,
+    };
+    const server = createMcpServer(services, { headers: {} } as any, auth) as any;
+
+    const createdResult = await server._registeredTools.create_role.handler({
+      workspace_id: workspaceId,
+      key: 'mcp_audited_role',
+      name: 'MCP Audited Role',
+      permissions: ['kb.read'],
+    }, {});
+    const created = JSON.parse(createdResult.content[0].text);
+    const createdAudit = await db.query<{ action: string; target_id: string }>(
+      'SELECT action, target_id FROM audit_log WHERE action = ? AND target_id = ?',
+      ['role.create', created.id],
+    );
+    expect(createdAudit).toHaveLength(1);
+
+    const owner = (await roleService.seedPreset(workspaceId)).find(role => role.key === 'owner')!;
+    const cloneResult = await server._registeredTools.clone_role.handler({
+      role_id: owner.id,
+      new_key: 'mcp_audited_clone',
+      new_name: 'MCP Audited Clone',
+    }, {});
+    const clone = JSON.parse(cloneResult.content[0].text);
+    const cloneAudit = await db.query<{ action: string; target_id: string }>(
+      'SELECT action, target_id FROM audit_log WHERE action = ? AND target_id = ?',
+      ['role.clone', clone.id],
+    );
+    expect(cloneAudit).toHaveLength(1);
+
+    const project = await projectService.create({ name: 'MCP status audit' });
+    const document = await documentService.create({ project_id: project.id, title: 'MCP doc', content: 'draft' });
+    await server._registeredTools.set_document_status.handler({ document_id: document.id, status: 'approved' }, {});
+    await server._registeredTools.set_document_status.handler({ document_id: document.id, status: 'draft' }, {});
+    const documentAudits = await db.query<{ action: string }>(
+      'SELECT action FROM audit_log WHERE target_id = ?',
+      [document.id],
+    );
+    expect(documentAudits).toHaveLength(2);
+    expect(documentAudits.map(row => row.action)).toEqual(expect.arrayContaining(['document.approve', 'document.status_changed']));
+
+    const beforeRoleCount = (await db.query('SELECT id FROM role WHERE key = ?', ['mcp_missing_db'])).length;
+    const noDbServices = { ...services, db: undefined } as Services;
+    const noDbServer = createMcpServer(noDbServices, { headers: {} } as any, auth) as any;
+    await expect(noDbServer._registeredTools.create_role.handler({
+      workspace_id: workspaceId,
+      key: 'mcp_missing_db',
+      name: 'Must not mutate',
+      permissions: ['kb.read'],
+    }, {})).rejects.toThrow(/Atomic MCP mutation requires services\.db/);
+    expect((await db.query('SELECT id FROM role WHERE key = ?', ['mcp_missing_db'])).length).toBe(beforeRoleCount);
+    expect((await db.query("SELECT id FROM audit_log WHERE action = 'role.create' AND payload LIKE '%mcp_missing_db%'")).length).toBe(0);
   });
 });

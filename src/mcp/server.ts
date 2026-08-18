@@ -5,6 +5,8 @@ import {
   AgentService,
   CardService,
   CommentService,
+  DocumentService,
+  RoleService,
 } from '../services/index.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { withPermission } from '../shared/permission-enforcer.js';
@@ -24,17 +26,19 @@ import type { DatabaseAdapter } from '../db/adapter.js';
 async function withMutationAudit<T>(
   services: Services,
   auth: AuthContext,
-  entry: { action: string; target_type: string; target_id?: string; payload?: Record<string, unknown> },
+  entry: { action: string; target_type: string; target_id?: string; payload?: Record<string, unknown> }
+    | ((result: T) => { action: string; target_type: string; target_id?: string; payload?: Record<string, unknown> }),
   mutate: (adapter?: DatabaseAdapter) => Promise<T>,
 ): Promise<T> {
-  // Production composition always supplies db. The fallback keeps lightweight
-  // unit-test service containers transport-compatible; server wiring never
-  // takes this branch, so privileged mutations still require the shared audit
-  // boundary in real MCP requests.
-  if (!services.db) return mutate();
+  // An audited MCP mutation must never run without the root adapter that can
+  // bind its audit row to the mutation. Test doubles and embedders must wire
+  // the same dependency as production; failing here is deliberately before
+  // mutate() so there is no unaudited side effect.
+  if (!services.db) throw new Error('Atomic MCP mutation requires services.db');
   return services.db.transaction(async tx => {
     const result = await mutate(tx);
-    await services.auditService.logAs(auth, entry, tx);
+    const resolvedEntry = typeof entry === 'function' ? entry(result) : entry;
+    await services.auditService.logAs(auth, resolvedEntry, tx);
     return result;
   });
 }
@@ -588,12 +592,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     document_id: z.string(),
     status: z.enum(['draft', 'in_review', 'approved'])
   }, withPermission('set_document_status', auth, async ({ document_id, status }) => {
-    const result = await withMutationAudit(services, auth, {
-      action: 'document.status_changed',
+    const result = await withMutationAudit(services, auth, (result: Awaited<ReturnType<DocumentService['setStatus']>>) => ({
+      action: status === 'approved' ? 'document.approve' : 'document.status_changed',
       target_type: 'document',
-      target_id: document_id,
-      payload: { status },
-    }, tx => services.documentService.setStatus(document_id, status, resolveActor(auth), tx));
+      target_id: result.id,
+      payload: { status, title: result.title, project_id: result.project_id },
+    }), tx => services.documentService.setStatus(document_id, status, resolveActor(auth), tx));
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -819,11 +823,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     permissions: z.array(z.string()),
     rank: z.number().optional(),
   }, withPermission('create_role', auth, async (args) => {
-    const role = await withMutationAudit(services, auth, {
+    const role = await withMutationAudit(services, auth, (role: Awaited<ReturnType<RoleService['create']>>) => ({
       action: 'role.create',
       target_type: 'role',
-      payload: { workspace_id: args.workspace_id, key: args.key },
-    }, tx => services.roleService.create(args, tx));
+      target_id: role.id,
+      payload: { workspace_id: args.workspace_id, key: role.key, name: role.name },
+    }), tx => services.roleService.create(args, tx));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 
@@ -857,12 +862,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     new_key: z.string(),
     new_name: z.string().optional(),
   }, withPermission('clone_role', auth, async ({ role_id, new_key, new_name }) => {
-    const role = await withMutationAudit(services, auth, {
+    const role = await withMutationAudit(services, auth, (role: Awaited<ReturnType<RoleService['clone']>>) => ({
       action: 'role.clone',
       target_type: 'role',
-      target_id: role_id,
-      payload: { new_key, new_name },
-    }, tx => services.roleService.clone(role_id, new_key, new_name, tx));
+      target_id: role.id,
+      payload: { from: role_id, key: role.key, name: role.name },
+    }), tx => services.roleService.clone(role_id, new_key, new_name, tx));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 

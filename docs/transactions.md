@@ -17,6 +17,7 @@ not open a second transaction.
 | Role seeding/creation and privileged role CRUD | Preset role set or role row plus transaction-scoped audit at REST/MCP boundaries |
 | Knowledge base create/link/entity/fact/relation/update/delete | Base/link, entity/fact/relation rows, and linked project events; duplicate links emit no event; deletion emits after the row mutation |
 | Card create/update/move/claim/delete and associations | Card/dependent association rows and card events |
+| Card lease expiry sweep | Conditional lease clears and `claim_expired` events; concurrent sweepers release each card once and SSE runs after commit |
 | Agent lifecycle/offboarding | Existing `AgentService` transaction boundaries, including credential revocation and claim cleanup |
 | Privileged REST/MCP mutations | Mutation and its `AuditService.log/logAs` insert share the route/tool transaction: project deletion (workspace-scoped tombstone; no invalid deleted-project event), document status approval, role CRUD/clone, invitation CRUD/acceptance, member role/removal, token issue/revoke, local identity, and agent offboarding |
 
@@ -29,11 +30,20 @@ PostgreSQL receives the same callback on one checked-out connection; row locks
 remain an explicit dialect-specific concern only where a read/check/write race
 requires them. Event listeners are best-effort notifications after the event
 insert is issued; adapters queue listeners with `afterCommit` so SSE publication
-cannot precede a successful commit. The persisted event row itself remains
-inside the transaction.
+cannot precede a successful commit. PostgreSQL returns its checked-out client
+to the pool before awaiting potentially slow listeners while preserving
+after-commit callback order. The persisted event row itself remains inside the
+transaction.
+
+Privileged MCP mutations fail closed if their service container lacks the root
+adapter: they cannot perform the mutation without the transaction that also
+writes its audit record. Audit targets derived from created results (for
+example role creation/cloning) use the newly-created row ID; document approval
+uses `document.approve`, while other status transitions use
+`document.status_changed`.
 
 Failure-injection and deterministic SQLite serialization coverage lives in
-`tests/domain-transactions.test.ts`. It asserts that failures after dependent
+`tests/domain-transactions.test.ts` and `tests/card-claim.test.ts`. It asserts that failures after dependent
 writes or audit inserts remove the entire logical unit, including event rows
 and deferred notifications; it also exercises duplicate invitation acceptance,
 concurrent project bootstrap/document versioning, token issue/revoke, and
