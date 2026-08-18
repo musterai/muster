@@ -95,8 +95,11 @@ class PostgresTransactionAdapter extends BasePostgresAdapter {
     return fn(this);
   }
 
-  async migrate(): Promise<void> {
-    throw new Error('migrate() is not supported inside an open transaction');
+  async migrate(sql: string): Promise<void> {
+    // node-postgres sends a parameter-free script through PostgreSQL's native
+    // multi-statement parser.  Keep this on the checked-out transaction
+    // client so every DDL statement and the ledger row share one boundary.
+    await this.client.query(sql);
   }
 
   async close(): Promise<void> {
