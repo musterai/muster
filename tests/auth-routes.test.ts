@@ -26,6 +26,7 @@ import { TokenService } from '../src/services/token.service.js';
 import { AuditService } from '../src/services/audit.service.js';
 import { createAuthRouter } from '../src/api/routes/auth.routes.js';
 import { createAuthMiddleware } from '../src/api/middleware/auth.js';
+import { permissionGuard } from '../src/api/middleware/permission-guard.js';
 import { config } from '../src/config/index.js';
 import { FakeOidcProvider } from './helpers/fake-oidc-provider.js';
 
@@ -49,6 +50,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
   let workspaceId: string;
   let roleService: RoleService;
   let invitationService: InvitationService;
+  let tokenService: TokenService;
 
   beforeAll(async () => {
     provider = await FakeOidcProvider.start();
@@ -79,14 +81,19 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     const userService = new UserService(db);
     invitationService = new InvitationService(db);
     const agentService = new AgentService(db);
-    const tokenService = new TokenService(db);
+    tokenService = new TokenService(db);
     const auditService = new AuditService(db);
 
     const app = express();
     app.use(express.json());
     app.use(createAuthMiddleware(db, tokenService, roleService, agentService, sessionService));
     const v1 = express.Router();
+    v1.use(permissionGuard);
     v1.use(createAuthRouter(db, oidcService, sessionService, userService, invitationService, roleService, auditService));
+    // Minimal protected collection used to exercise the real AuthContext +
+    // permissionGuard boundary without pulling unrelated project services
+    // into the OIDC-focused fixture.
+    v1.get('/projects', (_req, res) => res.json([{ id: 'protected-project' }]));
     app.use('/api/v1', v1);
 
     server = app.listen(0, '127.0.0.1');
@@ -152,6 +159,89 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
 
     expect(me.authenticated).toBe(true);
     expect(me.admitted).toBe(false);
+
+    const priorMode = config.auth.mode;
+    (config.auth as any).mode = 'enforced';
+    try {
+      const protectedRes = await fetch(`${baseUrl}/api/v1/projects`, {
+        headers: { Cookie: `muster_session=${token}` },
+      });
+      expect(protectedRes.status).toBe(403);
+      expect((await protectedRes.json()).required_permission).toBe('workspace.read');
+    } finally {
+      (config.auth as any).mode = priorMode;
+    }
+  });
+
+  it('allows implicit reads for an admitted observer with no required write permission', async () => {
+    await signIn('sub-observer-owner', 'observer-owner@example.com');
+    const observerRole = await roleService.getByKey(workspaceId, 'observer');
+    await invitationService.create({
+      workspace_id: workspaceId,
+      email: 'observer@example.com',
+      role_id: observerRole!.id,
+    });
+    const { setCookie } = await signIn('sub-observer', 'observer@example.com');
+    const token = extractCookieValue(setCookie, 'muster_session');
+
+    const priorMode = config.auth.mode;
+    (config.auth as any).mode = 'enforced';
+    try {
+      const protectedRes = await fetch(`${baseUrl}/api/v1/projects`, {
+        headers: { Cookie: `muster_session=${token}` },
+      });
+      expect(protectedRes.status).toBe(200);
+      expect(await protectedRes.json()).toEqual([{ id: 'protected-project' }]);
+    } finally {
+      (config.auth as any).mode = priorMode;
+    }
+  });
+
+  it('revokes implicit agent reads when the operator membership is removed', async () => {
+    await signIn('sub-agent-owner', 'agent-owner@example.com');
+    const users = await db.query<{ id: string }>(
+      `SELECT u.id FROM app_user u
+        JOIN identity i ON i.user_id = u.id
+       WHERE i.subject = ?`,
+      ['sub-agent-owner'],
+    );
+    const operatorId = users[0].id;
+    const observerRole = await roleService.getByKey(workspaceId, 'observer');
+    const now = new Date().toISOString();
+    const agentId = 'agent-membership-read-test';
+    await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [agentId, 'agent', now]);
+    await db.execute(
+      `INSERT INTO agent
+         (id, name, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [agentId, 'Read Agent', 'active', now, operatorId, observerRole!.id, workspaceId, now],
+    );
+    const credential = await tokenService.create({
+      principal_id: agentId,
+      workspace_id: workspaceId,
+      name: 'agent read test',
+    });
+
+    const priorMode = config.auth.mode;
+    (config.auth as any).mode = 'enforced';
+    try {
+      const allowed = await fetch(`${baseUrl}/api/v1/projects`, {
+        headers: { Authorization: `Bearer ${credential.token}` },
+      });
+      expect(allowed.status).toBe(200);
+
+      await db.execute(
+        'DELETE FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+        [workspaceId, operatorId],
+      );
+      const denied = await fetch(`${baseUrl}/api/v1/projects`, {
+        headers: { Authorization: `Bearer ${credential.token}` },
+      });
+      expect(denied.status).toBe(403);
+      expect((await denied.json()).required_permission).toBe('workspace.read');
+    } finally {
+      (config.auth as any).mode = priorMode;
+    }
   });
 
   it('admits an invited user and consumes the invitation', async () => {

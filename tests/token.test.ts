@@ -327,6 +327,7 @@ describe('MUS-24: Token Service', () => {
     const auth: AuthContext = {
       principal: { kind: 'agent', id: agentPrincipalId },
       workspace_id: workspaceId,
+      is_workspace_member: true,
       permissions: effectivePerms,
       is_operator_override: false,
       role_name: seniorRole!.name,

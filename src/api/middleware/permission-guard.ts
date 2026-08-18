@@ -32,8 +32,14 @@ export function permissionGuard(req: Request, res: Response, next: NextFunction)
   // same story for a not-yet-authenticated CLI/MCP client; device/lookup|
   // approve|deny and authorize/details|consent are NOT exempted — those run
   // as the already-signed-in approving user.
-  const PUBLIC_OAUTH_PATHS = ['/api/v1/oauth/device/code', '/api/v1/oauth/token', '/api/v1/oauth/register', '/api/v1/oauth/authorize'];
-  if (fullPath.includes('/auth/') || PUBLIC_OAUTH_PATHS.includes(fullPath)) {
+  const PUBLIC_AUTH_PATH = /^\/api\/v1\/auth\/(?:login|callback|logout|me|local)$/;
+  const PUBLIC_OAUTH_PATHS = new Set([
+    '/api/v1/oauth/device/code',
+    '/api/v1/oauth/token',
+    '/api/v1/oauth/register',
+    '/api/v1/oauth/authorize',
+  ]);
+  if (PUBLIC_AUTH_PATH.test(fullPath) || PUBLIC_OAUTH_PATHS.has(fullPath)) {
     next();
     return;
   }
@@ -49,7 +55,8 @@ export function permissionGuard(req: Request, res: Response, next: NextFunction)
   }
 
   try {
-    requireRestPermission(req.method, fullPath, auth);
+    const input = req.body && typeof req.body === 'object' ? req.body : undefined;
+    requireRestPermission(req.method, fullPath, auth, input);
     next();
   } catch (err) {
     if (err instanceof PermissionDeniedError) {

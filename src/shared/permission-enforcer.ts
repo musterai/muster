@@ -51,19 +51,21 @@ export class PermissionDeniedError extends Error {
  * - A function: receives the tool arguments and returns the required permission.
  *   Used when the required verb depends on the operation (e.g. set_document_status).
  */
-export type PermissionSpec = Permission | ((args: Record<string, unknown>) => Permission);
+export const WORKSPACE_READ = 'workspace.read' as const;
+export type AccessRequirement = Permission | typeof WORKSPACE_READ;
+export type PermissionSpec = AccessRequirement | ((args: Record<string, unknown>) => AccessRequirement);
 
 export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
   // ── Project Tools ──
-  list_projects: 'project.create', // reading project list requires workspace membership
+  list_projects: WORKSPACE_READ,
   create_project: 'project.create',
-  get_project_summary: 'project.create',
+  get_project_summary: WORKSPACE_READ,
   update_project: 'project.update',
   delete_project: 'project.delete',
 
   // ── Board & Column Tools ──
-  list_boards: 'project.create', // reading board list requires workspace membership
-  get_board: 'project.create',   // reading a board requires workspace membership
+  list_boards: WORKSPACE_READ,
+  get_board: WORKSPACE_READ,
   create_board: 'board.manage',
   update_board: 'board.manage',
   delete_board: 'board.manage',
@@ -73,9 +75,9 @@ export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
   delete_column: 'board.manage',
 
   // ── Card Tools ──
-  list_cards: 'project.create', // reading card list requires workspace membership
-  search_cards: 'project.create', // searching cards requires workspace membership
-  get_card: 'project.create',   // reading card details requires workspace membership
+  list_cards: WORKSPACE_READ,
+  search_cards: WORKSPACE_READ,
+  get_card: WORKSPACE_READ,
   create_card: 'card.create',
   update_card: 'card.update',
   move_card: 'card.move',
@@ -94,13 +96,13 @@ export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
   unlink_card: 'card.update',
   add_work_link: 'card.update',
   remove_work_link: 'card.update',
-  list_work_links: 'project.create',
+  list_work_links: WORKSPACE_READ,
   link_document_to_card: 'card.update',
   unlink_document_from_card: 'card.update',
 
   // ── Label Tools ──
   create_label: 'label.manage',
-  list_labels: 'project.create',
+  list_labels: WORKSPACE_READ,
 
   // ── Comment Tools ──
   add_comment: 'comment.create',
@@ -108,29 +110,29 @@ export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
   delete_comment: 'comment.delete',
 
   // ── Document Tools ──
-  list_documents: 'project.create',
+  list_documents: WORKSPACE_READ,
   create_document: 'doc.create',
-  get_document: 'project.create',
+  get_document: WORKSPACE_READ,
   update_document: 'doc.update',
   delete_document: 'doc.delete',
   set_document_status: (args) => {
     return args.status === 'approved' ? 'doc.approve' : 'doc.submit_review';
   },
-  get_document_history: 'project.create',
+  get_document_history: WORKSPACE_READ,
 
   // ── Agent Management Tools ──
   register_agent: 'agent.register',
   update_agent: 'agent.register',
   unregister_agent: 'agent.manage_others',
-  heartbeat: 'project.create',
-  list_agents: 'project.create',
+  heartbeat: WORKSPACE_READ,
+  list_agents: WORKSPACE_READ,
 
   // ── KB Tools ──
-  list_knowledge_bases: 'kb.read',
+  list_knowledge_bases: WORKSPACE_READ,
   create_knowledge_base: 'kb.write',
   link_knowledge_base: 'kb.write',
-  search_knowledge: 'kb.read',
-  get_entity_knowledge: 'kb.read',
+  search_knowledge: WORKSPACE_READ,
+  get_entity_knowledge: WORKSPACE_READ,
   add_gained_knowledge: 'kb.write',
   upsert_kb_entity: 'kb.write',
   update_gained_knowledge: 'kb.write',
@@ -138,15 +140,15 @@ export const TOOL_PERMISSIONS: Record<string, PermissionSpec> = {
   add_kb_relation: 'kb.write',
 
   // ── Role Management Tools ──
-  list_roles: 'role.manage',
-  get_role: 'role.manage',
+  list_roles: WORKSPACE_READ,
+  get_role: WORKSPACE_READ,
   create_role: 'role.manage',
   update_role: 'role.manage',
   delete_role: 'role.manage',
   clone_role: 'role.manage',
 
   // ── Event Tools ──
-  get_activity: 'project.create',
+  get_activity: WORKSPACE_READ,
 
   };
 
@@ -158,8 +160,8 @@ export interface RoutePattern {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   pattern: RegExp | string;
   permission: PermissionSpec;
-  /** When true, the method+path pattern check is skipped (allow read-always) */
-  readOnly?: boolean;
+  /** Public routes are intentionally unauthenticated and must be exact. */
+  public?: boolean;
 }
 
 /**
@@ -170,18 +172,18 @@ export interface RoutePattern {
  */
 export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   // ── Health (always public) ──
-  { method: 'GET', pattern: /^\/api\/v1\/health/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/health$/, permission: WORKSPACE_READ, public: true },
 
   // ── Projects ──
-  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/summary/, permission: 'project.create', readOnly: true },
-  { method: 'GET', pattern: /^\/api\/v1\/projects(?:\/[^/]+)?$/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/summary$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/projects(?:\/[^/]+)?$/, permission: WORKSPACE_READ },
   { method: 'POST', pattern: /^\/api\/v1\/projects$/, permission: 'project.create' },
   { method: 'PUT', pattern: /^\/api\/v1\/projects\/[^/]+$/, permission: 'project.update' },
   { method: 'DELETE', pattern: /^\/api\/v1\/projects\/[^/]+$/, permission: 'project.delete' },
 
   // ── Boards ──
-  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/boards/, permission: 'project.create', readOnly: true },
-  { method: 'GET', pattern: /^\/api\/v1\/boards\/[^/]+$/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/(?:boards|all-boards)$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/boards\/[^/]+$/, permission: WORKSPACE_READ },
   { method: 'POST', pattern: /^\/api\/v1\/projects\/[^/]+\/boards$/, permission: 'board.manage' },
   { method: 'PUT', pattern: /^\/api\/v1\/boards\/[^/]+$/, permission: 'board.manage' },
   { method: 'DELETE', pattern: /^\/api\/v1\/boards\/[^/]+$/, permission: 'board.manage' },
@@ -192,8 +194,9 @@ export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   { method: 'DELETE', pattern: /^\/api\/v1\/columns\/[^/]+$/, permission: 'board.manage' },
 
   // ── Cards ──
-  { method: 'GET', pattern: /\/cards\/search/, permission: 'project.create', readOnly: true },
-  { method: 'GET', pattern: /\/cards(?:\/[^/]+)?(?:\/work-links)?$/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/cards\/search$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/(?:projects\/[^/]+|boards\/[^/]+)\/cards$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/cards\/[^/]+(?:\/work-links)?$/, permission: WORKSPACE_READ },
   { method: 'POST', pattern: /\/columns\/[^/]+\/cards$/, permission: 'card.create' },
   { method: 'PUT', pattern: /\/cards\/[^/]+$/, permission: 'card.update' },
   { method: 'PATCH', pattern: /\/cards\/[^/]+\/move$/, permission: 'card.move' },
@@ -214,25 +217,29 @@ export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   { method: 'DELETE', pattern: /\/cards\/[^/]+\/work-links\/[^/]+$/, permission: 'card.update' },
 
   // ── Documents ──
-  { method: 'GET', pattern: /\/documents\/[^/]+\/versions$/, permission: 'project.create', readOnly: true },
-  { method: 'GET', pattern: /\/documents\/[^/]+$/, permission: 'project.create', readOnly: true },
-  { method: 'GET', pattern: /\/projects\/[^/]+\/documents/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/documents\/[^/]+\/versions$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/documents\/[^/]+$/, permission: WORKSPACE_READ },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/documents$/, permission: WORKSPACE_READ },
   { method: 'POST', pattern: /\/projects\/[^/]+\/documents$/, permission: 'doc.create' },
   { method: 'PUT', pattern: /\/documents\/[^/]+$/, permission: 'doc.update' },
   { method: 'DELETE', pattern: /\/documents\/[^/]+$/, permission: 'doc.delete' },
-  { method: 'PATCH', pattern: /\/documents\/[^/]+\/status$/, permission: 'doc.submit_review' },
+  {
+    method: 'PATCH',
+    pattern: /^\/api\/v1\/documents\/[^/]+\/status$/,
+    permission: args => args.status === 'approved' ? 'doc.approve' : 'doc.submit_review',
+  },
 
   // ── Agents ──
-  { method: 'GET', pattern: /^\/api\/v1\/agents$/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/agents$/, permission: WORKSPACE_READ },
 
   // ── Users (MUS-32) — read-only workspace member list ──
-  { method: 'GET', pattern: /^\/api\/v1\/users$/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/users$/, permission: WORKSPACE_READ },
 
   // ── Members (MUS-26) — role change and removal ──
   { method: 'PUT', pattern: /\/workspaces\/[^/]+\/members\/[^/]+$/, permission: 'member.manage' },
   { method: 'DELETE', pattern: /\/workspaces\/[^/]+\/members\/[^/]+$/, permission: 'member.manage' },
   { method: 'POST', pattern: /^\/api\/v1\/agents$/, permission: 'agent.register' },
-  { method: 'POST', pattern: /\/agents\/[^/]+\/heartbeat$/, permission: 'project.create' },
+  { method: 'POST', pattern: /\/agents\/[^/]+\/heartbeat$/, permission: WORKSPACE_READ },
   { method: 'PUT', pattern: /\/agents\/[^/]+$/, permission: 'agent.register' },
   { method: 'DELETE', pattern: /\/agents\/[^/]+$/, permission: 'agent.manage_others' },
 
@@ -245,7 +252,7 @@ export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   { method: 'DELETE', pattern: /\/roles\/[^/]+$/, permission: 'role.manage' },
 
   // ── KB ──
-  { method: 'GET', pattern: /\/kbs(?:\/\d+)?(?:\/entities|\/facts|\/graph|\/search|\/entity-knowledge)?$/, permission: 'kb.read', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs(?:\/[^/]+(?:\/(?:entities|facts))?|\/(?:graph|search|entity-knowledge))?$/, permission: WORKSPACE_READ },
   { method: 'POST', pattern: /\/kbs$/, permission: 'kb.write' },
   { method: 'POST', pattern: /\/kbs\/[^/]+\/link$/, permission: 'kb.write' },
   { method: 'POST', pattern: /\/kbs\/[^/]+\/unlink$/, permission: 'kb.write' },
@@ -260,27 +267,27 @@ export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   { method: 'DELETE', pattern: /\/kbs\/[^/]+$/, permission: 'kb.write' },
 
   // ── Events ──
-  { method: 'GET', pattern: /\/events/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/projects\/[^/]+\/events(?:\/stream)?$/, permission: WORKSPACE_READ },
 
   // ── Tokens (MUS-24) ──
-  { method: 'GET', pattern: /\/tokens$/, permission: 'project.create', readOnly: true },
-  { method: 'POST', pattern: /\/tokens$/, permission: 'project.create' },
-  { method: 'DELETE', pattern: /\/tokens\/[^/]+$/, permission: 'project.create' },
+  { method: 'GET', pattern: /^\/api\/v1\/tokens$/, permission: WORKSPACE_READ },
+  { method: 'POST', pattern: /^\/api\/v1\/tokens$/, permission: WORKSPACE_READ },
+  { method: 'DELETE', pattern: /^\/api\/v1\/tokens\/[^/]+$/, permission: WORKSPACE_READ },
 
   // ── Device Authorization Grant (MUS-28) — device/code and token are exempted in permissionGuard; these three run as the signed-in approver ──
-  { method: 'GET', pattern: /^\/api\/v1\/oauth\/device\/lookup$/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/oauth\/device\/lookup$/, permission: WORKSPACE_READ },
   { method: 'POST', pattern: /^\/api\/v1\/oauth\/device\/approve$/, permission: 'project.create' },
   { method: 'POST', pattern: /^\/api\/v1\/oauth\/device\/deny$/, permission: 'project.create' },
 
   // ── MCP-native OAuth (MUS-29) — register/authorize are exempted in permissionGuard; these two run as the signed-in approver ──
-  { method: 'GET', pattern: /^\/api\/v1\/oauth\/authorize\/details$/, permission: 'project.create', readOnly: true },
+  { method: 'GET', pattern: /^\/api\/v1\/oauth\/authorize\/details$/, permission: WORKSPACE_READ },
   { method: 'POST', pattern: /^\/api\/v1\/oauth\/authorize\/consent$/, permission: 'project.create' },
 
   // ── Audit log (MUS-30) — admin-only; a security record, not a collaboration feed ──
-  { method: 'GET', pattern: /^\/api\/v1\/workspaces\/[^/]+\/audit-log$/, permission: 'workspace.admin', readOnly: false },
+  { method: 'GET', pattern: /^\/api\/v1\/workspaces\/[^/]+\/audit-log$/, permission: 'workspace.admin' },
 
   // ── Invitations (MUS-25) — auth/login/callback/logout/me are exempted in permissionGuard ──
-  { method: 'GET', pattern: /\/workspaces\/[^/]+\/invitations$/, permission: 'member.invite', readOnly: true },
+  { method: 'GET', pattern: /\/workspaces\/[^/]+\/invitations$/, permission: 'member.invite' },
   { method: 'POST', pattern: /\/workspaces\/[^/]+\/invitations$/, permission: 'member.invite' },
   { method: 'DELETE', pattern: /\/invitations\/[^/]+$/, permission: 'member.invite' },
 ];
@@ -289,9 +296,9 @@ export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
 // resolvePermission — resolve a PermissionSpec against args
 // ============================================================
 
-export function resolvePermission(spec: PermissionSpec, args?: Record<string, unknown>): Permission {
+export function resolvePermission(spec: PermissionSpec, args?: Record<string, unknown>): AccessRequirement {
   if (typeof spec === 'function') {
-    return spec(args || {}) as Permission;
+    return spec(args || {});
   }
   return spec;
 }
@@ -336,6 +343,11 @@ export function requirePermission(
 
   const required = resolvePermission(spec, args);
 
+  if (required === WORKSPACE_READ) {
+    if (auth.is_workspace_member) return;
+    throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
+  }
+
   // Admin (workspace.admin) can do anything
   if (auth.permissions.includes('workspace.admin')) return;
 
@@ -351,11 +363,9 @@ export function requireRestPermission(
   method: string,
   path: string,
   auth: AuthContext,
+  args?: Record<string, unknown>,
 ): void {
   if (config.auth.mode === 'open') return;
-
-  // Admin can do anything
-  if (auth.permissions.includes('workspace.admin')) return;
 
   for (const route of REST_ROUTE_PERMISSIONS) {
     if (route.method !== method) continue;
@@ -366,21 +376,27 @@ export function requireRestPermission(
 
     if (!matches) continue;
 
-    // Read-only routes always pass on GET
-    if (route.readOnly && method === 'GET') return;
+    if (route.public) return;
 
-    const required = resolvePermission(route.permission);
+    const required = resolvePermission(route.permission, args);
+
+    if (required === WORKSPACE_READ) {
+      if (auth.is_workspace_member) return;
+      throw new PermissionDeniedError(WORKSPACE_READ, auth.role_name || null);
+    }
+
+    // Admin can perform any mapped workspace operation, but public and
+    // implicit-read decisions above remain explicit and auditable.
+    if (auth.permissions.includes('workspace.admin')) return;
 
     if (auth.permissions.includes(required)) return;
 
     throw new PermissionDeniedError(required, auth.role_name || null);
   }
 
-  // No match found — default-deny for mutation operations
-  if (method !== 'GET') {
-    throw new PermissionDeniedError('(unknown — unmapped route)', auth.role_name || null);
-  }
-  // Unmapped GET is allowed (read access)
+  // Every method, including GET, is default-denied when no explicit mapping
+  // exists. This makes a newly added data endpoint fail closed.
+  throw new PermissionDeniedError('(unknown — unmapped route)', auth.role_name || null);
 }
 
 // ============================================================
