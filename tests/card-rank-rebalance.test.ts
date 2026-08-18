@@ -72,6 +72,48 @@ describe('transactional card rank rebalancing', () => {
     expect(unchanged.column_id).toBe(columns[0].id);
   });
 
+  it('rejects an empty move before it can reorder cards or create an event', async () => {
+    const { columns } = await lanes();
+    const received: string[] = [];
+    const service = new CardService(db, new EventService(db, event => received.push(event.action)));
+    const first = await service.create({ column_id: columns[0].id, title: 'First' });
+    const second = await service.create({ column_id: columns[0].id, title: 'Second' });
+    received.length = 0;
+    const before = await db.query<{ id: string; position: string }>(
+      'SELECT id, position FROM card WHERE column_id = ? ORDER BY position, id', [columns[0].id],
+    );
+    const beforeEvents = await db.query<{ id: string }>('SELECT id FROM event WHERE entity_id = ?', [first.id]);
+
+    await expect(service.move(first.id, {})).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      details: { code: 'MOVE_INTENT_REQUIRED' },
+    });
+
+    const after = await db.query<{ id: string; position: string }>(
+      'SELECT id, position FROM card WHERE column_id = ? ORDER BY position, id', [columns[0].id],
+    );
+    expect(after).toEqual(before);
+    expect(after.map(card => card.id)).toEqual([first.id, second.id]);
+    expect(await db.query('SELECT id FROM event WHERE entity_id = ?', [first.id])).toEqual(beforeEvents);
+    expect(received).toEqual([]);
+  });
+
+  it('still permits explicit same-lane repositioning and cross-lane moves', async () => {
+    const { columns } = await lanes();
+    const first = await cardService.create({ column_id: columns[0].id, title: 'First' });
+    const second = await cardService.create({ column_id: columns[0].id, title: 'Second' });
+
+    await cardService.move(first.id, { position: 'z' });
+    const reordered = await db.query<{ id: string }>(
+      'SELECT id FROM card WHERE column_id = ? ORDER BY position, id', [columns[0].id],
+    );
+    expect(reordered.map(card => card.id)).toEqual([second.id, first.id]);
+
+    const moved = await cardService.move(second.id, { target_column_id: columns[1].id });
+    expect(moved.column_id).toBe(columns[1].id);
+    expect((await cardService.getById(first.id)).column_id).toBe(columns[0].id);
+  });
+
   it('serializes concurrent moves into unique canonical ranks in the target lane', async () => {
     const { columns } = await lanes();
     const cards = await Promise.all(Array.from({ length: 24 }, (_, i) =>

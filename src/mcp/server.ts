@@ -17,6 +17,19 @@ const cardReferenceSchema = z.string().describe(
   'The card ULID or its human-readable key (e.g. "MUS-49"); writes resolve it to the immutable card ID.'
 );
 
+// Keep the MCP boundary contract identical to REST's `cardMoveSchema`: a
+// move is either a lane move, a same-lane reposition, or both.  The legacy
+// `server.tool()` overload only accepts a raw Zod shape, which cannot express
+// this cross-field invariant. `registerTool()` accepts the complete schema.
+const moveCardInputSchema = z.object({
+  card_id: cardReferenceSchema,
+  target_column_id: z.string().min(1).optional(),
+  position: z.string().max(256).regex(/^(?:[a-z]+|0[a-z]+)$/).optional(),
+  operator_override: z.boolean().optional().describe('Explicitly bypass card WIP and blocker rules when the authenticated caller has operator override authority'),
+}).strict().refine(value => value.target_column_id !== undefined || value.position !== undefined, {
+  message: 'target_column_id or position is required',
+});
+
 export type { Services } from '../shared/services.js';
 
 import { Request } from 'express';
@@ -382,12 +395,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
-  server.tool('move_card', {
-    card_id: cardReferenceSchema,
-    target_column_id: z.string().optional(),
-    position: z.string().max(256).regex(/^(?:[a-z]+|0[a-z]+)$/).optional(),
-    operator_override: z.boolean().optional().describe('Explicitly bypass card WIP and blocker rules when the authenticated caller has operator override authority'),
-  }, withPermission('move_card', auth, async ({ card_id, target_column_id, position, operator_override }) => {
+  server.registerTool('move_card', { inputSchema: moveCardInputSchema }, withPermission('move_card', auth, async ({ card_id, target_column_id, position, operator_override }) => {
     // Layer 2 scope check: if the principal doesn't have card.assign_others,
     // they may only move cards they are assigned to.
     if (!auth.permissions.includes('card.assign_others') && auth.principal) {

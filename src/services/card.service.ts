@@ -63,6 +63,37 @@ export class CardService {
     }
   }
 
+  /**
+   * A move must carry an explicit lane or rank intent. Without this guard an
+   * omitted target defaults to the current lane and an omitted rank defaults
+   * to append, silently turning an empty request into a reorder.
+   *
+   * REST and MCP reject invalid shapes at their boundaries. Keeping the
+   * invariant here is deliberate: direct service callers and future
+   * transports must not be able to mutate a card with `{}` either.
+   */
+  private assertMoveIntent(data: MoveCard): void {
+    if (data.target_column_id === undefined && data.position === undefined) {
+      throw new ValidationError('target_column_id or position is required', {
+        fields: ['target_column_id', 'position'],
+        code: 'MOVE_INTENT_REQUIRED',
+      });
+    }
+    if (data.target_column_id !== undefined && (typeof data.target_column_id !== 'string' || data.target_column_id.trim().length === 0)) {
+      throw new ValidationError('target_column_id must be a non-empty string', {
+        field: 'target_column_id',
+        code: 'INVALID_TARGET_COLUMN',
+      });
+    }
+    if (data.position !== undefined && typeof data.position !== 'string') {
+      throw new ValidationError('position must be a string', {
+        field: 'position',
+        code: 'INVALID_RANK',
+      });
+    }
+    this.assertPosition(data.position);
+  }
+
   /** Apply deterministic canonical ranks to an already ordered lane. */
   private async rebalanceLane(db: DatabaseAdapter, cards: Card[]): Promise<string[]> {
     const ranks = rebalanceRanks(cards.length);
@@ -580,6 +611,9 @@ export class CardService {
   }
 
   async move(id: string, data: MoveCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
+    // Validate before resolving the card or opening a transaction so an empty
+    // move is observably a no-op across every caller.
+    this.assertMoveIntent(data);
     const cardId = await resolveCardId(this.db, id);
     let completed = false;
     for (let attempt = 0; attempt < MAX_MOVE_RETRIES; attempt++) {
@@ -603,7 +637,7 @@ export class CardService {
       const initialRows = await tx.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
       const initial = initialRows[0];
       if (!initial) throw new NotFoundError(`Card with ID ${cardId} not found`);
-      const initialTarget = data.target_column_id || initial.column_id;
+      const initialTarget = data.target_column_id ?? initial.column_id;
       if (tx.dialect === 'postgres') {
         const laneIds = [...new Set([initial.column_id, initialTarget])].sort();
         for (const laneId of laneIds) {
@@ -617,7 +651,7 @@ export class CardService {
       if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
       if (tx.dialect === 'postgres' && existing.column_id !== initial.column_id) throw new MoveRetryError();
 
-      const target_column_id = data.target_column_id || existing.column_id;
+      const target_column_id = data.target_column_id ?? existing.column_id;
 
       const capacity = await this.getColumnCapacity(target_column_id, tx);
       const isColumnChange = target_column_id !== existing.column_id;
@@ -661,7 +695,6 @@ export class CardService {
         }
       }
 
-      this.assertPosition(data.position);
       const targetCards = await this.orderedLaneCards(target_column_id, tx, cardId);
       const movedCard: Card = { ...existing, column_id: target_column_id, position: 'm' };
       const orderedTargetCards = this.orderWithPosition(targetCards, movedCard, data.position);

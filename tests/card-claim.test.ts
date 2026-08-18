@@ -173,6 +173,35 @@ describe('Atomic card claiming and lease expiry', () => {
     expect(response.next_action).toContain('next active-work lane');
   });
 
+  it('move_card requires explicit move intent in MCP and its handler cannot mutate on an empty call', async () => {
+    const first = await makeCard('MCP first');
+    const second = await cardService.create({ column_id: first.column_id, title: 'MCP second' });
+    const services: Services = {
+      projectService, boardService, columnService, cardService, commentService,
+      documentService, agentService, eventService, kbService, roleService: {} as RoleService,
+    };
+    const server = createMcpServer(services, { headers: {} } as any) as any;
+    const tool = server._registeredTools.move_card;
+    expect(tool.inputSchema.safeParse({ card_id: first.id }).success).toBe(false);
+    const before = await db.query<{ id: string; column_id: string; position: string }>(
+      'SELECT id, column_id, position FROM card WHERE column_id = ? ORDER BY position, id', [first.column_id],
+    );
+    const beforeEvents = await db.query<{ id: string }>('SELECT id FROM event WHERE entity_id = ?', [first.id]);
+
+    // Calling the registered handler directly bypasses SDK parsing, so this
+    // also proves the service boundary is a no-op safety net.
+    await expect(tool.handler({ card_id: first.id }, {})).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      details: { code: 'MOVE_INTENT_REQUIRED' },
+    });
+
+    const after = await db.query<{ id: string; column_id: string; position: string }>(
+      'SELECT id, column_id, position FROM card WHERE column_id = ? ORDER BY position, id', [first.column_id],
+    );
+    expect(after).toEqual(before);
+    expect(await db.query('SELECT id FROM event WHERE entity_id = ?', [first.id])).toEqual(beforeEvents);
+  });
+
   it('an expired lease is reclaimable by a different agent', async () => {
     const card = await makeCard();
     const holder = await agentService.register({ name: 'Original Holder' });
