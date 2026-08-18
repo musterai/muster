@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   CANONICAL_RANK_WIDTH,
   generateRank,
+  isValidRank,
   isCanonicalRank,
   rankBetween,
   rankBefore,
@@ -43,6 +44,47 @@ describe('LexoRank Algorithm', () => {
     expect(() => rankBetween('A', 'z')).toThrow(/lowercase/);
     expect(() => rankBetween('a!', 'z')).toThrow(/lowercase/);
     expect(() => rankBetween('z', 'a')).toThrow(/sort before/);
+  });
+
+  it('satisfies the strict-between property for arbitrary valid neighbours', () => {
+    // Keep the generator deterministic so a failing seed is reproducible in
+    // CI while still exercising arbitrary lengths, prefixes, and alphabet
+    // boundaries rather than a hand-picked fixture set.
+    let seed = 0x5eed1234;
+    const next = (): number => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 0x1_0000_0000;
+    };
+    const arbitraryRank = (): string => {
+      const length = 1 + Math.floor(next() * 32);
+      let rank = '';
+      for (let index = 0; index < length; index++) {
+        rank += 'abcdefghijklmnopqrstuvwxyz'[Math.floor(next() * 26)];
+      }
+      return rank;
+    };
+
+    let checked = 0;
+    let exhausted = 0;
+    for (let iteration = 0; iteration < 25_000; iteration++) {
+      let before = arbitraryRank();
+      let after = arbitraryRank();
+      if (before === after) continue;
+      if (before > after) [before, after] = [after, before];
+
+      try {
+        const midpoint = rankBetween(before, after);
+        expect(isValidRank(midpoint)).toBe(true);
+        expect(before < midpoint && midpoint < after).toBe(true);
+        checked += 1;
+      } catch (error) {
+        expect(error).toBeInstanceOf(RankError);
+        expect((error as RankError).code).toBe('RANK_SPACE_EXHAUSTED');
+        exhausted += 1;
+      }
+    }
+
+    expect(checked + exhausted).toBeGreaterThan(10_000);
   });
 
   it('rebalanceRanks creates a deterministic, strictly ordered canonical lane', () => {

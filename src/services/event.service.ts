@@ -21,12 +21,18 @@ export class EventService {
     this.listeners.push(callback);
   }
 
-  async create(data: CreateEvent): Promise<Event> {
+  /**
+   * The optional adapter is a transaction handle supplied by a service that
+   * is persisting an entity and its event atomically. On PostgreSQL this is
+   * essential: using the pool-backed adapter here would acquire a second
+   * connection and commit the event independently of the entity mutation.
+   */
+  async create(data: CreateEvent, db: DatabaseAdapter = this.db): Promise<Event> {
     const id = ulid();
     const created_at = new Date().toISOString();
     const payload = data.payload ? JSON.stringify(data.payload) : null;
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO event (id, project_id, entity_type, entity_id, action, actor_id, payload, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.project_id, data.entity_type, data.entity_id, data.action, data.actor_id || null, payload, created_at]

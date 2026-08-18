@@ -2,7 +2,7 @@ import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Card, CardAssignee, CardDetails, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
 import { EventService } from './event.service.js';
-import { rebalanceRanks } from '../shared/lexorank.js';
+import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { formatCardKey } from '../shared/card-key.js';
 import { CardRuleError, NotFoundError, ValidationError } from '../shared/errors.js';
 import { config } from '../config/index.js';
@@ -41,7 +41,7 @@ export class CardService {
    * by a canonical lowercase rank during the lane rebalance below.
    */
   private assertPosition(position: string | undefined): void {
-    if (position !== undefined && (!position || position.length > 256 || !/^(?:[a-z]+|0[a-z]+)$/.test(position))) {
+    if (position !== undefined && !isValidRankHint(position)) {
       throw new ValidationError('position must contain only lowercase letters a-z', {
         field: 'position',
         code: 'INVALID_RANK',
@@ -119,6 +119,7 @@ export class CardService {
     actorId: string | undefined,
     operation: string,
     details: Record<string, unknown>,
+    db: DatabaseAdapter = this.db,
   ): Promise<void> {
     if (!this.eventService) return;
     await this.eventService.create({
@@ -128,7 +129,7 @@ export class CardService {
       action: 'override',
       actor_id: actorId,
       payload: { operation, ...details },
-    });
+    }, db);
   }
 
   async create(data: CreateCard, actorId?: string, options: CardOperationOptions = {}): Promise<Card> {
@@ -196,6 +197,27 @@ export class CardService {
       const ranks = await this.rebalanceLane(tx, orderedCards);
       const position = ranks[orderedCards.findIndex(card => card.id === id)];
 
+      if (this.eventService) {
+        await this.eventService.create({
+          project_id: projectId,
+          entity_type: 'card',
+          entity_id: id,
+          action: 'created',
+          actor_id: actorId,
+          payload: { title: data.title, column_id: data.column_id },
+        }, tx);
+      }
+
+      if (wipViolation && options.operatorOverride) {
+        await this.recordOverride(projectId, id, actorId, 'create', {
+          rule: 'wip_limit',
+          column_id: wipViolation.id,
+          column_name: wipViolation.name,
+          current_count: wipViolation.card_count,
+          wip_limit: wipViolation.wip_limit,
+        }, tx);
+      }
+
       return {
         card: {
           id,
@@ -228,27 +250,6 @@ export class CardService {
       for (const agentId of data.assignees) {
         await this.assign(id, agentId, actorId);
       }
-    }
-
-    if (this.eventService) {
-      await this.eventService.create({
-        project_id: projectId,
-        entity_type: 'card',
-        entity_id: id,
-        action: 'created',
-        actor_id: actorId,
-        payload: { title: card.title, column_id: card.column_id },
-      });
-    }
-
-    if (wipViolation && options.operatorOverride) {
-      await this.recordOverride(projectId, id, actorId, 'create', {
-        rule: 'wip_limit',
-        column_id: wipViolation.id,
-        column_name: wipViolation.name,
-        current_count: wipViolation.card_count,
-        wip_limit: wipViolation.wip_limit,
-      });
     }
 
     return card;
@@ -568,7 +569,7 @@ export class CardService {
 
   async move(id: string, data: MoveCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
     const cardId = await resolveCardId(this.db, id);
-    const { moveEvent, overrideRules } = await this.db.transaction(async (tx) => {
+    await this.db.transaction(async (tx) => {
       const overrideRules: Array<Record<string, unknown>> = [];
       let moveEvent: {
         projectId: string;
@@ -587,6 +588,18 @@ export class CardService {
       if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
 
       const target_column_id = data.target_column_id || existing.column_id;
+
+      // Every cross-lane move reads and rewrites both lanes. Lock the lane
+      // rows in one canonical order before either snapshot is read so two
+      // opposite/crossing moves cannot observe stale source membership or
+      // deadlock while acquiring source and target in different orders.
+      if (tx.dialect === 'postgres') {
+        const laneIds = [...new Set([existing.column_id, target_column_id])].sort();
+        for (const laneId of laneIds) {
+          await tx.query<{ id: string }>('SELECT id FROM "column" WHERE id = ? FOR UPDATE', [laneId]);
+        }
+      }
+
       const capacity = await this.getColumnCapacity(target_column_id, tx);
       const isColumnChange = target_column_id !== existing.column_id;
 
@@ -665,47 +678,47 @@ export class CardService {
         cardTitle: existing.title,
       };
 
-      return { moveEvent, overrideRules };
-    });
-
-    if (this.eventService && moveEvent) {
-      await this.eventService.create({
-        project_id: moveEvent.projectId,
-        entity_type: 'card',
-        entity_id: cardId,
-        action: 'moved',
-        actor_id: actorId,
-        payload: {
-          from_column_id: moveEvent.fromColumnId,
-          to_column_id: moveEvent.toColumnId,
-          position: moveEvent.position,
-        },
-      });
-
-      // MUS-45: a card landing in a terminal (Done) lane is a completion —
-      // emit a dedicated event so the human operator can be alerted about it
-      // without the client having to interpret column semantics.
-      if (moveEvent.isColumnChange && moveEvent.toTerminal) {
+      if (this.eventService) {
         await this.eventService.create({
           project_id: moveEvent.projectId,
           entity_type: 'card',
           entity_id: cardId,
-          action: 'completed',
+          action: 'moved',
           actor_id: actorId,
           payload: {
-            card_key: moveEvent.cardKey,
-            card_title: moveEvent.cardTitle,
             from_column_id: moveEvent.fromColumnId,
             to_column_id: moveEvent.toColumnId,
-            to_column_name: moveEvent.toColumnName,
+            position: moveEvent.position,
           },
-        });
-      }
-    }
+        }, tx);
 
-    if (overrideRules.length > 0 && moveEvent) {
-      await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules });
-    }
+        // MUS-45: a card landing in a terminal (Done) lane is a completion.
+        // Keep this event in the same transaction as the card move so a
+        // failed completion insert cannot leave a durable move without its
+        // corresponding audit trail.
+        if (moveEvent.isColumnChange && moveEvent.toTerminal) {
+          await this.eventService.create({
+            project_id: moveEvent.projectId,
+            entity_type: 'card',
+            entity_id: cardId,
+            action: 'completed',
+            actor_id: actorId,
+            payload: {
+              card_key: moveEvent.cardKey,
+              card_title: moveEvent.cardTitle,
+              from_column_id: moveEvent.fromColumnId,
+              to_column_id: moveEvent.toColumnId,
+              to_column_name: moveEvent.toColumnName,
+            },
+          }, tx);
+        }
+      }
+
+      if (overrideRules.length > 0) {
+        await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules }, tx);
+      }
+
+    });
 
     return this.getById(cardId);
   }
@@ -832,19 +845,19 @@ export class CardService {
             action: 'claimed',
             actor_id: agentId,
             payload: { claim_expires_at: expiresIso },
-          });
+          }, tx);
         }
+      }
+
+      if (overrideProjectId && overrideBlockers.length > 0) {
+        await this.recordOverride(overrideProjectId, canonicalCardId, actorId || agentId, 'claim', {
+          rule: 'blocked_by',
+          blockers: overrideBlockers.map(blocker => ({ ...blocker })),
+        }, tx);
       }
 
       return this.getById(canonicalCardId, tx);
     });
-
-    if (overrideProjectId && overrideBlockers.length > 0) {
-      await this.recordOverride(overrideProjectId, canonicalCardId, actorId || agentId, 'claim', {
-        rule: 'blocked_by',
-        blockers: overrideBlockers.map(blocker => ({ ...blocker })),
-      });
-    }
 
     return result;
   }

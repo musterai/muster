@@ -23,6 +23,20 @@ export function isValidRank(value: unknown): value is string {
     && /^[a-z]+$/.test(value);
 }
 
+/**
+ * Validate an external insertion hint. `rankBefore('a')` historically
+ * returns `0a`; that value is useful at the transport boundary, but must be
+ * replaced with a canonical rank before it is persisted. Keeping this
+ * predicate next to the persisted-rank validator makes card and column
+ * position APIs agree on the same legacy compatibility contract.
+ */
+export function isValidRankHint(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_RANK_LENGTH
+    && /^(?:[a-z]+|0[a-z]+)$/.test(value);
+}
+
 export function isCanonicalRank(value: unknown): value is string {
   return isValidRank(value) && value.length === CANONICAL_RANK_WIDTH;
 }

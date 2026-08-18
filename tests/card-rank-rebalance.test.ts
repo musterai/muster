@@ -4,8 +4,9 @@ import path from 'node:path';
 import { createDatabaseAdapter } from '../src/db/factory.js';
 import { DatabaseAdapter } from '../src/db/adapter.js';
 import { Migrator } from '../src/db/migrator.js';
-import { BoardService, CardService, ProjectService } from '../src/services/index.js';
+import { BoardService, CardService, ColumnService, ProjectService } from '../src/services/index.js';
 import { isCanonicalRank } from '../src/shared/lexorank.js';
+import { EventService } from '../src/services/event.service.js';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-card-rank-rebalance.db');
 
@@ -85,6 +86,87 @@ describe('transactional card rank rebalancing', () => {
     );
     expect(rows).toHaveLength(cards.length);
     expect(new Set(rows.map(row => row.position)).size).toBe(cards.length);
+    expect(rows.every(row => isCanonicalRank(row.position))).toBe(true);
+
+    // The concurrent requests use two explicit insertion intents. Regardless
+    // of which transaction reaches SQLite first, every front insertion must
+    // remain before every append insertion after the lane is rebalanced.
+    const rankById = new Map(rows.map(row => [row.id, row.position]));
+    const frontRanks = cards.filter((_, index) => index % 2 === 0).map(card => rankById.get(card.id)!);
+    const appendRanks = cards.filter((_, index) => index % 2 === 1).map(card => rankById.get(card.id)!);
+    const lastFrontRank = frontRanks.reduce((max, rank) => max > rank ? max : rank);
+    const firstAppendRank = appendRanks.reduce((min, rank) => min < rank ? min : rank);
+    expect(lastFrontRank < firstAppendRank).toBe(true);
+  });
+
+  it('rolls back a terminal move when its completion event fails', async () => {
+    const { columns } = await lanes();
+    const card = await cardService.create({ column_id: columns[0].id, title: 'Atomic completion' });
+    let calls = 0;
+    const failingEvents = {
+      create: async () => {
+        calls += 1;
+        if (calls === 2) throw new Error('completion event write failed');
+      },
+    } as unknown as EventService;
+    const transactionalService = new CardService(db, failingEvents);
+
+    await expect(transactionalService.move(card.id, { target_column_id: columns[4].id, position: 'z' })).rejects.toThrow(
+      'completion event write failed',
+    );
+
+    const unchanged = await db.query<{ column_id: string; position: string }>(
+      'SELECT column_id, position FROM card WHERE id = ?',
+      [card.id],
+    );
+    expect(unchanged[0].column_id).toBe(columns[0].id);
+    expect(isCanonicalRank(unchanged[0].position)).toBe(true);
+    const events = await db.query<{ action: string }>('SELECT action FROM event WHERE entity_id = ?', [card.id]);
+    expect(events).toHaveLength(0);
+  });
+
+  it('rolls back a move and override audit event as one transaction', async () => {
+    const { columns } = await lanes();
+    await db.execute('UPDATE "column" SET wip_limit = 0 WHERE id = ?', [columns[1].id]);
+    const card = await cardService.create({ column_id: columns[0].id, title: 'Atomic override' });
+    let calls = 0;
+    const failingEvents = {
+      create: async () => {
+        calls += 1;
+        if (calls === 2) throw new Error('override event write failed');
+      },
+    } as unknown as EventService;
+    const transactionalService = new CardService(db, failingEvents);
+
+    await expect(
+      transactionalService.move(
+        card.id,
+        { target_column_id: columns[1].id, position: 'a' },
+        'operator-1',
+        { operatorOverride: true },
+      ),
+    ).rejects.toThrow('override event write failed');
+
+    const unchanged = await db.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [card.id]);
+    expect(unchanged[0].column_id).toBe(columns[0].id);
+    const events = await db.query<{ action: string }>('SELECT action FROM event WHERE entity_id = ?', [card.id]);
+    expect(events).toHaveLength(0);
+  });
+
+  it('validates column hints and persists only canonical lane ranks', async () => {
+    const { columns } = await lanes();
+    const columnService = new ColumnService(db);
+
+    await expect(columnService.update(columns[2].id, { position: 'a-b' })).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    });
+    await columnService.update(columns[2].id, { position: '0a' });
+
+    const rows = await db.query<{ id: string; position: string }>(
+      'SELECT id, position FROM "column" WHERE board_id = (SELECT board_id FROM "column" WHERE id = ?) ORDER BY position, id',
+      [columns[2].id],
+    );
+    expect(rows[0].id).toBe(columns[2].id);
     expect(rows.every(row => isCanonicalRank(row.position))).toBe(true);
   });
 });
