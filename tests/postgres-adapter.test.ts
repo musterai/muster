@@ -17,6 +17,24 @@ import { PostgresAdapter, convertPlaceholders, translateDialect } from '../src/d
 import { Migrator } from '../src/db/migrator.js';
 import { CardService } from '../src/services/card.service.js';
 import { RoleService } from '../src/services/role.service.js';
+import { AgentService } from '../src/services/agent.service.js';
+import { AuditService } from '../src/services/audit.service.js';
+import { DeviceGrantService } from '../src/services/device-grant.service.js';
+import { McpOAuthService } from '../src/services/mcp-oauth.service.js';
+import { TokenService } from '../src/services/token.service.js';
+import crypto from 'node:crypto';
+
+async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[]> {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let ready = 0;
+  return Promise.all(operations.map(async operation => {
+    ready += 1;
+    if (ready === operations.length) release();
+    await gate;
+    return operation();
+  }));
+}
 
 const PG_URL = process.env.MUSTER_TEST_PG_URL;
 
@@ -141,6 +159,83 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
     // The row itself agrees with exactly one of the calls that "won".
     const finalRows = await adapter.query<{ claimed_by: string }>('SELECT claimed_by FROM card WHERE id = ?', [card.id]);
     expect(agentIds).toContain(finalRows[0].claimed_by);
+  });
+
+  it('serializes OAuth code exchange and approved device delivery across real pool connections', async () => {
+    await new Migrator(adapter, './src/db/migrations').run();
+    const second = new PostgresAdapter(PG_URL!);
+    try {
+      const workspaceId = 'ws-oauth-pg-race';
+      const operatorId = 'operator-oauth-pg-race';
+      const now = new Date().toISOString();
+      await adapter.execute(
+        'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+        [workspaceId, 'OAuth PG Race', 'oauth-pg-race', now, now],
+      );
+      const roles = await new RoleService(adapter).seedPreset(workspaceId);
+      const owner = roles.find(role => role.key === 'owner')!;
+      await adapter.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [operatorId, 'user', now]);
+      await adapter.execute(
+        'INSERT INTO app_user (id, display_name, status, created_at) VALUES (?, ?, ?, ?)',
+        [operatorId, 'OAuth PG Operator', 'active', now],
+      );
+      await adapter.execute(
+        'INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at) VALUES (?, ?, ?, ?)',
+        [workspaceId, operatorId, owner.id, now],
+      );
+
+      const tokenA = new TokenService(adapter);
+      const tokenB = new TokenService(second);
+      const agentA = new AgentService(adapter);
+      const agentB = new AgentService(second);
+      const oauthA = new McpOAuthService(adapter, tokenA, agentA, new AuditService(adapter));
+      const oauthB = new McpOAuthService(second, tokenB, agentB, new AuditService(second));
+      const redirectUri = 'http://127.0.0.1:5555/callback';
+      const resource = 'https://muster.example.test/mcp';
+      const client = await oauthA.registerClient({ redirect_uris: [redirectUri] });
+      const agent = await agentA.register({ name: 'OAuth PG Agent' }, operatorId, owner.id, workspaceId);
+      const verifier = crypto.randomBytes(32).toString('base64url');
+      const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+      const code = await oauthA.createAuthorizationCode({
+        clientId: client.client_id,
+        redirectUri,
+        codeChallenge: challenge,
+        codeChallengeMethod: 'S256',
+        resource,
+        agentPrincipalId: agent.id,
+        operatorUserId: operatorId,
+        workspaceId,
+      });
+      const exchange = (service: McpOAuthService) => service.exchangeAuthorizationCode({
+        code,
+        clientId: client.client_id,
+        redirectUri,
+        codeVerifier: verifier,
+        resource,
+      });
+      const exchanges = await raceAtBarrier([() => exchange(oauthA), () => exchange(oauthB)]);
+      expect(exchanges.filter(result => result.ok)).toHaveLength(1);
+
+      const deviceA = new DeviceGrantService(adapter, tokenA, new AuditService(adapter));
+      const deviceB = new DeviceGrantService(second, tokenB, new AuditService(second));
+      const grant = await deviceA.createDeviceCode();
+      expect(await deviceA.approve(grant.user_code, {
+        principal: { kind: 'user', id: operatorId },
+        workspace_id: workspaceId,
+        is_workspace_member: true,
+        permissions: owner.permissions,
+        is_operator_override: true,
+        role_name: owner.name,
+      })).toBe(true);
+      const polls = await raceAtBarrier([
+        () => deviceA.poll(grant.device_code),
+        () => deviceB.poll(grant.device_code),
+      ]);
+      expect(polls.filter(result => result.ok)).toHaveLength(1);
+      expect(polls.filter(result => !result.ok && result.error === 'expired_token')).toHaveLength(1);
+    } finally {
+      await second.close();
+    }
   });
 });
 
