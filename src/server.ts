@@ -30,7 +30,7 @@ import { errorHandler } from './api/middleware/error-handler.js';
 import { createMcpServer } from './mcp/server.js';
 import type { Services } from './shared/services.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { config, setDatabaseOverride } from './config/index.js';
+import { config, formatHostForUrl, isLoopbackHost, setDatabaseOverride } from './config/index.js';
 import { OPEN_AUTH_CONTEXT } from './shared/auth-context.js';
 import { ulid } from 'ulid';
 import { TokenService } from './services/token.service.js';
@@ -48,6 +48,20 @@ import { createRateLimiter } from './api/middleware/generic-rate-limiter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/**
+ * Bind an Express application to the already-validated listener address.
+ * Exported so the socket-level configuration tests exercise the same binding
+ * call used by the production server.
+ */
+export function listenApplication(
+  app: express.Express,
+  port: number,
+  host: string,
+  callback?: () => void,
+): ReturnType<typeof app.listen> {
+  return app.listen(port, host, callback);
+}
 
 export async function startServer(options?: { db?: string }): Promise<void> {
   if (options?.db) {
@@ -216,27 +230,31 @@ export async function startServer(options?: { db?: string }): Promise<void> {
     services.cardService.releaseExpiredLeases().catch(console.error);
   }, 60000);
 
-  // Warn if binding to non-loopback with auth=open
   const host = config.host;
-  if (config.auth.mode === 'open' && host !== 'localhost' && host !== '127.0.0.1') {
-    console.warn(
-      `\n⚠  WARNING: MUSTER_AUTH_MODE=open but binding to host "${host}".\n` +
-      `   Set MUSTER_AUTH_MODE=enforced and configure a reverse proxy with TLS\n` +
-      `   before exposing on a non-local interface.\n`
+  if (config.auth.mode === 'open' && !isLoopbackHost(host)) {
+    // This should be unreachable because resolveListenerConfig() rejects the
+    // contradictory environment at module load. Keep the invariant here too
+    // in case an embedding caller mutates the exported config object.
+    throw new Error(
+      `Unsafe listener configuration: open authentication cannot bind non-loopback host "${host}"`
     );
   }
 
   const initialPort = config.port;
 
   const listenOnPort = (port: number) => {
-    const server = app.listen(port, '0.0.0.0', () => {
-      const activeDb = config.db.type === 'sqlite' ? config.db.path : (config.db.url || 'n/a');
+    const server = listenApplication(app, port, host, () => {
+      const activeDb = config.db.type === 'sqlite'
+        ? `sqlite at ${config.db.path}`
+        : 'postgres (configured)';
+      const displayHost = formatHostForUrl(host);
       console.log(`\n======================================================`);
       console.log(`  Muster v1.0.0 - ONLINE`);
       console.log(`======================================================`);
-      console.log(`  • Web UI:   http://${config.host}:${port}`);
-      console.log(`  • REST API: http://${config.host}:${port}/api/v1`);
-      console.log(`  • MCP Tool: POST http://${config.host}:${port}/mcp`);
+      console.log(`  • Bind:     ${displayHost}:${port}`);
+      console.log(`  • Web UI:   http://${displayHost}:${port}`);
+      console.log(`  • REST API: http://${displayHost}:${port}/api/v1`);
+      console.log(`  • MCP Tool: POST http://${displayHost}:${port}/mcp`);
       console.log(`  • Auth:     ${config.auth.mode}`);
       console.log(`  • Database: ${activeDb}`);
       console.log(`======================================================\n`);

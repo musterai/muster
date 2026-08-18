@@ -1,6 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import path from 'node:path';
-import { resolveDbPath, setDatabaseOverride, config } from '../src/config/index.js';
+import express from 'express';
+import type { AddressInfo } from 'node:net';
+import {
+  config,
+  formatHostForUrl,
+  isLoopbackHost,
+  normalizeListenHost,
+  resolveDbPath,
+  resolveListenerConfig,
+  setDatabaseOverride,
+} from '../src/config/index.js';
+import { listenApplication } from '../src/server.js';
 
 describe('Database Configuration & Path Resolution', () => {
   const originalEnv = { ...process.env };
@@ -80,5 +91,74 @@ describe('Database Configuration & Path Resolution', () => {
   it('setDatabaseOverride updates global config.db', () => {
     setDatabaseOverride('override_db');
     expect(config.db.path).toContain(path.join('data', 'override_db.db'));
+  });
+});
+
+describe('Listener and authentication configuration', () => {
+  it('defaults to IPv4 loopback with open authentication', () => {
+    expect(resolveListenerConfig({})).toEqual({
+      host: '127.0.0.1',
+      isLoopback: true,
+      authMode: 'open',
+      requestedAuthMode: null,
+    });
+    expect(resolveListenerConfig({ MUSTER_HOST: '' }).host).toBe('127.0.0.1');
+  });
+
+  it.each(['localhost', '127.0.0.1', '::1', '[::1]'])('accepts loopback spelling %s', (host) => {
+    const resolved = resolveListenerConfig({ MUSTER_HOST: host });
+    expect(resolved.isLoopback).toBe(true);
+    expect(resolved.authMode).toBe('open');
+    expect(resolved.host).toMatch(/^(127\.0\.0\.1|::1)$/);
+  });
+
+  it('normalizes IPv4-mapped loopback and identifies only loopback addresses', () => {
+    expect(normalizeListenHost('::ffff:127.0.0.1')).toBe('127.0.0.1');
+    expect(formatHostForUrl('::1')).toBe('[::1]');
+    expect(isLoopbackHost('localhost')).toBe(true);
+    expect(isLoopbackHost('0.0.0.0')).toBe(false);
+    expect(isLoopbackHost('::')).toBe(false);
+  });
+
+  it.each(['0.0.0.0', '::'])('defaults non-loopback bind %s to enforced auth', (host) => {
+    const resolved = resolveListenerConfig({ MUSTER_HOST: host });
+    expect(resolved.host).toBe(host);
+    expect(resolved.isLoopback).toBe(false);
+    expect(resolved.authMode).toBe('enforced');
+  });
+
+  it('rejects contradictory explicit open auth on a non-loopback bind', () => {
+    expect(() => resolveListenerConfig({ MUSTER_HOST: '0.0.0.0', MUSTER_AUTH_MODE: 'open' }))
+      .toThrow('MUSTER_AUTH_MODE=open cannot bind non-loopback host "0.0.0.0"');
+    expect(() => resolveListenerConfig({ MUSTER_HOST: '::', MUSTER_AUTH_MODE: 'open' }))
+      .toThrow('MUSTER_AUTH_MODE=open cannot bind non-loopback host "::"');
+  });
+
+  it('allows an explicit enforced mode on loopback and public binds', () => {
+    expect(resolveListenerConfig({ MUSTER_HOST: 'localhost', MUSTER_AUTH_MODE: 'enforced' }).authMode)
+      .toBe('enforced');
+    expect(resolveListenerConfig({ MUSTER_HOST: '192.0.2.10', MUSTER_AUTH_MODE: 'enforced' }).authMode)
+      .toBe('enforced');
+  });
+
+  it('rejects invalid auth modes and malformed host values', () => {
+    expect(() => resolveListenerConfig({ MUSTER_AUTH_MODE: 'sometimes' }))
+      .toThrow('MUSTER_AUTH_MODE must be "open" or "enforced"');
+    expect(() => resolveListenerConfig({ MUSTER_HOST: '   ' }))
+      .toThrow('MUSTER_HOST must be a non-empty hostname');
+  });
+
+  it('binds the production listener to the effective loopback address', async () => {
+    const app = express();
+    const listener = resolveListenerConfig({});
+    const server = listenApplication(app, 0, listener.host);
+
+    await new Promise<void>((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+
+    expect((server.address() as AddressInfo).address).toBe('127.0.0.1');
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 });

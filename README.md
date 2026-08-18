@@ -287,7 +287,8 @@ muster/
 | `MUSTER_PORT`       | `6878`                     | HTTP server listen port                                                         |
 | `MUSTER_DB_PATH`    | `data/muster.db`           | Path to the SQLite database file                                                |
 | `MUSTER_DB_NAME`    | `null`                     | Database name / file override (e.g. `dev` -> `data/dev.db`, or CLI `--db <name>`) |
-| `MUSTER_AUTH_MODE`  | derived from `MUSTER_HOST` | `open` (solo/localhost) or `enforced` (shared/public host)                      |
+| `MUSTER_HOST`       | `localhost` (`127.0.0.1`) | Address the server binds to; `localhost`, `127.0.0.1`, and `::1` are normalized as loopback. |
+| `MUSTER_AUTH_MODE`  | derived from `MUSTER_HOST` | `open` on loopback or `enforced` elsewhere. Explicit `open` with a non-loopback bind is rejected. |
 | `MUSTER_PUBLIC_URL` | `http://localhost:<port>`  | Required for a public deployment — see [docs/deployment.md](docs/deployment.md) |
 | `NODE_ENV`          | `development`              | Runtime environment                                                             |
 
