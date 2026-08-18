@@ -351,7 +351,9 @@ describe('MUS-57: fail-closed agent lifecycle and atomic offboarding', () => {
       };
       const adminServer = createMcpServer(services, { headers: {} } as any, adminAuth) as any;
       await expect(adminServer._registeredTools.heartbeat.handler({ agent_id: otherAgentId }, {}))
-        .rejects.toThrow('outside the authenticated workspace scope');
+        .rejects.toMatchObject({
+          refusal: expect.objectContaining({ required_permission: 'agent.manage_others' }),
+        });
 
       const selfAuth: AuthContext = {
         ...adminAuth,
@@ -360,7 +362,9 @@ describe('MUS-57: fail-closed agent lifecycle and atomic offboarding', () => {
       };
       const selfServer = createMcpServer(services, { headers: {} } as any, selfAuth) as any;
       await expect(selfServer._registeredTools.heartbeat.handler({ agent_id: otherAgentId }, {}))
-        .rejects.toThrow('outside the authenticated workspace scope');
+        .rejects.toMatchObject({
+          refusal: expect.objectContaining({ required_permission: 'workspace.read' }),
+        });
     } finally {
       (config.auth as any).mode = originalMode;
     }
