@@ -361,6 +361,47 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     expect((await db.query('SELECT id FROM workspace WHERE id IN (?, ?)', ['nested-workspace', 'unrelated-workspace'])).length).toBe(2);
   });
 
+  it('keeps unrelated EventService delivery outside a rolled-back owner transaction', async () => {
+    const now = new Date().toISOString();
+    const projectId = 'event-scope-project';
+    await db.execute(
+      `INSERT INTO project (id, workspace_id, name, description, key_prefix, card_seq, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [projectId, workspaceId, 'Event scope', null, 'EVT', 0, now, now],
+    );
+
+    const published: string[] = [];
+    const events = new EventService(db, event => { published.push(event.action); });
+    let retained: DatabaseAdapter | undefined;
+    let releaseOwner!: () => void;
+    const ownerRelease = new Promise<void>(resolve => { releaseOwner = resolve; });
+    let signalOwnerReady!: () => void;
+    const ownerReady = new Promise<void>(resolve => { signalOwnerReady = resolve; });
+
+    const owner = db.transaction(async tx => {
+      retained = tx;
+      await events.create({ project_id: projectId, entity_type: 'probe', entity_id: 'owner', action: 'owner' }, tx);
+      await tx.transaction(async nested => {
+        await events.create({ project_id: projectId, entity_type: 'probe', entity_id: 'nested', action: 'nested' }, nested);
+      });
+      signalOwnerReady();
+      await ownerRelease;
+      throw new Error('force owner rollback');
+    });
+
+    await ownerReady;
+    const unrelated = events.create({ project_id: projectId, entity_type: 'probe', entity_id: 'unrelated', action: 'unrelated' });
+    releaseOwner();
+
+    await expect(owner).rejects.toThrow('force owner rollback');
+    await unrelated;
+
+    const durable = await db.query<{ action: string }>('SELECT action FROM event WHERE project_id = ? ORDER BY action', [projectId]);
+    expect(durable.map(event => event.action)).toEqual(['unrelated']);
+    expect(published).toEqual(['unrelated']);
+    expect(() => retained!.query('SELECT 1')).toThrow(/no longer active/);
+  });
+
   it('runs after-commit callbacks after the FIFO advances and invalidates retained scopes', async () => {
     let retained: DatabaseAdapter | undefined;
     await db.transaction(async tx => {

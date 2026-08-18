@@ -2,9 +2,9 @@ import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Card, CardAssignee, CardDetails, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
 import { EventService } from './event.service.js';
-import { rankAfter } from '../shared/lexorank.js';
+import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { formatCardKey } from '../shared/card-key.js';
-import { CardRuleError, NotFoundError, ValidationError } from '../shared/errors.js';
+import { CardRuleError, ConflictError, NotFoundError, ValidationError } from '../shared/errors.js';
 import { config } from '../config/index.js';
 import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.js';
 import { assertHttpUrl } from '../shared/url.js';
@@ -12,6 +12,20 @@ import { canonicalizeCardLink } from './helpers/card-links.helper.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
+const MAX_MOVE_RETRIES = 3;
+const MOVE_RETRY_DELAY_MS = 10;
+
+class MoveRetryError extends Error {
+  constructor() {
+    super('card changed lanes while its move was being serialized');
+    this.name = 'MoveRetryError';
+  }
+}
+
+function isRetryablePostgresError(error: unknown): boolean {
+  const code = (error as { code?: string }).code;
+  return code === '40P01' || code === '40001';
+}
 
 interface ColumnCapacity {
   id: string;
@@ -34,6 +48,80 @@ export class CardService {
     private db: DatabaseAdapter,
     private eventService?: EventService
   ) {}
+
+  /**
+   * Positions are a small, untrusted ordering hint. Digits are accepted only
+   * for the historical `0a` prepend value; every persisted value is replaced
+   * by a canonical lowercase rank during the lane rebalance below.
+   */
+  private assertPosition(position: string | undefined): void {
+    if (position !== undefined && !isValidRankHint(position)) {
+      throw new ValidationError('position must contain only lowercase letters a-z', {
+        field: 'position',
+        code: 'INVALID_RANK',
+      });
+    }
+  }
+
+  /**
+   * A move must carry an explicit lane or rank intent. Without this guard an
+   * omitted target defaults to the current lane and an omitted rank defaults
+   * to append, silently turning an empty request into a reorder.
+   *
+   * REST and MCP reject invalid shapes at their boundaries. Keeping the
+   * invariant here is deliberate: direct service callers and future
+   * transports must not be able to mutate a card with `{}` either.
+   */
+  private assertMoveIntent(data: MoveCard): void {
+    if (data.target_column_id === undefined && data.position === undefined) {
+      throw new ValidationError('target_column_id or position is required', {
+        fields: ['target_column_id', 'position'],
+        code: 'MOVE_INTENT_REQUIRED',
+      });
+    }
+    if (data.target_column_id !== undefined && (typeof data.target_column_id !== 'string' || data.target_column_id.trim().length === 0)) {
+      throw new ValidationError('target_column_id must be a non-empty string', {
+        field: 'target_column_id',
+        code: 'INVALID_TARGET_COLUMN',
+      });
+    }
+    if (data.position !== undefined && typeof data.position !== 'string') {
+      throw new ValidationError('position must be a string', {
+        field: 'position',
+        code: 'INVALID_RANK',
+      });
+    }
+    this.assertPosition(data.position);
+  }
+
+  /** Apply deterministic canonical ranks to an already ordered lane. */
+  private async rebalanceLane(db: DatabaseAdapter, cards: Card[]): Promise<string[]> {
+    const ranks = rebalanceRanks(cards.length);
+    for (let index = 0; index < cards.length; index++) {
+      await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], cards[index].id]);
+    }
+    return ranks;
+  }
+
+  private async orderedLaneCards(columnId: string, db: DatabaseAdapter, excludeId?: string): Promise<Card[]> {
+    const cards = await db.query<Card>(
+      'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC, id ASC',
+      [columnId]
+    );
+    return excludeId ? cards.filter(card => card.id !== excludeId) : cards;
+  }
+
+  /** Insert a card according to its requested hint, repairing duplicate/legacy ranks at the same time. */
+  private orderWithPosition(cards: Card[], card: Card, position?: string): Card[] {
+    const ordered = [...cards];
+    let insertAt = ordered.length;
+    if (position !== undefined) {
+      const index = ordered.findIndex(existing => existing.position > position);
+      insertAt = index === -1 ? ordered.length : index;
+    }
+    ordered.splice(insertAt, 0, card);
+    return ordered;
+  }
 
   private async getColumnCapacity(columnId: string, db: DatabaseAdapter = this.db): Promise<ColumnCapacity> {
     // WIP checks run inside the create/move transaction. Lock the target
@@ -119,26 +207,40 @@ export class CardService {
       }
 
       const key = await this.nextCardKey(projectId, tx);
-      let position = data.position;
-      if (!position) {
-        const cards = await tx.query<Card>(
-          'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC',
-          [data.column_id]
-        );
-        const lastPos = cards.length > 0 ? cards[cards.length - 1].position : '';
-        position = rankAfter(lastPos);
-      }
+      this.assertPosition(data.position);
 
       const priority = data.priority || 'medium';
       const description = data.description || null;
       const due_date = data.due_date || null;
       const is_epic = data.is_epic ? 1 : 0;
+      const existingCards = await this.orderedLaneCards(data.column_id, tx);
+      const draftCard: Card = {
+        id,
+        key,
+        column_id: data.column_id,
+        title: data.title,
+        description,
+        position: 'm',
+        priority,
+        due_date,
+        created_at,
+        updated_at,
+        archived: 0,
+        claimed_by: null,
+        claimed_at: null,
+        claim_expires_at: null,
+        is_epic,
+      };
+      const orderedCards = this.orderWithPosition(existingCards, draftCard, data.position);
 
       await tx.execute(
         `INSERT INTO card (id, key, column_id, title, description, position, priority, due_date, created_at, updated_at, archived, is_epic)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-        [id, key, data.column_id, data.title, description, position, priority, due_date, created_at, updated_at, is_epic]
+        [id, key, data.column_id, data.title, description, 'm', priority, due_date, created_at, updated_at, is_epic]
       );
+
+      const ranks = await this.rebalanceLane(tx, orderedCards);
+      const position = ranks[orderedCards.findIndex(card => card.id === id)];
 
       // Card associations and its domain event are part of the same commit
       // as the card row. A failure in a label/assignee insert must not leave a
@@ -157,6 +259,16 @@ export class CardService {
           action: 'created',
           actor_id: actorId,
           payload: { title: data.title, column_id: data.column_id },
+        }, tx);
+      }
+
+      if (wipViolation && options.operatorOverride) {
+        await this.recordOverride(projectId, id, actorId, 'create', {
+          rule: 'wip_limit',
+          column_id: wipViolation.id,
+          column_name: wipViolation.name,
+          current_count: wipViolation.card_count,
+          wip_limit: wipViolation.wip_limit,
         }, tx);
       }
 
@@ -181,16 +293,6 @@ export class CardService {
         wipViolation,
       };
     });
-
-    if (wipViolation && options.operatorOverride) {
-      await this.recordOverride(projectId, id, actorId, 'create', {
-        rule: 'wip_limit',
-        column_id: wipViolation.id,
-        column_name: wipViolation.name,
-        current_count: wipViolation.card_count,
-        wip_limit: wipViolation.wip_limit,
-      });
-    }
 
     return card;
   }
@@ -509,8 +611,14 @@ export class CardService {
   }
 
   async move(id: string, data: MoveCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
+    // Validate before resolving the card or opening a transaction so an empty
+    // move is observably a no-op across every caller.
+    this.assertMoveIntent(data);
     const cardId = await resolveCardId(this.db, id);
-    const { moveEvent, overrideRules } = await this.db.transaction(async (tx) => {
+    let completed = false;
+    for (let attempt = 0; attempt < MAX_MOVE_RETRIES; attempt++) {
+      try {
+        await this.db.transaction(async (tx) => {
       const overrideRules: Array<Record<string, unknown>> = [];
       let moveEvent: {
         projectId: string;
@@ -523,12 +631,28 @@ export class CardService {
         cardKey: string;
         cardTitle: string;
       } | null = null;
+      // Read the source without locking, acquire every lane lock in canonical
+      // order, then lock the card. Every writer that rewrites lane peers uses
+      // this lane-before-card protocol; it prevents card/column wait cycles.
+      const initialRows = await tx.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
+      const initial = initialRows[0];
+      if (!initial) throw new NotFoundError(`Card with ID ${cardId} not found`);
+      const initialTarget = data.target_column_id ?? initial.column_id;
+      if (tx.dialect === 'postgres') {
+        const laneIds = [...new Set([initial.column_id, initialTarget])].sort();
+        for (const laneId of laneIds) {
+          await tx.query<{ id: string }>('SELECT id FROM "column" WHERE id = ? FOR UPDATE', [laneId]);
+        }
+      }
+
       const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
       const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
       const existing = rows[0];
       if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
+      if (tx.dialect === 'postgres' && existing.column_id !== initial.column_id) throw new MoveRetryError();
 
-      const target_column_id = data.target_column_id || existing.column_id;
+      const target_column_id = data.target_column_id ?? existing.column_id;
+
       const capacity = await this.getColumnCapacity(target_column_id, tx);
       const isColumnChange = target_column_id !== existing.column_id;
 
@@ -571,14 +695,19 @@ export class CardService {
         }
       }
 
-      let position = data.position;
-      if (!position) {
-        const targetCards = await tx.query<Card>(
-          'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC',
-          [target_column_id]
-        );
-        const lastPos = targetCards.length > 0 ? targetCards[targetCards.length - 1].position : '';
-        position = rankAfter(lastPos);
+      const targetCards = await this.orderedLaneCards(target_column_id, tx, cardId);
+      const movedCard: Card = { ...existing, column_id: target_column_id, position: 'm' };
+      const orderedTargetCards = this.orderWithPosition(targetCards, movedCard, data.position);
+      const targetRanks = await this.rebalanceLane(tx, orderedTargetCards);
+      const movedIndex = orderedTargetCards.findIndex(card => card.id === cardId);
+      const position = targetRanks[movedIndex];
+
+      // A cross-lane move repairs the source lane in the same transaction.
+      // The moved card is excluded above, so no association or card row is
+      // lost while both lanes receive deterministic, unique ranks.
+      if (isColumnChange) {
+        const sourceCards = await this.orderedLaneCards(existing.column_id, tx, cardId);
+        await this.rebalanceLane(tx, sourceCards);
       }
 
       const updated_at = new Date().toISOString();
@@ -609,34 +738,56 @@ export class CardService {
           action: 'moved',
           actor_id: actorId,
           payload: {
-            from_column_id: existing.column_id,
-            to_column_id: target_column_id,
-            position,
+            from_column_id: moveEvent.fromColumnId,
+            to_column_id: moveEvent.toColumnId,
+            position: moveEvent.position,
           },
         }, tx);
-        if (isColumnChange && capacity.is_terminal === 1) {
+
+        // MUS-45: a card landing in a terminal (Done) lane is a completion.
+        // Keep this event in the same transaction as the card move so a
+        // failed completion insert cannot leave a durable move without its
+        // corresponding audit trail.
+        if (moveEvent.isColumnChange && moveEvent.toTerminal) {
           await this.eventService.create({
-            project_id: projectId,
+            project_id: moveEvent.projectId,
             entity_type: 'card',
             entity_id: cardId,
             action: 'completed',
             actor_id: actorId,
             payload: {
-              card_key: existing.key,
-              card_title: existing.title,
-              from_column_id: existing.column_id,
-              to_column_id: target_column_id,
-              to_column_name: capacity.name,
+              card_key: moveEvent.cardKey,
+              card_title: moveEvent.cardTitle,
+              from_column_id: moveEvent.fromColumnId,
+              to_column_id: moveEvent.toColumnId,
+              to_column_name: moveEvent.toColumnName,
             },
           }, tx);
         }
-        if (overrideRules.length > 0) {
-          await this.recordOverride(projectId, cardId, actorId, 'move', { rules: overrideRules }, tx);
-        }
       }
 
-      return { moveEvent, overrideRules };
-    });
+      if (overrideRules.length > 0) {
+        await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules }, tx);
+      }
+
+        });
+        completed = true;
+        break;
+      } catch (error) {
+        const retryable = this.db.dialect === 'postgres' && (error instanceof MoveRetryError || isRetryablePostgresError(error));
+        if (!retryable || attempt === MAX_MOVE_RETRIES - 1) {
+          if (retryable) {
+            throw new ConflictError('Card move conflicted with concurrent lane changes; retry the move.', {
+              operation: 'move',
+              retryable: true,
+            });
+          }
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, MOVE_RETRY_DELAY_MS * (attempt + 1)));
+      }
+    }
+    if (!completed) throw new ConflictError('Card move could not be serialized; retry the move.', { retryable: true });
 
     return this.getById(cardId);
   }

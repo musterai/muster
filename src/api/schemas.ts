@@ -153,7 +153,7 @@ export const cardUpdateSchema = nonEmptyUpdate(strictObject({
 }));
 export const cardMoveSchema = strictObject({
   target_column_id: optionalId,
-  position: textSchema(MAX_ID).optional(),
+  position: textSchema(256).optional(),
   operator_override: z.boolean().optional(),
 }).refine(value => value.target_column_id !== undefined || value.position !== undefined, {
   message: 'target_column_id or position is required',
