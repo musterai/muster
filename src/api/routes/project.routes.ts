@@ -3,11 +3,13 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { ProjectService } from '../../services/project.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { validateRequest } from '../middleware/validate.js';
+import { idParamsSchema, projectCreateSchema, projectUpdateSchema } from '../schemas.js';
 
 export function createProjectRouter(projectService: ProjectService, auditService: AuditService): Router {
   const router = Router();
 
-  router.get('/', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const projects = await projectService.list();
       res.json(projects);
@@ -16,7 +18,7 @@ export function createProjectRouter(projectService: ProjectService, auditService
     }
   });
 
-  router.post('/', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/', ...validateRequest({ body: projectCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const project = await projectService.create(req.body);
       res.status(201).json(project);
@@ -25,7 +27,7 @@ export function createProjectRouter(projectService: ProjectService, auditService
     }
   });
 
-  router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const project = await projectService.getById(req.params.id);
       if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -35,7 +37,7 @@ export function createProjectRouter(projectService: ProjectService, auditService
     }
   });
 
-  router.put('/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.put('/:id', ...validateRequest({ body: projectUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const project = await projectService.update(req.params.id, req.body);
       res.json(project);
@@ -44,7 +46,7 @@ export function createProjectRouter(projectService: ProjectService, auditService
     }
   });
 
-  router.delete('/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const project = await projectService.getById(req.params.id);
       await projectService.delete(req.params.id);
@@ -62,7 +64,7 @@ export function createProjectRouter(projectService: ProjectService, auditService
     }
   });
 
-  router.get('/:id/summary', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/:id/summary', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const summary = await projectService.getSummary(req.params.id);
       res.json(summary);

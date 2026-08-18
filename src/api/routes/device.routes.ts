@@ -22,6 +22,13 @@ import { AuthContext } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { getRetryAfterMs, recordFailedAttempt, recordSuccessfulAttempt } from '../middleware/rate-limiter.js';
 import { createRateLimiter } from '../middleware/generic-rate-limiter.js';
+import { validateRequest } from '../middleware/validate.js';
+import {
+  deviceApproveSchema,
+  deviceCodeBodySchema,
+  deviceLookupQuerySchema,
+  oauthTokenSchema,
+} from '../schemas.js';
 
 const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
@@ -43,7 +50,7 @@ function normalizeCode(raw: unknown): string {
 export function createDeviceRouter(db: DatabaseAdapter, deviceGrantService: DeviceGrantService, oauthService?: McpOAuthService): Router {
   const router = Router();
 
-  router.post('/oauth/device/code', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/oauth/device/code', ...validateRequest({ body: deviceCodeBodySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
       const retryAfterMs = getRetryAfterMs(clientIp);
@@ -71,7 +78,7 @@ export function createDeviceRouter(db: DatabaseAdapter, deviceGrantService: Devi
     }
   });
 
-  router.post('/oauth/token', tokenRateLimiter, async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/oauth/token', tokenRateLimiter, ...validateRequest({ body: oauthTokenSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { grant_type } = req.body || {};
 
@@ -142,7 +149,7 @@ export function createDeviceRouter(db: DatabaseAdapter, deviceGrantService: Devi
     }
   });
 
-  router.get('/oauth/device/lookup', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/oauth/device/lookup', ...validateRequest({ query: deviceLookupQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
       const retryAfterMs = getRetryAfterMs(clientIp);
@@ -181,7 +188,7 @@ export function createDeviceRouter(db: DatabaseAdapter, deviceGrantService: Devi
     }
   });
 
-  router.post('/oauth/device/approve', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/oauth/device/approve', ...validateRequest({ body: deviceApproveSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = req.authContext;
       if (!auth?.principal || auth.principal.kind !== 'user' || !auth.workspace_id) {
@@ -200,7 +207,7 @@ export function createDeviceRouter(db: DatabaseAdapter, deviceGrantService: Devi
     }
   });
 
-  router.post('/oauth/device/deny', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/oauth/device/deny', ...validateRequest({ body: deviceApproveSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = req.authContext;
       if (!auth?.principal || auth.principal.kind !== 'user') {

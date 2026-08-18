@@ -3,6 +3,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { DocumentService } from '../../services/document.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { validateRequest } from '../middleware/validate.js';
+import { documentCreateSchema, documentListQuerySchema, documentQuerySchema, documentStatusSchema, documentUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
 
 function getActorId(req: Request): string | undefined {
   const auth: AuthContext | undefined = (req as any).authContext;
@@ -12,7 +14,7 @@ function getActorId(req: Request): string | undefined {
 export function createDocumentRouter(documentService: DocumentService, auditService: AuditService): Router {
   const router = Router();
 
-  router.get('/projects/:projectId/documents', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/documents', ...validateRequest({ query: documentListQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const status = req.query.status as string;
       const parent_id = req.query.parent_id === 'null' ? null : (req.query.parent_id as string);
@@ -23,7 +25,7 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
     }
   });
 
-  router.post('/projects/:projectId/documents', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/projects/:projectId/documents', ...validateRequest({ body: documentCreateSchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const doc = await documentService.create(
         { ...req.body, project_id: req.params.projectId },
@@ -35,9 +37,9 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
     }
   });
 
-  router.get('/documents/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/documents/:id', ...validateRequest({ query: documentQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const version = req.query.version ? parseInt(req.query.version as string, 10) : undefined;
+      const version = typeof req.query.version === 'number' ? req.query.version : undefined;
       const doc = await documentService.getById(req.params.id, version);
       if (!doc) return res.status(404).json({ error: 'Document not found' });
       res.json(doc);
@@ -46,7 +48,7 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
     }
   });
 
-  router.put('/documents/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.put('/documents/:id', ...validateRequest({ body: documentUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const doc = await documentService.update(req.params.id, req.body, getActorId(req));
       res.json(doc);
@@ -55,7 +57,7 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
     }
   });
 
-  router.delete('/documents/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/documents/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       await documentService.delete(req.params.id, getActorId(req));
       res.json({ success: true });
@@ -64,7 +66,7 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
     }
   });
 
-  router.patch('/documents/:id/status', async (req: Request, res: Response, next: NextFunction) => {
+  router.patch('/documents/:id/status', ...validateRequest({ body: documentStatusSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const doc = await documentService.setStatus(req.params.id, req.body.status, getActorId(req));
       if (req.body.status === 'approved') {
@@ -83,7 +85,7 @@ export function createDocumentRouter(documentService: DocumentService, auditServ
     }
   });
 
-  router.get('/documents/:id/versions', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/documents/:id/versions', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const history = await documentService.getHistory(req.params.id);
       res.json(history);

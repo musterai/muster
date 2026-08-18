@@ -153,6 +153,10 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   // SQLite. Document/card content itself is capped tighter still — see
   // document.service.ts / card.service.ts.
   app.use(express.json({ limit: '5mb' }));
+  // OAuth device/token clients commonly use application/x-www-form-urlencoded;
+  // keep parsing bounded and do not enable nested object coercion at this
+  // public boundary.
+  app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
   // RFC 8615 well-known URIs must live at the true origin root, not under /api.
   app.use(createWellKnownRouter());

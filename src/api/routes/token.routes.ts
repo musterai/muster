@@ -10,12 +10,14 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { TokenService } from '../../services/token.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { validateRequest } from '../middleware/validate.js';
+import { idParamsSchema, tokenCreateSchema } from '../schemas.js';
 
 export function createTokenRouter(tokenService: TokenService, auditService: AuditService): Router {
   const router = Router();
 
   // List tokens for the authenticated principal
-  router.get('/tokens', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/tokens', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {
@@ -31,7 +33,7 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   });
 
   // Create a new token
-  router.post('/tokens', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/tokens', ...validateRequest({ body: tokenCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {
@@ -76,7 +78,7 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   });
 
   // Revoke a token
-  router.delete('/tokens/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/tokens/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {

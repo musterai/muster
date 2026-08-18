@@ -11,11 +11,13 @@ import { RoleService } from '../../services/role.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
 import { assertPermissionsGrantable } from '../../shared/permission-enforcer.js';
+import { validateRequest } from '../middleware/validate.js';
+import { memberRoleSchema, workspaceMemberParamsSchema } from '../schemas.js';
 
 export function createUserRouter(db: DatabaseAdapter, userService: UserService, roleService: RoleService, auditService: AuditService): Router {
   const router = Router();
 
-  router.get('/users', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/users', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
       const workspaceId = wsRows[0]?.id;
@@ -30,7 +32,7 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
     }
   });
 
-  router.put('/workspaces/:workspaceId/members/:userId', async (req: Request, res: Response, next: NextFunction) => {
+  router.put('/workspaces/:workspaceId/members/:userId', ...validateRequest({ body: memberRoleSchema, params: workspaceMemberParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const targetRole = await roleService.getById(req.body.role_id);
       if (targetRole) {
@@ -52,7 +54,7 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
     }
   });
 
-  router.delete('/workspaces/:workspaceId/members/:userId', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/workspaces/:workspaceId/members/:userId', ...validateRequest({ params: workspaceMemberParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       await userService.removeMember(req.params.workspaceId, req.params.userId);
       await auditService.logAs(req.authContext, {

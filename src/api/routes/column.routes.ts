@@ -1,11 +1,13 @@
 // File: src/api/routes/column.routes.ts
 import { Router, Request, Response, NextFunction } from 'express';
 import { ColumnService } from '../../services/column.service.js';
+import { validateRequest } from '../middleware/validate.js';
+import { boardIdParamsSchema, columnCreateSchema, columnUpdateSchema, idParamsSchema } from '../schemas.js';
 
 export function createColumnRouter(columnService: ColumnService): Router {
   const router = Router();
 
-  router.post('/boards/:boardId/columns', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/boards/:boardId/columns', ...validateRequest({ body: columnCreateSchema, params: boardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const column = await columnService.create({ ...req.body, board_id: req.params.boardId });
       res.status(201).json(column);
@@ -14,7 +16,7 @@ export function createColumnRouter(columnService: ColumnService): Router {
     }
   });
 
-  router.put('/columns/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.put('/columns/:id', ...validateRequest({ body: columnUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const column = await columnService.update(req.params.id, req.body);
       res.json(column);
@@ -23,7 +25,7 @@ export function createColumnRouter(columnService: ColumnService): Router {
     }
   });
 
-  router.delete('/columns/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/columns/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       await columnService.delete(req.params.id);
       res.status(204).end();

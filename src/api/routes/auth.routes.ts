@@ -24,6 +24,15 @@ import { DatabaseAdapter } from '../../db/adapter.js';
 import { config, isOidcConfigured } from '../../config/index.js';
 import { parseCookies, serializeCookie, clearCookieHeader } from '../../shared/cookies.js';
 import { SESSION_COOKIE_NAME } from '../middleware/auth.js';
+import { validateRequest } from '../middleware/validate.js';
+import {
+  authCallbackQuerySchema,
+  authLocalSchema,
+  authLoginQuerySchema,
+  idParamsSchema,
+  invitationCreateBodySchema,
+  workspaceIdParamsSchema,
+} from '../schemas.js';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -49,7 +58,7 @@ export function createAuthRouter(
 ): Router {
   const router = Router();
 
-  router.get('/auth/login', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/auth/login', ...validateRequest({ query: authLoginQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!isOidcConfigured()) {
         res.status(503).json({ error: 'oidc_not_configured', message: 'OIDC is not configured on this server.' });
@@ -64,7 +73,7 @@ export function createAuthRouter(
     }
   });
 
-  router.get('/auth/callback', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/auth/callback', ...validateRequest({ query: authCallbackQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!isOidcConfigured()) {
         res.status(503).json({ error: 'oidc_not_configured', message: 'OIDC is not configured on this server.' });
@@ -136,7 +145,7 @@ export function createAuthRouter(
     }
   });
 
-  router.post('/auth/logout', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/auth/logout', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const cookies = parseCookies(req.headers.cookie);
       const sessionToken = cookies[SESSION_COOKIE_NAME];
@@ -150,7 +159,7 @@ export function createAuthRouter(
     }
   });
 
-  router.get('/auth/me', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/auth/me', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const wsRows = await db.query<{ id: string; name: string }>('SELECT id, name FROM workspace LIMIT 1');
       const workspace = wsRows[0] || null;
@@ -187,7 +196,7 @@ export function createAuthRouter(
   // being stuck picking an existing agent to post comments as. Explicitly
   // gated on config.auth.mode, never inferred, same convention as the
   // self-asserted comment author fallback.
-  router.post('/auth/local', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/auth/local', ...validateRequest({ body: authLocalSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (config.auth.mode !== 'open') {
         res.status(404).json({ error: 'not_found', message: 'Not available outside open mode.' });
@@ -261,7 +270,7 @@ export function createAuthRouter(
 
   // ── Invitations ──
 
-  router.post('/workspaces/:workspaceId/invitations', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/workspaces/:workspaceId/invitations', ...validateRequest({ body: invitationCreateBodySchema, params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { email, role_id } = req.body;
       if (!email || !role_id) {
@@ -289,7 +298,7 @@ export function createAuthRouter(
     }
   });
 
-  router.get('/workspaces/:workspaceId/invitations', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/workspaces/:workspaceId/invitations', ...validateRequest({ params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const invitations = await invitationService.list(req.params.workspaceId);
       res.json(invitations);
@@ -298,7 +307,7 @@ export function createAuthRouter(
     }
   });
 
-  router.delete('/invitations/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/invitations/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const invite = await invitationService.getById(req.params.id);
       await invitationService.revoke(req.params.id);
