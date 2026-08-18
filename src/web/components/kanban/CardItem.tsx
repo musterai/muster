@@ -1,7 +1,7 @@
 import React from 'react';
 import { Draggable } from '@hello-pangea/dnd';
 import { Card, Column } from '../../types.js';
-import { Layers, Copy, Check, Edit2, Trash2 } from 'lucide-react';
+import { Layers, Layout, Copy, Check, Edit2, Trash2 } from 'lucide-react';
 import { PrincipalChip } from '../PrincipalChip.js';
 import { PRIORITY_BADGE_CLASSES } from '../../utils/card-helpers.js';
 
@@ -13,6 +13,8 @@ interface CardItemProps {
   copiedKeyCardId: string | null;
   index: number;
   highlightEpicId?: string | null;
+  showBoardName?: boolean;
+  showParentEpic?: boolean;
   onFocusCard: (cardId: string) => void;
   onOpenCard: (cardId: string, isEdit?: boolean) => void;
   onCopyKey: (key: string, cardId: string, e: React.MouseEvent) => void;
@@ -29,6 +31,8 @@ export const CardItem: React.FC<CardItemProps> = ({
   copiedKeyCardId,
   index,
   highlightEpicId,
+  showBoardName = false,
+  showParentEpic = true,
   onFocusCard,
   onOpenCard,
   onCopyKey,
@@ -79,21 +83,16 @@ export const CardItem: React.FC<CardItemProps> = ({
               : 'bg-muster-surface border-muster-border hover:border-brand-500/40 hover:bg-neutral-900/90'
           }`}
         >
-          <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center justify-between gap-2 mb-2">
             <button
               onClick={(e) => onCopyKey(card.key, card.id, e)}
-              className="flex items-center space-x-1 font-mono text-[10px] text-neutral-500 hover:text-brand-400 group-hover:text-brand-400"
+              className="flex items-center space-x-1 font-mono text-[10px] muster-text-muted hover:text-brand-400 group-hover:text-brand-400 shrink-0"
               title="Copy card key"
             >
               {copiedKeyCardId === card.id ? <Check className="w-2.5 h-2.5" /> : <Copy className="w-2.5 h-2.5" />}
               <span>{card.key}</span>
             </button>
-            <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
-              {!!card.board_name && (
-                <span className="muster-badge muster-badge-info text-[9px] font-mono shrink-0" title={`Board: ${card.board_name}`}>
-                  {card.board_name}
-                </span>
-              )}
+            <div className="flex items-center gap-1.5 shrink-0">
               {!!card.is_epic && (
                 <span className="muster-badge muster-badge-accent flex items-center" title="Epic — a container for related work">
                   <Layers className="w-3 h-3 mr-1" aria-hidden="true" />
@@ -108,6 +107,7 @@ export const CardItem: React.FC<CardItemProps> = ({
                 }}
                 className="muster-btn muster-btn-icon muster-btn-ghost"
                 title="Edit Task"
+                aria-label={`Edit ${card.key}`}
               >
                 <Edit2 className="w-3 h-3" />
               </button>
@@ -118,28 +118,45 @@ export const CardItem: React.FC<CardItemProps> = ({
                 }}
                 className="muster-btn muster-btn-icon muster-btn-ghost-danger"
                 title="Delete Card"
+                aria-label={`Delete ${card.key}`}
               >
                 <Trash2 className="w-3 h-3" />
               </button>
             </div>
           </div>
 
-          {card.parent_epic_key && (
+          {((showBoardName && card.board_name) || (showParentEpic && card.parent_epic_key)) && (
             <div
-              className="inline-flex items-center text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand-950/50 border border-brand-500/40 text-brand-300 mb-2 hover:border-brand-400 cursor-pointer transition-colors max-w-full truncate"
-              title={`Parent Epic: ${card.parent_epic_key} - ${card.parent_epic_title}`}
-              onMouseEnter={(e) => {
-                e.stopPropagation();
-                onHoverEpicId?.(card.parent_epic_id || null);
-              }}
-              onMouseLeave={(e) => {
-                e.stopPropagation();
-                onHoverEpicId?.(null);
-              }}
+              className="flex items-center gap-2 min-w-0 mb-2 text-[10px] font-mono muster-text-muted"
+              aria-label="Card context"
             >
-              <Layers className="w-2.5 h-2.5 mr-1 text-brand-400 shrink-0" />
-              <span className="font-semibold mr-1 shrink-0">{card.parent_epic_key}</span>
-              <span className="truncate font-sans opacity-80">{card.parent_epic_title}</span>
+              {showBoardName && card.board_name && (
+                <span className="inline-flex items-center gap-1 min-w-0" title={`Board: ${card.board_name}`}>
+                  <Layout className="w-2.5 h-2.5 shrink-0" aria-hidden="true" />
+                  <span className="truncate">{card.board_name}</span>
+                </span>
+              )}
+              {showBoardName && card.board_name && showParentEpic && card.parent_epic_key && (
+                <span className="muster-divider w-0.5 h-0.5 rounded-full shrink-0" aria-hidden="true" />
+              )}
+              {showParentEpic && card.parent_epic_key && (
+                <span
+                  className="inline-flex items-center gap-1 min-w-0 hover:text-brand-400 transition-colors"
+                  title={`Parent Epic: ${card.parent_epic_key} - ${card.parent_epic_title}`}
+                  onMouseEnter={(e) => {
+                    e.stopPropagation();
+                    onHoverEpicId?.(card.parent_epic_id || null);
+                  }}
+                  onMouseLeave={(e) => {
+                    e.stopPropagation();
+                    onHoverEpicId?.(null);
+                  }}
+                >
+                  <Layers className="w-2.5 h-2.5 shrink-0" aria-hidden="true" />
+                  <span className="font-semibold shrink-0">{card.parent_epic_key}</span>
+                  <span className="truncate font-sans">{card.parent_epic_title}</span>
+                </span>
+              )}
             </div>
           )}
 
