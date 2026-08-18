@@ -10,6 +10,9 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { TokenService, hashToken } from './token.service.js';
 import { AuditService } from './audit.service.js';
 import { CreatedApiToken } from '../shared/types.js';
+import { AuthContext } from '../shared/auth-context.js';
+import { PermissionDeniedError } from '../shared/permission-enforcer.js';
+import { ValidationError } from '../shared/errors.js';
 
 const DEVICE_CODE_BYTES = 32;
 const EXPIRES_IN_SECONDS = 600; // 10 minutes
@@ -80,8 +83,25 @@ export class DeviceGrantService {
     return rows[0];
   }
 
-  /** Binds the grant to the approving principal's own identity — the token is issued for them, never for whoever happens to be polling. */
-  async approve(userCode: string, principalId: string, workspaceId: string): Promise<boolean> {
+  /**
+   * Binds the grant to the approving principal's own identity.  Authorization
+   * is checked here and again at poll time so removing membership between the
+   * two steps cannot leave a mintable grant behind.
+   */
+  async approve(userCode: string, principalOrAuth: string | AuthContext, workspaceId?: string): Promise<boolean> {
+    const auth: AuthContext = typeof principalOrAuth === 'string'
+      ? {
+          principal: { kind: 'user', id: principalOrAuth },
+          workspace_id: workspaceId || null,
+          is_workspace_member: false,
+          permissions: [],
+          is_operator_override: false,
+          role_name: null,
+        }
+      : principalOrAuth;
+    if (!auth.principal || auth.principal.kind !== 'user' || !auth.workspace_id) return false;
+    const principalId = auth.principal.id;
+
     const rows = await this.db.query<{ id: string; status: string; expires_at: string }>(
       'SELECT id, status, expires_at FROM device_grant WHERE user_code = ?',
       [userCode.toUpperCase()],
@@ -89,9 +109,20 @@ export class DeviceGrantService {
     const row = rows[0];
     if (!row || row.status !== 'pending' || new Date(row.expires_at).getTime() <= Date.now()) return false;
 
+    try {
+      await this.tokenService.authorize(auth, {
+        principal_id: principalId,
+        workspace_id: auth.workspace_id,
+        name: 'muster login (device)',
+      });
+    } catch (error) {
+      await this.auditIssuanceRefusal(auth, error);
+      return false;
+    }
+
     await this.db.execute(
       `UPDATE device_grant SET status = 'approved', principal_id = ?, workspace_id = ? WHERE id = ?`,
-      [principalId, workspaceId, row.id],
+      [principalId, auth.workspace_id, row.id],
     );
     return true;
   }
@@ -136,11 +167,20 @@ export class DeviceGrantService {
     }
 
     // approved — mint the token now, exactly once, then the grant is gone.
-    const token = await this.tokenService.create({
-      principal_id: row.principal_id,
-      workspace_id: row.workspace_id,
-      name: 'muster login (device)',
-    });
+    let token: CreatedApiToken;
+    try {
+      token = await this.tokenService.issueForPrincipal(
+        row.principal_id,
+        row.workspace_id,
+        { name: 'muster login (device)' },
+      );
+    } catch (error) {
+      // Consume a grant that can no longer be authorized; it must never be
+      // retryable after membership or principal state changes.
+      await this.db.execute('DELETE FROM device_grant WHERE id = ?', [row.id]);
+      await this.auditIssuanceRefusalForStoredGrant(row.workspace_id, row.principal_id, error);
+      return { ok: false, error: 'access_denied' };
+    }
     await this.db.execute('DELETE FROM device_grant WHERE id = ?', [row.id]);
     await this.auditService?.log({
       workspace_id: row.workspace_id,
@@ -148,8 +188,40 @@ export class DeviceGrantService {
       action: 'token.create',
       target_type: 'api_token',
       target_id: token.id,
-      payload: { name: token.name, via: 'device_grant' },
+      payload: { via: 'device_grant' },
     });
     return { ok: true, token };
+  }
+
+  private async auditIssuanceRefusal(auth: AuthContext, error: unknown): Promise<void> {
+    if (!this.auditService || !auth.principal || !auth.workspace_id) return;
+    if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;
+    try {
+      await this.auditService.logAs(auth, {
+        action: 'token.create_refused',
+        target_type: 'api_token',
+        target_id: undefined,
+        payload: { via: 'device_grant', reason: error instanceof PermissionDeniedError ? 'forbidden' : 'invalid_request' },
+      });
+    } catch {
+      // Refusal handling must remain safe if the audit sink is unavailable.
+    }
+  }
+
+  private async auditIssuanceRefusalForStoredGrant(workspaceId: string, principalId: string, error: unknown): Promise<void> {
+    if (!this.auditService) return;
+    if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;
+    try {
+      await this.auditService.log({
+        workspace_id: workspaceId,
+        actor: { id: principalId, kind: 'user' },
+        action: 'token.create_refused',
+        target_type: 'api_token',
+        target_id: undefined,
+        payload: { via: 'device_grant', reason: 'authorization_changed' },
+      });
+    } catch {
+      // The grant has already been consumed; do not expose audit failures.
+    }
   }
 }

@@ -20,9 +20,21 @@ export class AgentService {
    * @param restrictToRoleId - (MUS-23) A role_id whose permissions are a subset
    *   of the operator's own. When set, the agent is pinned to this role.
    */
-  async register(data: RegisterAgent, operatorUserId?: string, restrictToRoleId?: string): Promise<Agent> {
+  async register(
+    data: RegisterAgent,
+    operatorUserId?: string,
+    restrictToRoleId?: string,
+    workspaceId?: string | null,
+  ): Promise<Agent> {
     const id = data.agent_id || data.id || ulid();
     const now = new Date().toISOString();
+    const membershipRows = operatorUserId && !workspaceId
+      ? await this.db.query<{ workspace_id: string }>(
+          'SELECT workspace_id FROM workspace_member WHERE user_id = ? ORDER BY joined_at ASC LIMIT 1',
+          [operatorUserId],
+        )
+      : [];
+    const resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
 
     // Check if re-binding an existing agent
     const existing = await this.getById(id);
@@ -42,10 +54,11 @@ export class AgentService {
       // MUS-23: On re-bind, set operator_user_id if not already set
       const finalOperatorUserId = existing.operator_user_id || operatorUserId || null;
       const finalRoleId = restrictToRoleId || existing.role_id || null;
+      const finalWorkspaceId = resolvedWorkspaceId || existing.workspace_id || null;
 
       await this.db.execute(
-        `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ? WHERE id = ?`,
-        [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, id]
+        `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ?, workspace_id = ? WHERE id = ?`,
+        [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, finalWorkspaceId, id]
       );
 
       return (await this.getById(id))!;
@@ -67,9 +80,9 @@ export class AgentService {
       : null;
 
     await this.db.execute(
-      `INSERT INTO agent (id, name, capabilities, status, last_seen_at, operator_user_id, role_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, name, capabilitiesStr, status, now, operatorUserId || null, restrictToRoleId || null, now]
+      `INSERT INTO agent (id, name, capabilities, status, last_seen_at, operator_user_id, role_id, workspace_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, name, capabilitiesStr, status, now, operatorUserId || null, restrictToRoleId || null, resolvedWorkspaceId, now]
     );
 
     if (this.eventService) {
@@ -84,7 +97,7 @@ export class AgentService {
       last_seen_at: now,
       operator_user_id: operatorUserId || null,
       role_id: restrictToRoleId || null,
-      workspace_id: null,
+      workspace_id: resolvedWorkspaceId,
       created_at: now,
     };
   }

@@ -15,6 +15,8 @@ import { TokenService, hashToken } from './token.service.js';
 import { AgentService } from './agent.service.js';
 import { AuditService } from './audit.service.js';
 import { CreatedApiToken } from '../shared/types.js';
+import { PermissionDeniedError } from '../shared/permission-enforcer.js';
+import { ValidationError } from '../shared/errors.js';
 
 const AUTH_CODE_TTL_SECONDS = 120;
 
@@ -120,6 +122,16 @@ export class McpOAuthService {
 
   /** Issued after the consent screen picks (or creates) the agent identity and role. */
   async createAuthorizationCode(params: AuthorizeParams): Promise<string> {
+    // Consent normally performs this check through the REST handler, but the
+    // service boundary repeats it so another transport cannot forge a code
+    // for an unrelated agent or workspace.
+    await this.tokenService.authorizeForOperatorOwnedAgent(
+      params.operatorUserId,
+      params.workspaceId,
+      params.agentPrincipalId,
+      { name: 'MCP authorization' },
+    );
+
     const code = crypto.randomBytes(32).toString('hex');
     const now = new Date();
     await this.db.execute(
@@ -166,13 +178,20 @@ export class McpOAuthService {
       return { ok: false, error: 'invalid_grant', error_description: 'PKCE verification failed' };
     }
 
-    return this.issueTokenFamily({
-      clientId: row.client_id,
-      agentPrincipalId: row.agent_principal_id,
-      workspaceId: row.workspace_id,
-      resource: row.resource,
-      familyId: ulid(),
-    });
+    try {
+      return await this.issueTokenFamily({
+        clientId: row.client_id,
+        agentPrincipalId: row.agent_principal_id,
+        operatorUserId: row.operator_user_id,
+        workspaceId: row.workspace_id,
+        resource: row.resource,
+        familyId: ulid(),
+      });
+    } catch (error) {
+      if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) throw error;
+      await this.auditIssuanceRefusal(row.workspace_id, row.operator_user_id, 'mcp_oauth');
+      return { ok: false, error: 'invalid_grant', error_description: 'Authorization could not be completed' };
+    }
   }
 
   /** Refresh Token grant — rotates on every use; a replayed (already-used) token revokes the whole family. */
@@ -200,13 +219,19 @@ export class McpOAuthService {
       await this.tokenService.revoke(row.current_api_token_id);
     }
 
-    return this.issueTokenFamily({
-      clientId: row.client_id,
-      agentPrincipalId: row.agent_principal_id,
-      workspaceId: row.workspace_id,
-      resource: row.resource,
-      familyId: row.family_id,
-    });
+    try {
+      return await this.issueTokenFamily({
+        clientId: row.client_id,
+        agentPrincipalId: row.agent_principal_id,
+        workspaceId: row.workspace_id,
+        resource: row.resource,
+        familyId: row.family_id,
+      });
+    } catch (error) {
+      if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) throw error;
+      await this.auditIssuanceRefusalForAgent(row.workspace_id, row.agent_principal_id, 'mcp_oauth');
+      return { ok: false, error: 'invalid_grant', error_description: 'Authorization could not be completed' };
+    }
   }
 
   async revokeFamily(familyId: string): Promise<void> {
@@ -233,16 +258,31 @@ export class McpOAuthService {
   private async issueTokenFamily(params: {
     clientId: string;
     agentPrincipalId: string;
+    operatorUserId?: string;
     workspaceId: string;
     resource: string;
     familyId: string;
   }): Promise<TokenResult> {
     const client = await this.getClient(params.clientId);
-    const token = await this.tokenService.create({
-      principal_id: params.agentPrincipalId,
-      workspace_id: params.workspaceId,
-      name: `MCP client: ${client?.client_name || params.clientId}`,
-    });
+    const tokenData = { name: `MCP client: ${client?.client_name || params.clientId}` };
+    const token = params.operatorUserId
+      ? await this.tokenService.issueForOperatorOwnedAgent(
+          params.operatorUserId,
+          params.workspaceId,
+          params.agentPrincipalId,
+          tokenData,
+        )
+      : await this.tokenService.issueForCurrentAgentOwner(
+          params.agentPrincipalId,
+          params.workspaceId,
+          tokenData,
+        );
+
+    const actorId = params.operatorUserId || (await this.db.query<{ operator_user_id: string | null }>(
+      'SELECT operator_user_id FROM agent WHERE id = ? AND workspace_id = ?',
+      [params.agentPrincipalId, params.workspaceId],
+    ))[0]?.operator_user_id;
+    if (!actorId) throw new PermissionDeniedError('agent.register', null);
 
     const refreshToken = crypto.randomBytes(32).toString('hex');
     const now = new Date().toISOString();
@@ -254,13 +294,39 @@ export class McpOAuthService {
 
     await this.auditService?.log({
       workspace_id: params.workspaceId,
-      actor: { id: params.agentPrincipalId, kind: 'agent' },
+      actor: { id: actorId, kind: 'user' },
       action: 'token.create',
       target_type: 'api_token',
       target_id: token.id,
-      payload: { name: token.name, via: 'mcp_oauth', client_id: params.clientId },
+      payload: { via: 'mcp_oauth', client_id: params.clientId },
     });
 
     return { ok: true, token, refreshToken };
+  }
+
+  private async auditIssuanceRefusal(workspaceId: string, actorId: string, via: string): Promise<void> {
+    if (!this.auditService) return;
+    try {
+      await this.auditService.log({
+        workspace_id: workspaceId,
+        actor: { id: actorId, kind: 'user' },
+        action: 'token.create_refused',
+        target_type: 'api_token',
+        target_id: undefined,
+        payload: { via, reason: 'authorization_changed' },
+      });
+    } catch {
+      // Do not expose audit sink failures to an OAuth client.
+    }
+  }
+
+  private async auditIssuanceRefusalForAgent(workspaceId: string, agentId: string, via: string): Promise<void> {
+    if (!this.auditService) return;
+    const rows = await this.db.query<{ operator_user_id: string | null }>(
+      'SELECT operator_user_id FROM agent WHERE id = ? AND workspace_id = ?',
+      [agentId, workspaceId],
+    );
+    if (!rows[0]?.operator_user_id) return;
+    await this.auditIssuanceRefusal(workspaceId, rows[0].operator_user_id, via);
   }
 }

@@ -580,7 +580,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   }, withPermission('register_agent', auth, async (args) => {
     // MUS-23: bind agent to the authenticated operator
     const operatorUserId = resolveActor(auth);
-    const result = await services.agentService.register(args, operatorUserId);
+    const result = await services.agentService.register(args, operatorUserId, undefined, auth.workspace_id);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
