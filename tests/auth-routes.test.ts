@@ -24,7 +24,7 @@ import { RoleService } from '../src/services/role.service.js';
 import { AgentService } from '../src/services/agent.service.js';
 import { TokenService } from '../src/services/token.service.js';
 import { AuditService } from '../src/services/audit.service.js';
-import { createAuthRouter } from '../src/api/routes/auth.routes.js';
+import { createAuthRouter, sanitizeRedirectTo } from '../src/api/routes/auth.routes.js';
 import { createAuthMiddleware } from '../src/api/middleware/auth.js';
 import { permissionGuard } from '../src/api/middleware/permission-guard.js';
 import { createHealthRouter } from '../src/api/routes/health.routes.js';
@@ -404,6 +404,32 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     expect(invitationRow!.accepted_at).not.toBeNull();
   });
 
+  it.each([false, undefined, 'true', 1])(
+    'does not admit an invited identity when email_verified is %j',
+    async (emailVerified) => {
+      await signIn('sub-owner-verified', 'owner-verified@example.com');
+      const juniorRole = await roleService.getByKey(workspaceId, 'junior_engineer');
+      const invite = await invitationService.create({
+        workspace_id: workspaceId,
+        email: 'unverified@example.com',
+        role_id: juniorRole!.id,
+      });
+      provider.setNextIdentity('sub-unverified', 'unverified@example.com', emailVerified);
+
+      const loginRes = await fetch(`${baseUrl}/api/v1/auth/login`, { redirect: 'manual' });
+      const authorizeUrl = new URL(loginRes.headers.get('location')!);
+      const callbackUrl = provider.authorize(authorizeUrl.searchParams);
+      const callbackRes = await fetch(callbackUrl.href.replace(callbackUrl.origin, baseUrl), { redirect: 'manual' });
+
+      expect(callbackRes.status).toBe(403);
+      expect(extractCookieValue(parseSetCookie(callbackRes.headers)!, 'muster_session')).toBeNull();
+      const identity = await db.query<{ user_id: string }>('SELECT user_id FROM identity WHERE subject = ?', ['sub-unverified']);
+      expect(identity).toHaveLength(1);
+      expect(await new UserService(db).isWorkspaceMember(workspaceId, identity[0].user_id)).toBe(false);
+      expect((await invitationService.getById(invite.id))!.accepted_at).toBeNull();
+    },
+  );
+
   it('session cookie carries httpOnly, Secure, and SameSite attributes', async () => {
     const { setCookie } = await signIn('sub-cookie-check', 'cookie@example.com');
     expect(setCookie).toContain('HttpOnly');
@@ -421,5 +447,27 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
 
     const meAfter = await fetch(`${baseUrl}/api/v1/auth/me`, { headers: { Cookie: `muster_session=${token}` } });
     expect((await meAfter.json()).authenticated).toBe(false);
+  });
+});
+
+describe('MUS-63: same-origin post-auth redirect validation', () => {
+  it.each([
+    '/\\\\evil.example',
+    '//evil.example',
+    '/%5c%5cevil.example',
+    '/%2f%2fevil.example',
+    '/%252f%252fevil.example',
+    '/%2e%2e//evil.example',
+    '/a/../..///evil.example',
+    '/%2e/%2e%2e//evil.example',
+    '/%252e%252e%252f%252fevil.example',
+    'https://evil.example/path',
+    '/safe\nLocation: https://evil.example',
+  ])('rejects browser-ambiguous destination %j', value => {
+    expect(sanitizeRedirectTo(value)).toBeNull();
+  });
+
+  it('canonicalizes valid local paths while preserving query and fragment', () => {
+    expect(sanitizeRedirectTo('/projects/../cards?view=mine#top')).toBe('/cards?view=mine#top');
   });
 });
