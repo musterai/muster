@@ -93,6 +93,25 @@ describe('renderMarkdown sanitization', () => {
     expect((window as unknown as Record<string, unknown>).__pwned).toBeUndefined();
   });
 
+  it('neutralizes the detached-resource payload from GHSA-55q2-fjhq-7xh7', () => {
+    const host = document.createElement('div');
+    host.innerHTML = renderMarkdown(`
+      <footer>
+        <img
+          src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+          onload="window.__pwned = 1"
+        >
+      </footer>
+      <div>safe</div>
+    `);
+    document.body.appendChild(host);
+
+    expect(host.textContent).toContain('safe');
+    expect(host.querySelector('[onload]')).toBeNull();
+    expect(host.querySelector('img[src]')).toBeNull();
+    expect((window as unknown as Record<string, unknown>).__pwned).toBeUndefined();
+  });
+
   it('preserves legitimate markdown structure', () => {
     const html = renderMarkdown(
       '# Title\n\nSome **bold** and `code`.\n\n- one\n- two\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```js\nconst x = 1;\n```'

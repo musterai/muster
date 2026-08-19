@@ -9,7 +9,7 @@ export function createColumnRouter(columnService: ColumnService): Router {
 
   router.post('/boards/:boardId/columns', ...validateRequest({ body: columnCreateSchema, params: boardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const column = await columnService.create({ ...req.body, board_id: req.params.boardId });
+      const column = await columnService.create({ ...req.body, board_id: req.params.boardId }, undefined, undefined, req.authContext);
       res.status(201).json(column);
     } catch (err) {
       next(err);
@@ -18,7 +18,7 @@ export function createColumnRouter(columnService: ColumnService): Router {
 
   router.put('/columns/:id', ...validateRequest({ body: columnUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const column = await columnService.update(req.params.id, req.body);
+      const column = await columnService.update(req.params.id, req.body, undefined, undefined, req.authContext);
       res.json(column);
     } catch (err) {
       next(err);
@@ -27,7 +27,7 @@ export function createColumnRouter(columnService: ColumnService): Router {
 
   router.delete('/columns/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await columnService.delete(req.params.id);
+      await columnService.delete(req.params.id, undefined, undefined, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);

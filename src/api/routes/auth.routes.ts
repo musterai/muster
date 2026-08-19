@@ -34,6 +34,8 @@ import {
   workspaceIdParamsSchema,
 } from '../schemas.js';
 import { sanitizeSameOriginPath } from '../../shared/url-security.js';
+import { ValidationError } from '../../shared/errors.js';
+import { bootstrapWorkspaceId } from '../../services/helpers/workspace-scope.helper.js';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -239,7 +241,10 @@ export function createAuthRouter(
       }
 
       const admitted = true;
-      const wsRows = await db.query<{ id: string; name: string }>('SELECT id, name FROM workspace LIMIT 1');
+      const wsRows = await db.query<{ id: string; name: string }>(
+        'SELECT id, name FROM workspace WHERE id = ?',
+        [auth.workspace_id],
+      );
       const workspace = wsRows[0] || null;
       const userRows = await db.query<any>(
         'SELECT id, email, display_name, avatar_url, status FROM app_user WHERE id = ?',
@@ -276,32 +281,21 @@ export function createAuthRouter(
       const userIdParam = typeof req.body?.user_id === 'string' ? req.body.user_id.trim() : null;
       const displayNameParam = typeof req.body?.display_name === 'string' ? req.body.display_name.trim() : null;
 
+      let workspaceId: string | null = null;
       let user: any = null;
-      let needsLocalUser = false;
-
-      if (userIdParam) {
-        user = await userService.findById(userIdParam);
-      } else if (displayNameParam) {
-        user = await userService.findByDisplayName(displayNameParam);
-        if (!user) {
-          if (displayNameParam.length > 80) {
-            res.status(400).json({ error: 'bad_request', message: 'display_name must be 80 characters or fewer' });
-            return;
-          }
-          needsLocalUser = true;
-        }
-      }
-
-      if (!user) {
-        res.status(400).json({ error: 'bad_request', message: 'user_id or display_name is required' });
-        return;
-      }
-
-      const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
-      const workspaceId = wsRows[0]?.id || null;
-
+      let session: Awaited<ReturnType<SessionService['create']>>;
       await db.transaction(async tx => {
-        if (needsLocalUser) user = await userService.createLocalUser(displayNameParam!, tx);
+        workspaceId = await bootstrapWorkspaceId(tx);
+        if (userIdParam) {
+          user = await userService.findById(userIdParam, tx);
+        } else if (displayNameParam) {
+          ({ user } = await userService.findOrCreateLocalUser(displayNameParam, workspaceId, tx));
+        }
+
+        if (!user) {
+          throw new ValidationError('user_id or display_name is required');
+        }
+
         if (workspaceId) {
           const isMember = await userService.isWorkspaceMember(workspaceId, user.id, tx);
           if (!isMember) {
@@ -318,15 +312,14 @@ export function createAuthRouter(
           payload: { display_name: user.display_name },
           ip: req.ip || null,
         }, tx);
+        session = await sessionService.create(user.id, {
+          userAgent: req.headers['user-agent'] || null,
+          ip: req.ip || null,
+          ttlMs: SESSION_TTL_MS,
+        }, tx);
       });
 
-      const session = await sessionService.create(user.id, {
-        userAgent: req.headers['user-agent'] || null,
-        ip: req.ip || null,
-        ttlMs: SESSION_TTL_MS,
-      });
-
-      res.setHeader('Set-Cookie', serializeCookie(SESSION_COOKIE_NAME, session.token, {
+      res.setHeader('Set-Cookie', serializeCookie(SESSION_COOKIE_NAME, session!.token, {
         httpOnly: true,
         secure: isSecureRequest(req),
         sameSite: 'Lax',

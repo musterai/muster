@@ -7,6 +7,8 @@
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { ValidationError } from '../shared/errors.js';
+import type { AuthContext } from '../shared/auth-context.js';
+import { assertResourceWorkspace, assertWorkspace } from './helpers/workspace-scope.helper.js';
 
 export interface AppUser {
   id: string;
@@ -79,20 +81,58 @@ export class UserService {
     };
   }
 
-  async findById(id: string): Promise<AppUser | null> {
-    const rows = await this.db.query<AppUser>(
+  async findById(id: string, adapter: DatabaseAdapter = this.db): Promise<AppUser | null> {
+    const rows = await adapter.query<AppUser>(
       'SELECT id, email, display_name, avatar_url, status, created_at FROM app_user WHERE id = ?',
       [id],
     );
     return rows[0] || null;
   }
 
-  async findByDisplayName(displayName: string): Promise<AppUser | null> {
-    const rows = await this.db.query<AppUser>(
+  async findByDisplayName(displayName: string, adapter: DatabaseAdapter = this.db): Promise<AppUser | null> {
+    const rows = await adapter.query<AppUser>(
       'SELECT id, email, display_name, avatar_url, status, created_at FROM app_user WHERE LOWER(display_name) = LOWER(?) LIMIT 1',
       [displayName.trim()],
     );
     return rows[0] || null;
+  }
+
+  /**
+   * Resolve the open-mode display-name selector, creating it exactly once.
+   * SQLite serializes write transactions through its adapter queue. Postgres
+   * needs an explicit workspace lock so two first-use requests cannot both
+   * observe the same name as absent before inserting duplicate users.
+   *
+   * The caller may pass its transaction adapter to keep membership, audit and
+   * session writes in the same commit as first-use creation.
+   */
+  async findOrCreateLocalUser(
+    displayName: string,
+    workspaceId: string | null,
+    adapter?: DatabaseAdapter,
+  ): Promise<{ user: AppUser; isNewUser: boolean }> {
+    if (!adapter) {
+      return this.db.transaction(tx => this.findOrCreateLocalUser(displayName, workspaceId, tx));
+    }
+
+    const normalizedName = displayName.trim();
+    if (normalizedName.length === 0 || normalizedName.length > 80) {
+      throw new ValidationError('display_name must be between 1 and 80 characters');
+    }
+    if (adapter.dialect === 'postgres') {
+      if (workspaceId) {
+        await adapter.query('SELECT id FROM workspace WHERE id = ? FOR UPDATE', [workspaceId]);
+      } else {
+        // A bootstrapped server always has a workspace. Keep an embedding
+        // caller without one race-safe rather than relying on an empty-row
+        // SELECT lock, which would protect nothing.
+        await adapter.query('LOCK TABLE app_user IN SHARE ROW EXCLUSIVE MODE');
+      }
+    }
+
+    const existing = await this.findByDisplayName(normalizedName, adapter);
+    if (existing) return { user: existing, isNewUser: false };
+    return { user: await this.createLocalUser(normalizedName, adapter), isNewUser: true };
   }
 
   /**
@@ -144,7 +184,8 @@ export class UserService {
    * and the agent roster's operator lookup (MUS-32) both read this. No
    * liveness/status column: that telemetry is agent-only, see design §4.1.
    */
-  async listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+  async listMembers(workspaceId: string, auth?: AuthContext): Promise<WorkspaceMember[]> {
+    if (auth) assertWorkspace(auth, workspaceId);
     return this.db.query<WorkspaceMember>(
       `SELECT u.id, u.email, u.display_name, u.avatar_url, wm.role_id, r.name as role_name, wm.joined_at
        FROM workspace_member wm
@@ -244,8 +285,12 @@ export class UserService {
   }
 
   /** Change a member's role. Refuses to demote the last remaining admin — a workspace must always keep an owner. */
-  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.changeMemberRole(workspaceId, userId, newRoleId, tx));
+  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string, adapter?: DatabaseAdapter, auth?: AuthContext): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.changeMemberRole(workspaceId, userId, newRoleId, tx, auth));
+    if (auth) {
+      assertWorkspace(auth, workspaceId);
+      await assertResourceWorkspace(adapter, auth, 'role', newRoleId);
+    }
     await (async tx => {
       await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(
@@ -284,8 +329,9 @@ export class UserService {
    * "Unassigned" group rather than being deleted or left pointing at a
    * principal no longer in the workspace.
    */
-  async removeMember(workspaceId: string, userId: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.removeMember(workspaceId, userId, tx));
+  async removeMember(workspaceId: string, userId: string, adapter?: DatabaseAdapter, auth?: AuthContext): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.removeMember(workspaceId, userId, tx, auth));
+    if (auth) assertWorkspace(auth, workspaceId);
     await (async tx => {
       await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(

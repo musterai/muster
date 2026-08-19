@@ -22,7 +22,7 @@ export function createRoleRouter(
 
   router.get('/workspaces/:workspaceId/roles', ...validateRequest({ params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const roles = await roleService.list(req.params.workspaceId);
+      const roles = await roleService.list(req.params.workspaceId, req.authContext);
       res.json(roles);
     } catch (err) {
       next(err);
@@ -31,7 +31,7 @@ export function createRoleRouter(
 
   router.get('/roles/:id', ...validateRequest({ params: roleIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const role = await roleService.getById(req.params.id);
+      const role = await roleService.getById(req.params.id, req.authContext);
       if (!role) return res.status(404).json({ error: 'Role not found' });
       res.json(role);
     } catch (err) {
@@ -45,7 +45,7 @@ export function createRoleRouter(
       assertPermissionsGrantable(auth, req.body.permissions || []);
       let role;
       await db.transaction(async tx => {
-        role = await roleService.create({ ...req.body, workspace_id: req.params.workspaceId }, tx);
+        role = await roleService.create({ ...req.body, workspace_id: req.params.workspaceId }, tx, auth);
         await auditService.logAs(auth, {
           workspace_id: req.params.workspaceId,
           action: 'role.create',
@@ -67,7 +67,7 @@ export function createRoleRouter(
       if (req.body.permissions) assertPermissionsGrantable(auth, req.body.permissions);
       let role;
       await db.transaction(async tx => {
-        role = await roleService.update(req.params.id, req.body, tx);
+        role = await roleService.update(req.params.id, req.body, tx, auth);
         await auditService.logAs(auth, {
           workspace_id: role.workspace_id,
           action: 'role.update',
@@ -85,9 +85,10 @@ export function createRoleRouter(
 
   router.delete('/roles/:id', ...validateRequest({ params: roleIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const role = await roleService.getById(req.params.id);
+      const auth = req.authContext || OPEN_AUTH_CONTEXT;
+      const role = await roleService.getById(req.params.id, auth);
       await db.transaction(async tx => {
-        await roleService.delete(req.params.id, tx);
+        await roleService.delete(req.params.id, tx, auth);
         await auditService.logAs(req.authContext, {
           workspace_id: role?.workspace_id || null,
           action: 'role.delete',
@@ -107,7 +108,7 @@ export function createRoleRouter(
     try {
       let role;
       await db.transaction(async tx => {
-        role = await roleService.clone(req.params.id, req.body.new_key, req.body.new_name, tx);
+        role = await roleService.clone(req.params.id, req.body.new_key, req.body.new_name, tx, req.authContext || OPEN_AUTH_CONTEXT);
         await auditService.logAs(req.authContext, {
           workspace_id: role.workspace_id,
           action: 'role.clone',

@@ -2,54 +2,113 @@
 import { chromium } from 'playwright';
 import AxeBuilder from '@axe-core/playwright';
 import { fork, ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
-import Database from 'better-sqlite3';
-import { ulid } from 'ulid';
+import { fileURLToPath } from 'node:url';
 import { COLOR_PROFILES, type AppearanceMode } from '../src/web/theme.js';
 
-const TEST_PORT = 3094;
-const TEST_DB_PATH = path.join(process.cwd(), 'data', `e2e-browser-${Date.now()}.db`);
-const APP_URL = `http://127.0.0.1:${TEST_PORT}`;
+const LOOPBACK_HOST = '127.0.0.1';
+const SERVER_START_TIMEOUT_MS = 15_000;
+const SERVER_STOP_TIMEOUT_MS = 3_000;
+const SERVER_KILL_TIMEOUT_MS = 2_000;
+
+export interface BrowserUiRunOptions {
+  forceFailureAfterReady?: boolean;
+  lifecycleOnly?: boolean;
+}
+
+export interface BrowserUiRunSummary {
+  port: number;
+  dbPath: string;
+  serverPid: number | undefined;
+  serverExitCode: number | null;
+  serverSignal: NodeJS.Signals | null;
+}
+
+export class BrowserUiTestRunError extends Error {
+  constructor(
+    message: string,
+    readonly summary: BrowserUiRunSummary,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'BrowserUiTestRunError';
+  }
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function browserDbFiles(dbPath: string): string[] {
+  return [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
+}
+
 function removeDbFiles(dbPath: string) {
-  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+  const errors: unknown[] = [];
+  for (const f of browserDbFiles(dbPath)) {
     if (fs.existsSync(f)) {
       try {
         fs.unlinkSync(f);
-      } catch {}
+      } catch (error) {
+        errors.push(error);
+      }
     }
   }
-}
-
-function seedBrowserIdentity(dbPath: string) {
-  const db = new Database(dbPath);
-  try {
-    const workspace = db.prepare('SELECT id FROM workspace LIMIT 1').get() as { id: string } | undefined;
-    if (!workspace) throw new Error('Isolated test workspace was not initialized');
-    const ownerRole = db.prepare("SELECT id FROM role WHERE workspace_id = ? AND key = 'owner'").get(workspace.id) as { id: string } | undefined;
-    if (!ownerRole) throw new Error('Isolated test owner role was not initialized');
-    const userId = ulid();
-    const now = new Date().toISOString();
-    db.transaction(() => {
-      db.prepare('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)').run(userId, 'user', now);
-      db.prepare('INSERT INTO app_user (id, email, display_name, status, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(userId, null, 'Browser UI Tester', 'active', now);
-      db.prepare('INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at, invited_by) VALUES (?, ?, ?, ?, ?)')
-        .run(workspace.id, userId, ownerRole.id, now, null);
-    })();
-  } finally {
-    db.close();
+  if (errors.length > 0) {
+    throw new AggregateError(errors, `Failed to remove isolated browser database files for ${dbPath}`);
   }
 }
 
-async function waitForServer(url: string, timeoutMs = 15000) {
+async function reserveAvailablePort(): Promise<number> {
+  const reservation = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    reservation.once('error', reject);
+    reservation.listen(0, LOOPBACK_HOST, () => resolve());
+  });
+  const address = reservation.address();
+  if (!address || typeof address === 'string') {
+    reservation.close();
+    throw new Error('Failed to allocate an isolated browser E2E port');
+  }
+  await new Promise<void>((resolve, reject) =>
+    reservation.close((error) => (error ? reject(error) : resolve())),
+  );
+  return address.port;
+}
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+async function waitForOwnedServer(
+  child: ChildProcess,
+  url: string,
+  ownershipMarker: string,
+  getChildOutput: () => string,
+  timeoutMs = SERVER_START_TIMEOUT_MS,
+) {
   const start = Date.now();
+  while (Date.now() - start < timeoutMs && !getChildOutput().includes(ownershipMarker)) {
+    if (childHasExited(child)) {
+      throw new Error(
+        `Isolated browser server exited before claiming its port (code=${child.exitCode}, signal=${child.signalCode}).\n${getChildOutput()}`,
+      );
+    }
+    await sleep(25);
+  }
+  if (!getChildOutput().includes(ownershipMarker)) {
+    throw new Error(`Isolated browser server did not emit its ownership marker within ${timeoutMs}ms.\n${getChildOutput()}`);
+  }
+
   while (Date.now() - start < timeoutMs) {
+    if (childHasExited(child)) {
+      throw new Error(
+        `Isolated browser server exited before health readiness (code=${child.exitCode}, signal=${child.signalCode}).\n${getChildOutput()}`,
+      );
+    }
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
       if (res.ok) {
@@ -60,6 +119,38 @@ async function waitForServer(url: string, timeoutMs = 15000) {
     await sleep(300);
   }
   throw new Error(`Server failed to start at ${url} within ${timeoutMs}ms`);
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return true;
+  return new Promise((resolve) => {
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once('exit', onExit);
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    // Close the small gap between the caller's first status check and listener
+    // installation so a very fast child exit cannot consume the whole timeout.
+    if (childHasExited(child)) {
+      child.off('exit', onExit);
+      clearTimeout(timer);
+      resolve(true);
+    }
+  });
+}
+
+async function terminateChild(child: ChildProcess): Promise<void> {
+  if (childHasExited(child)) return;
+  child.kill('SIGTERM');
+  if (await waitForChildExit(child, SERVER_STOP_TIMEOUT_MS)) return;
+
+  child.kill('SIGKILL');
+  if (await waitForChildExit(child, SERVER_KILL_TIMEOUT_MS)) return;
+  throw new Error(`Isolated browser server PID ${child.pid ?? 'unknown'} did not exit after SIGTERM/SIGKILL`);
 }
 
 async function assertAccessibleDialog(page: any, accessibleName: string | RegExp) {
@@ -76,7 +167,6 @@ async function assertAccessibleDialog(page: any, accessibleName: string | RegExp
     })));
     throw new Error(`Unable to locate accessible dialog "${accessibleName}"; raw state: ${JSON.stringify(rawDialogs)}; ${error}`);
   }
-
   const state = await dialog.evaluate((element: HTMLElement) => {
     const root = document.getElementById('root');
     return {
@@ -167,7 +257,6 @@ async function measureRenderedContrast(locator: any, label: string, kind: Contra
       const secondLuminance = luminance(second);
       return (Math.max(firstLuminance, secondLuminance) + 0.05) / (Math.min(firstLuminance, secondLuminance) + 0.05);
     };
-
     const style = getComputedStyle(element);
     const background = effectiveBackground(kind === 'focus' ? element.parentElement : element);
     const foreground = composite(parse(kind === 'focus' ? style.outlineColor : style.color), background);
@@ -180,15 +269,11 @@ async function measureRenderedContrast(locator: any, label: string, kind: Contra
 }
 
 async function assertRenderedAppearanceContrast(page: any, accountDialog: any) {
-  // tsx preserves nested callback names with an esbuild helper. Playwright
-  // serializes this evaluator into the page, so expose the no-op helper there
-  // before evaluating the contrast math in Chromium.
   await page.evaluate('globalThis.__name = function (target) { return target; };');
   const modes: AppearanceMode[] = ['dark', 'light'];
   const matrix: Array<{ profile: string; mode: AppearanceMode; samples: Awaited<ReturnType<typeof measureRenderedContrast>>[] }> = [];
   const appearanceTab = accountDialog.getByRole('tab', { name: 'Appearance & Theme' });
   const tokensTab = accountDialog.getByRole('tab', { name: 'API Tokens' });
-
   for (const profile of COLOR_PROFILES) {
     for (const mode of modes) {
       await appearanceTab.click();
@@ -199,7 +284,6 @@ async function assertRenderedAppearanceContrast(page: any, accountDialog: any) {
         const root = document.documentElement;
         return root.dataset.profile === profile && root.classList.contains(mode);
       }, { profile: profile.id, mode });
-
       const primary = accountDialog.locator('.muster-text-primary:visible').first();
       const muted = accountDialog.locator('.muster-text-muted:visible').first();
       await tokensTab.focus();
@@ -212,7 +296,6 @@ async function assertRenderedAppearanceContrast(page: any, accountDialog: any) {
         measureRenderedContrast(muted, 'muted text', 'text'),
         measureRenderedContrast(appearanceTab, 'account-tab focus ring', 'focus'),
       ]);
-
       await tokensTab.click();
       const tokenRow = accountDialog.locator('tbody tr').filter({ hasText: 'Browser nested token' });
       await tokenRow.waitFor();
@@ -224,7 +307,6 @@ async function assertRenderedAppearanceContrast(page: any, accountDialog: any) {
         await measureRenderedContrast(tokenRow.locator('.muster-badge-success'), 'success status', 'text'),
         await measureRenderedContrast(dangerControl, 'danger control', 'non-text'),
       );
-
       const failures = samples.filter((sample) => sample.ratio + 0.001 < sample.threshold);
       if (failures.length > 0) {
         throw new Error(`Rendered WCAG AA contrast failed for ${profile.id}/${mode}: ${JSON.stringify(failures)}`);
@@ -232,43 +314,72 @@ async function assertRenderedAppearanceContrast(page: any, accountDialog: any) {
       matrix.push({ profile: profile.id, mode, samples });
     }
   }
-
   if (matrix.length !== COLOR_PROFILES.length * modes.length) {
     throw new Error(`Rendered appearance matrix is incomplete: ${matrix.length} combinations`);
   }
   console.log(`  ✓ Rendered contrast: ${matrix.length} profile/mode combinations × 6 real UI surfaces meet WCAG AA.`);
 }
 
-async function runBrowserUiTest() {
+export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promise<BrowserUiRunSummary> {
+  const testPort = await reserveAvailablePort();
+  const testDbPath = path.join(
+    process.cwd(),
+    'data',
+    `e2e-browser-${Date.now()}-${process.pid}-${randomUUID()}.db`,
+  );
+  const appUrl = `http://${LOOPBACK_HOST}:${testPort}`;
+
   console.log('===========================================================');
   console.log('   STARTING ISOLATED BROWSER E2E TEST (Temp DB File Mode)');
-  console.log('   Target URL: ' + APP_URL);
-  console.log('   Test DB File: ' + TEST_DB_PATH);
+  console.log('   Target URL: ' + appUrl);
+  console.log('   Test DB File: ' + testDbPath);
   console.log('===========================================================\n');
 
-  removeDbFiles(TEST_DB_PATH);
+  removeDbFiles(testDbPath);
 
-  console.log(`[Server Setup] Starting isolated Muster server process on port ${TEST_PORT}...`);
+  console.log(`[Server Setup] Starting isolated Muster server process on port ${testPort}...`);
   const serverProcess: ChildProcess = fork(path.join(process.cwd(), 'dist', 'index.js'), [], {
     env: {
       ...process.env,
-      MUSTER_PORT: String(TEST_PORT),
-      MUSTER_HOST: '127.0.0.1',
-      MUSTER_DB_PATH: TEST_DB_PATH,
+      MUSTER_PORT: String(testPort),
+      MUSTER_HOST: LOOPBACK_HOST,
+      MUSTER_DB_PATH: testDbPath,
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
+
+  let childOutput = '';
+  const captureOutput = (data: Buffer) => {
+    childOutput = `${childOutput}${data.toString()}`.slice(-32_768);
+  };
+  serverProcess.stdout?.on('data', captureOutput);
+  serverProcess.stderr?.on('data', captureOutput);
 
   let browser: any = null;
   let page: any = null;
+  let runFailure: unknown;
+  let cleanupFailure: unknown;
   try {
-    // Wait for server health endpoint
+    // Require the child process itself to claim the dynamically allocated port
+    // before accepting health. A stale or unrelated listener can never satisfy
+    // this ownership marker, and an early child exit rejects immediately.
     console.log('[Server Setup] Waiting for health endpoint readiness...');
-    await waitForServer(`${APP_URL}/api/v1/health`);
-    seedBrowserIdentity(TEST_DB_PATH);
+    await waitForOwnedServer(
+      serverProcess,
+      `${appUrl}/api/v1/health`,
+      `REST API: http://${LOOPBACK_HOST}:${testPort}/api/v1`,
+      () => childOutput,
+    );
     console.log('  ✓ Test server online and healthy!\n');
 
-    browser = await chromium.launch({ headless: true });
+    if (options.forceFailureAfterReady) {
+      throw new Error('Intentional browser E2E failure after owned-server readiness');
+    }
+
+    if (options.lifecycleOnly) {
+      console.log('  ✓ Isolated browser server lifecycle completed without launching Playwright.');
+    } else {
+      browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     page = await context.newPage();
 
@@ -278,7 +389,7 @@ async function runBrowserUiTest() {
     });
     // Step 1: Load Web UI
     console.log('[1/8] Loading Web UI...');
-    await page.goto(APP_URL, { waitUntil: 'domcontentloaded' });
+    await page.goto(appUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('header', { timeout: 10000 });
     const pageTitle = await page.title();
     console.log(`  ✓ Web UI Loaded! Title: "${pageTitle}"`);
@@ -292,24 +403,20 @@ async function runBrowserUiTest() {
 
     // Establish an open-mode browser identity so the comment controls can be
     // exercised as the comment author rather than skipped on an empty DB.
-    const whoAreYou = page.getByRole('button', { name: /Who are you/i });
-    if (await whoAreYou.isVisible()) {
-      await whoAreYou.click();
-      const nameInput = page.locator('input[placeholder="Your name"]');
+    const setName = page.getByRole('button', { name: /Set Name|Who are you/i });
+    if (await setName.isVisible()) {
+      await setName.click();
+      const nameInput = page.locator('input[placeholder="Your display name"], input[placeholder="Your name"]');
       if (await nameInput.isVisible()) {
         await nameInput.fill('Browser UI Tester');
-        await page.getByRole('button', { name: 'Save' }).click();
+        const [identityResponse] = await Promise.all([
+          page.waitForResponse((response) => response.url().endsWith('/api/v1/auth/local')),
+          page.getByRole('button', { name: 'Save / Switch Name', exact: true }).click(),
+        ]);
+        if (!identityResponse.ok()) {
+          throw new Error(`Local identity request failed (${identityResponse.status()}): ${await identityResponse.text()}`);
+        }
         await page.waitForSelector('text=Browser UI Tester');
-        console.log('  ✓ Open-mode browser identity established.');
-      }
-    } else {
-      const setName = page.getByTitle('Account & Identity Settings');
-      if (await setName.isVisible()) {
-        await setName.click();
-        const account = await assertAccessibleDialog(page, 'Operator');
-        await account.locator('input[placeholder="Your display name"]').fill('Browser UI Tester');
-        await account.getByRole('button', { name: 'Save / Switch Name' }).click();
-        await account.waitFor({ state: 'detached' });
         console.log('  ✓ Open-mode browser identity established.');
       }
     }
@@ -371,7 +478,7 @@ async function runBrowserUiTest() {
     console.log('\n[3/8] Testing Kanban Board & Column Creation (+ Add Column)...');
     await page.getByRole('button', { name: 'Board settings' }).click();
     await assertAccessibleDialog(page, 'Board Settings');
-    await page.getByRole('button', { name: /Add New Column/ }).click();
+    await page.getByRole('button', { name: 'Add New Column', exact: true }).click();
     await assertAccessibleDialog(page, 'Add Column');
 
     await page.fill('input[placeholder*="In Testing"]', 'Quality Assurance');
@@ -382,7 +489,7 @@ async function runBrowserUiTest() {
 
     // Step 4: Create Card
     console.log('\n[4/8] Testing Card Creation (+ Add Card / + Card)...');
-    await page.locator('button[title="Add card to column"]').first().click();
+    await page.getByTitle('Add card to column').first().click();
     await assertAccessibleDialog(page, 'Create card');
 
     const cardForm = page.locator('form').filter({ hasText: 'Task Title' });
@@ -435,26 +542,20 @@ async function runBrowserUiTest() {
       }
     }
     await page.fill('textarea[placeholder*="Add comment"]', 'Verified browser UI functionality.');
-    const commentSubmit = page.getByRole('button', { name: 'Comment', exact: true });
-    if (await commentSubmit.isEnabled()) {
-      await commentSubmit.click();
-      await page.waitForSelector('text=Verified browser UI functionality.');
-      console.log('  ✓ Comment posted and rendered in modal.');
+    await page.click('button[type="submit"]:has-text("Comment")');
+    await page.waitForSelector('text=Verified browser UI functionality.');
+    console.log('  ✓ Comment posted and rendered in modal.');
 
-      await page.getByRole('button', { name: 'Edit comment' }).click();
-      const editCommentForm = page.getByRole('button', { name: 'Save', exact: true }).locator('xpath=ancestor::form');
-      await editCommentForm.locator('textarea').fill('Edited browser UI functionality.');
-      await editCommentForm.getByRole('button', { name: 'Save', exact: true }).click();
-      await page.waitForSelector('text=Edited browser UI functionality.');
-      await page.waitForSelector('text=Verified browser UI functionality.', { state: 'detached' });
-      console.log('  ✓ Comment edited and refreshed in modal.');
+    await page.getByRole('button', { name: 'Edit comment' }).click();
+    await page.locator('textarea:not([placeholder])').fill('Edited browser UI functionality.');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.waitForSelector('text=Edited browser UI functionality.');
+    await page.waitForSelector('text=Verified browser UI functionality.', { state: 'detached' });
+    console.log('  ✓ Comment edited and refreshed in modal.');
 
-      await page.getByRole('button', { name: 'Delete comment' }).click();
-      await page.waitForSelector('text=Edited browser UI functionality.', { state: 'detached' });
-      console.log('  ✓ Comment deleted and refreshed in modal.');
-    } else {
-      console.log('  ✓ Empty isolated registry correctly requires an attributed agent before commenting.');
-    }
+    await page.getByRole('button', { name: 'Delete comment' }).click();
+    await page.waitForSelector('text=Edited browser UI functionality.', { state: 'detached' });
+    console.log('  ✓ Comment deleted and refreshed in modal.');
 
     // Close card modal
     // Assignment/comment actions refresh board data asynchronously. Let the
@@ -482,6 +583,7 @@ async function runBrowserUiTest() {
     await assertAccessibleDialog(page, 'Register Agent');
 
     await page.fill('input[placeholder*="my-agent"]', 'Browser-Testing-Bot');
+    await page.fill('input[placeholder*="code, testing"]', 'testing');
     await page.click('button[type="submit"]:has-text("Add User")');
     await page.locator('h3').filter({ hasText: 'Browser-Testing-Bot' }).waitFor();
     console.log('  ✓ New agent "Browser-Testing-Bot" registered and displayed in grid.');
@@ -525,10 +627,7 @@ async function runBrowserUiTest() {
     await page.waitForSelector('text=events');
     console.log('  ✓ Activity Log rendered cleanly.');
 
-    // Accessibility regression checks exercise the shared dialog lifecycle,
-    // keyboard containment, mobile target sizing and reduced-motion contract.
     console.log('\n[A11y] Testing dialog focus, semantics, touch targets and motion preferences...');
-
     const overlayInventory = [
       ['src/web/components/TokensView.tsx', 2],
       ['src/web/components/KnowledgeBase.tsx', 5],
@@ -545,7 +644,6 @@ async function runBrowserUiTest() {
       }
     }
 
-    // AgentGrid's edit overlay must use the same modal boundary.
     await page.getByRole('button', { name: /Agents/ }).click();
     await assertNoSeriousAxeViolations(page, 'agents view');
     await page.getByTitle('Edit Agent Attributes').first().click();
@@ -554,8 +652,6 @@ async function runBrowserUiTest() {
     await page.keyboard.press('Escape');
     await editAgentDialog.waitFor({ state: 'detached' });
 
-    // Account tabs follow the APG automatic-activation pattern: one roving tab
-    // stop, Arrow/Home/End navigation, and a stable nested dialog stack.
     await page.locator('header button[title*="Account"]').click();
     const accountDialog = await assertAccessibleDialog(page, /Operator|Browser UI Tester/);
     await assertNoSeriousAxeViolations(page, 'account appearance dialog');
@@ -590,8 +686,6 @@ async function runBrowserUiTest() {
       throw new Error('Account Home key did not activate and focus the first tab');
     }
 
-    // TokensView: verify nested focus isolation, one-layer Escape, focus
-    // restoration, and the reveal-once dialog that replaces the form layer.
     await accountDialog.getByRole('tab', { name: 'API Tokens' }).click();
     const newTokenTrigger = accountDialog.getByRole('button', { name: 'New Token' }).first();
     await newTokenTrigger.click();
@@ -613,8 +707,6 @@ async function runBrowserUiTest() {
     await tokenCreatedDialog.waitFor({ state: 'detached' });
     await assertRenderedAppearanceContrast(page, accountDialog);
 
-    // RolesPanel and InvitationsPanel each contribute a nested overlay under
-    // the account dialog and must participate in the same stack.
     await accountDialog.getByRole('tab', { name: 'Workspace Admin' }).click();
     await accountDialog.getByRole('button', { name: /^Roles \(/ }).click();
     await accountDialog.getByRole('button', { name: 'New Role' }).click();
@@ -638,9 +730,6 @@ async function runBrowserUiTest() {
     await page.keyboard.press('Escape');
     await accountDialog.waitFor({ state: 'detached' });
 
-    // KnowledgeBase owns five overlay states. Exercise create, add and edit
-    // fact directly, then enter the one-node graph to exercise entity edit and
-    // relation creation without mutating either form.
     await page.getByRole('button', { name: /Knowledge Base/ }).click();
     await page.getByRole('button', { name: 'New KB' }).click();
     const createKbDialog = await assertAccessibleDialog(page, 'Create New Knowledge Base');
@@ -648,7 +737,6 @@ async function runBrowserUiTest() {
     await createKbDialog.getByLabel('KB Name').fill('Browser Accessibility KB');
     await createKbDialog.getByRole('button', { name: 'Create KB' }).click();
     await createKbDialog.waitFor({ state: 'detached' });
-
     await page.getByRole('button', { name: 'Add Knowledge' }).click();
     const addKnowledgeDialog = await assertAccessibleDialog(page, 'Add Gained Knowledge');
     await addKnowledgeDialog.getByLabel('Title').fill('Accessible overlay inventory');
@@ -659,12 +747,10 @@ async function runBrowserUiTest() {
     await addKnowledgeDialog.waitFor({ state: 'detached' });
     await page.getByRole('tab', { name: /Facts \(/ }).click();
     await page.getByText('Accessible overlay inventory', { exact: true }).waitFor();
-
     await page.getByTitle('Edit Fact').first().click();
     const editFactDialog = await assertAccessibleDialog(page, 'Edit Gained Knowledge Fact');
     await page.keyboard.press('Escape');
     await editFactDialog.waitFor({ state: 'detached' });
-
     await page.getByRole('tab', { name: /Graph \(/ }).click();
     const graphCanvas = page.locator('.vis-network canvas').first();
     await graphCanvas.waitFor();
@@ -682,8 +768,6 @@ async function runBrowserUiTest() {
     await page.keyboard.press('Escape');
     await relationDialog.waitFor({ state: 'detached' });
 
-    // Create a second board card so the initial roving tab stop and the DnD
-    // keyboard lift/reorder/drop/cancel lifecycle can be observed end-to-end.
     await page.getByRole('button', { name: /Kanban Board/ }).click();
     await assertNoSeriousAxeViolations(page, 'kanban board');
     await page.locator('button[title="Add card to column"]').first().click();
@@ -694,15 +778,12 @@ async function runBrowserUiTest() {
     await page.getByRole('dialog', { name: /Keyboard reorder companion/ }).waitFor();
     await page.getByTitle('Close Task').click();
     await page.getByRole('dialog', { name: /Keyboard reorder companion/ }).waitFor({ state: 'detached' });
-
     const cardOpeners = page.locator('[data-card-open]');
     const rovingStops = await cardOpeners.evaluateAll((openers: HTMLElement[]) => openers.map((opener) => opener.tabIndex));
     if (rovingStops.filter((tabIndex: number) => tabIndex === 0).length !== 1 || rovingStops.some((tabIndex: number) => tabIndex < -1)) {
       throw new Error(`Card openers did not initialize one roving tab stop: ${JSON.stringify(rovingStops)}`);
     }
 
-    // Oldest-first keeps this deterministic even though a successful move
-    // updates the moved card's timestamp.
     await page.getByTitle(/Sort cards:/).click();
     const dragHandles = page.getByRole('button', { name: /^Drag .*Press Space to lift/ });
     const beforeOrder = await page.locator('[data-rfd-draggable-id]').evaluateAll((cards: HTMLElement[]) => cards
@@ -710,11 +791,8 @@ async function runBrowserUiTest() {
       .map((card) => card.getAttribute('data-rfd-draggable-id')));
     await dragHandles.first().focus();
     await page.keyboard.press('Space');
-    await page.waitForFunction(() => Array.from(document.querySelectorAll('[aria-live]'))
-      .some((region) => region.textContent?.trim()), null, { timeout: 2000 });
-    const liftAnnouncements = await page.locator('[aria-live]').evaluateAll((regions: HTMLElement[]) => regions
-      .map((region) => region.textContent?.trim())
-      .filter(Boolean));
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('[aria-live]')).some((region) => region.textContent?.trim()), null, { timeout: 2000 });
+    const liftAnnouncements = await page.locator('[aria-live]').evaluateAll((regions: HTMLElement[]) => regions.map((region) => region.textContent?.trim()).filter(Boolean));
     if (!liftAnnouncements.length) throw new Error('Keyboard drag lift produced no screen-reader announcement');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Space');
@@ -751,7 +829,6 @@ async function runBrowserUiTest() {
       return !root?.inert && root?.getAttribute('aria-hidden') !== 'true' && document.body.style.overflow !== 'hidden';
     });
     if (!restored || !unlocked) throw new Error('Dialog close did not restore focus and background state');
-
     const semanticRegressions = await page.evaluate(() => ({
       nestedInteractive: document.querySelectorAll('button button, button input, button select, button textarea, a button, a input, a select').length,
       unnamedButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
@@ -768,18 +845,11 @@ async function runBrowserUiTest() {
     for (const viewport of [{ width: 390, height: 844 }, { width: 412, height: 915 }]) {
       await page.setViewportSize(viewport);
       const drawerTargets = page.locator('.muster-card-detail-target:visible');
-      if (await drawerTargets.count() < 5) {
-        throw new Error(`Card drawer target inventory is incomplete at ${viewport.width}px`);
-      }
+      if (await drawerTargets.count() < 5) throw new Error(`Card drawer target inventory is incomplete at ${viewport.width}px`);
       const undersizedTargets = await page.locator([
-        'header button:visible',
-        'header select:visible',
-        'nav[aria-label="Mobile navigation bar"] button:visible',
-        '.muster-card-action:visible',
-        '.muster-card-move:visible',
-        '.muster-touch-target:visible',
-        '.muster-account-tab:visible',
-        '.muster-card-detail-target:visible',
+        'header button:visible', 'header select:visible', 'nav[aria-label="Mobile navigation bar"] button:visible',
+        '.muster-card-action:visible', '.muster-card-move:visible', '.muster-touch-target:visible',
+        '.muster-account-tab:visible', '.muster-card-detail-target:visible',
       ].join(',')).evaluateAll((elements: HTMLElement[]) => elements
         .map((element) => ({
           label: element.getAttribute('aria-label') || element.title || element.textContent?.trim(),
@@ -787,14 +857,11 @@ async function runBrowserUiTest() {
           height: element.getBoundingClientRect().height,
         }))
         .filter(({ width, height }) => width < 43.5 || height < 43.5));
-      if (undersizedTargets.length) {
-        throw new Error(`Undersized ${viewport.width}px mobile targets: ${JSON.stringify(undersizedTargets)}`);
-      }
+      if (undersizedTargets.length) throw new Error(`Undersized ${viewport.width}px mobile targets: ${JSON.stringify(undersizedTargets)}`);
     }
     await mobileCardDialog.getByTitle('Close Task').click();
     await mobileCardDialog.waitFor({ state: 'detached' });
     await assertNoSeriousAxeViolations(page, 'mobile navigation and board');
-
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const transitionSeconds = await page.locator('.muster-btn').first().evaluate((element: HTMLElement) => {
       const duration = getComputedStyle(element).transitionDuration.split(',')[0];
@@ -806,19 +873,77 @@ async function runBrowserUiTest() {
     console.log('\n===========================================================');
     console.log('   🎉 ALL BROWSER E2E USER TESTS PASSED 100%!');
     console.log('===========================================================\n');
+    }
   } catch (err) {
-    console.error('\n❌ Browser UI Test Error:', err);
-    await page.screenshot({ path: 'scratch/ui-error-screenshot.png' }).catch(() => {});
-    process.exit(1);
+    runFailure = err;
+    if (page) {
+      await page.screenshot({ path: 'scratch/ui-error-screenshot.png' }).catch(() => {});
+    }
   } finally {
-    if (browser) await browser.close();
-    
-    // Stop server and delete temporary test database file
-    serverProcess.kill('SIGTERM');
-    await sleep(500);
-    removeDbFiles(TEST_DB_PATH);
-    console.log(`  🧹 Deleted temporary test database files (${path.basename(TEST_DB_PATH)}*).`);
+    const cleanupErrors: unknown[] = [];
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+
+    // The database must not be unlinked while its child still owns WAL/SHM
+    // handles. Await graceful shutdown, escalate with a bounded SIGKILL, then
+    // remove only the unique paths allocated for this run.
+    try {
+      await terminateChild(serverProcess);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (childHasExited(serverProcess)) {
+      try {
+        removeDbFiles(testDbPath);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else {
+      cleanupErrors.push(
+        new Error(
+          `Retained ${testDbPath} because server PID ${serverProcess.pid ?? 'unknown'} is still alive`,
+        ),
+      );
+    }
+    if (cleanupErrors.length > 0) {
+      cleanupFailure = new AggregateError(cleanupErrors, 'Browser E2E cleanup failed');
+    }
+    if (childHasExited(serverProcess)) {
+      console.log(`  🧹 Deleted temporary test database files (${path.basename(testDbPath)}*).`);
+    } else {
+      console.error(`  ⚠ Retained temporary database files for live server PID ${serverProcess.pid}.`);
+    }
   }
+
+  const summary: BrowserUiRunSummary = {
+    port: testPort,
+    dbPath: testDbPath,
+    serverPid: serverProcess.pid,
+    serverExitCode: serverProcess.exitCode,
+    serverSignal: serverProcess.signalCode,
+  };
+  if (runFailure || cleanupFailure) {
+    const cause =
+      runFailure && cleanupFailure
+        ? new AggregateError([runFailure, cleanupFailure])
+        : runFailure ?? cleanupFailure;
+    throw new BrowserUiTestRunError('Browser UI E2E run failed', summary, { cause });
+  }
+  return summary;
 }
 
-runBrowserUiTest();
+const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) {
+  runBrowserUiTest({
+    forceFailureAfterReady: process.env.MUSTER_BROWSER_E2E_FORCE_FAILURE === 'after-server-ready',
+    lifecycleOnly: process.env.MUSTER_BROWSER_E2E_LIFECYCLE_ONLY === '1',
+  }).catch((error) => {
+    console.error('\n❌ Browser UI Test Error:', error.cause ?? error);
+    process.exitCode = 1;
+  });
+}

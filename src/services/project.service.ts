@@ -7,6 +7,8 @@ import { BoardService } from './board.service.js';
 import { DocumentService } from './document.service.js';
 import { deriveKeyPrefix } from '../shared/card-key.js';
 import { deriveSlug } from '../shared/slug.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace, bootstrapWorkspaceId, workspaceIdFor } from './helpers/workspace-scope.helper.js';
 
 export class ProjectService {
   constructor(
@@ -16,8 +18,8 @@ export class ProjectService {
     private documentService?: DocumentService
   ) {}
 
-  async create(data: CreateProject, actorId?: string, adapter?: DatabaseAdapter): Promise<Project> {
-    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+  async create(data: CreateProject, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Project> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx, auth));
     const db = adapter;
     const id = ulid();
     const created_at = new Date().toISOString();
@@ -32,9 +34,12 @@ export class ProjectService {
     );
     const slug = deriveSlug(data.name, new Set(existingSlugs.map(p => p.slug)));
 
-    // Look up the default workspace — projects must belong to a workspace.
-    const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
-    const workspaceId = wsRows[0]?.id || '';
+    // Authenticated creation is deterministic. The first-row fallback exists
+    // only for the zero-config local/open bootstrap path.
+    let workspaceId = workspaceIdFor(auth);
+    if (!workspaceId) {
+      workspaceId = (await bootstrapWorkspaceId(db)) || '';
+    }
 
     await db.execute(
       `INSERT INTO project (id, workspace_id, name, slug, description, key_prefix, card_seq, created_at, updated_at)
@@ -66,7 +71,7 @@ export class ProjectService {
     }
 
     if (this.boardService) {
-      await this.boardService.create({ project_id: id, name: 'Sprint 1' }, actorId, db);
+      await this.boardService.create({ project_id: id, name: 'Sprint 1' }, actorId, db, auth);
     }
 
     if (this.documentService) {
@@ -100,24 +105,28 @@ All AI agents and human operators collaborating within this project must observe
    - Post card comments for task pickup, sub-task completions, intermediate milestones, blockers, architectural decisions, and test/verification results.
    - Always state current work using full human-readable task titles and work summaries out loud (e.g., \`Working on Muster Task "Create authentication middleware"\`), never raw ID strings like \`Work on card #01J3K...\`.
    - When implementation is completed, move card to 'In Review' (if column exists) or directly to 'Done' (on simplified boards) after posting verification notes.`,
-      }, actorId, db);
+      }, actorId, db, auth);
     }
 
     return project;
   }
 
-  async getById(id: string): Promise<Project | null> {
+  async getById(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Project | null> {
+    await assertResourceWorkspace(this.db, auth, 'project', id);
     const rows = await this.db.query<Project>('SELECT * FROM project WHERE id = ?', [id]);
     return rows[0] || null;
   }
 
-  async list(): Promise<Project[]> {
-    return this.db.query<Project>('SELECT * FROM project ORDER BY created_at DESC');
+  async list(auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Project[]> {
+    const workspaceId = workspaceIdFor(auth);
+    if (!workspaceId) return this.db.query<Project>('SELECT * FROM project ORDER BY created_at DESC');
+    return this.db.query<Project>('SELECT * FROM project WHERE workspace_id = ? ORDER BY created_at DESC', [workspaceId]);
   }
 
-  async update(id: string, data: UpdateProject, actorId?: string, adapter?: DatabaseAdapter): Promise<Project> {
-    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+  async update(id: string, data: UpdateProject, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Project> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'project', id);
     const existingRows = await db.query<Project>('SELECT * FROM project WHERE id = ?', [id]);
     const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Project with ID ${id} not found`);
@@ -158,9 +167,10 @@ All AI agents and human operators collaborating within this project must observe
     return updated;
   }
 
-  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'project', id);
     const existingRows = await db.query<Project>('SELECT * FROM project WHERE id = ?', [id]);
     const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Project with ID ${id} not found`);
@@ -174,8 +184,8 @@ All AI agents and human operators collaborating within this project must observe
     // transaction after this mutation succeeds.
   }
 
-  async getSummary(id: string): Promise<ProjectSummary> {
-    const project = await this.getById(id);
+  async getSummary(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<ProjectSummary> {
+    const project = await this.getById(id, auth);
     if (!project) throw new Error(`Project with ID ${id} not found`);
 
     const boards = await this.db.query<{ count: number }>('SELECT COUNT(*) as count FROM board WHERE project_id = ?', [id]);
@@ -199,12 +209,12 @@ All AI agents and human operators collaborating within this project must observe
     );
     const not_done_card_count = Number(notDoneCards[0]?.count || 0);
 
-    const agents = await this.db.query<{ count: number }>('SELECT COUNT(*) as count FROM agent');
+    const agents = await this.db.query<{ count: number }>('SELECT COUNT(*) as count FROM agent WHERE workspace_id = ?', [project.workspace_id]);
     const agent_count = Number(agents[0]?.count || 0);
 
     const activeAgents = await this.db.query<{ count: number }>(
-      'SELECT COUNT(*) as count FROM agent WHERE status = ?',
-      ['active']
+      'SELECT COUNT(*) as count FROM agent WHERE workspace_id = ? AND status = ?',
+      [project.workspace_id, 'active']
     );
     const active_agent_count = Number(activeAgents[0]?.count || 0);
 

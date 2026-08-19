@@ -16,6 +16,15 @@ import {
   KBGraphLink
 } from '../shared/types.js';
 import { EventService } from './event.service.js';
+import type { AuthContext } from '../shared/auth-context.js';
+import { OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { NotFoundError, ValidationError } from '../shared/errors.js';
+import {
+  assertResourceWorkspace,
+  assertResourcesShareWorkspace,
+  assertResourcesWorkspace,
+  workspaceIdFor,
+} from './helpers/workspace-scope.helper.js';
 
 export class KBService {
   constructor(
@@ -32,7 +41,7 @@ export class KBService {
     adapter: DatabaseAdapter = this.db,
   ): Promise<void> {
     if (!this.eventService) return;
-    const projectIds = await this.getLinkedProjectIds(kbId, adapter);
+    const projectIds = await this.getLinkedProjectIdsInternal(kbId, adapter);
     for (const projectId of projectIds) {
       await this.eventService.create({
         project_id: projectId,
@@ -48,9 +57,14 @@ export class KBService {
   // --- Knowledge Base CRUD & Linkage ---
 
 
-  async create(data: CreateKnowledgeBase, actorId?: string, adapter?: DatabaseAdapter): Promise<KnowledgeBase> {
-    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+  async create(data: CreateKnowledgeBase, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KnowledgeBase> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx, auth));
     const db = adapter;
+    if (data.project_ids?.length) {
+      await assertResourcesWorkspace(db, auth, data.project_ids.map(id => ['project', id]));
+    } else if (workspaceIdFor(auth)) {
+      throw new ValidationError('A knowledge base must be linked to a project in the authenticated workspace');
+    }
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
@@ -64,7 +78,15 @@ export class KBService {
 
     if (data.project_ids && data.project_ids.length > 0) {
       for (const projectId of data.project_ids) {
-        await this.linkProject(id, projectId, actorId, db);
+        // The KB has no owner until its first project link exists, so the
+        // public linkProject guard cannot resolve it yet. Project ownership
+        // was validated before the insert; establish only those validated
+        // initial links inside this same transaction.
+        await db.execute(
+          `INSERT OR IGNORE INTO project_knowledge_base (project_id, kb_id, created_at)
+           VALUES (?, ?, ?)`,
+          [projectId, id, created_at],
+        );
       }
     }
 
@@ -92,39 +114,75 @@ export class KBService {
     return kb;
   }
 
-  async getById(id: string): Promise<KnowledgeBase | null> {
+  async getById(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KnowledgeBase | null> {
+    await assertResourceWorkspace(this.db, auth, 'knowledge_base', id);
     const rows = await this.db.query<KnowledgeBase>('SELECT * FROM knowledge_base WHERE id = ?', [id]);
     if (!rows[0]) return null;
 
     const kb = rows[0];
-    kb.linked_project_ids = await this.getLinkedProjectIds(id);
+    kb.linked_project_ids = await this.getLinkedProjectIds(id, auth);
     return kb;
   }
 
-  async list(projectId?: string): Promise<KnowledgeBase[]> {
+  async list(projectId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KnowledgeBase[]> {
+    if (projectId) await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const scopedWorkspace = workspaceIdFor(auth);
     let kbs: KnowledgeBase[];
     if (projectId) {
+      kbs = scopedWorkspace
+        ? await this.db.query<KnowledgeBase>(
+            `SELECT DISTINCT kb.* FROM knowledge_base kb
+             JOIN project_knowledge_base owner_link ON owner_link.kb_id = kb.id
+             JOIN project owner_project ON owner_project.id = owner_link.project_id
+             LEFT JOIN project_knowledge_base selected_link
+               ON selected_link.kb_id = kb.id AND selected_link.project_id = ?
+             WHERE owner_project.workspace_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM project_knowledge_base foreign_link
+                 JOIN project foreign_project ON foreign_project.id = foreign_link.project_id
+                 WHERE foreign_link.kb_id = kb.id AND foreign_project.workspace_id <> ?
+               )
+               AND (kb.is_global = 1 OR selected_link.project_id IS NOT NULL)
+             ORDER BY kb.created_at DESC`,
+            [projectId, scopedWorkspace, scopedWorkspace],
+          )
+        : await this.db.query<KnowledgeBase>(
+            `SELECT DISTINCT kb.* FROM knowledge_base kb
+             LEFT JOIN project_knowledge_base pkb ON kb.id = pkb.kb_id
+             WHERE kb.is_global = 1 OR pkb.project_id = ?
+             ORDER BY kb.created_at DESC`,
+            [projectId],
+          );
+    } else if (scopedWorkspace) {
       kbs = await this.db.query<KnowledgeBase>(
         `SELECT DISTINCT kb.* FROM knowledge_base kb
-         LEFT JOIN project_knowledge_base pkb ON kb.id = pkb.kb_id
-         WHERE kb.is_global = 1 OR pkb.project_id = ?
+         JOIN project_knowledge_base pkb ON kb.id = pkb.kb_id
+         JOIN project p ON p.id = pkb.project_id
+         WHERE p.workspace_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM project_knowledge_base foreign_link
+             JOIN project foreign_project ON foreign_project.id = foreign_link.project_id
+             WHERE foreign_link.kb_id = kb.id AND foreign_project.workspace_id <> ?
+           )
          ORDER BY kb.created_at DESC`,
-        [projectId]
+        [scopedWorkspace, scopedWorkspace],
       );
     } else {
       kbs = await this.db.query<KnowledgeBase>('SELECT * FROM knowledge_base ORDER BY created_at DESC');
     }
 
     for (const kb of kbs) {
-      kb.linked_project_ids = await this.getLinkedProjectIds(kb.id);
+      kb.linked_project_ids = await this.getLinkedProjectIds(kb.id, auth);
     }
 
     return kbs;
   }
 
-  async linkProject(kbId: string, projectId: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.linkProject(kbId, projectId, actorId, tx));
+  async linkProject(kbId: string, projectId: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.linkProject(kbId, projectId, actorId, tx, auth));
     const db = adapter;
+    await assertResourcesWorkspace(db, auth, [['knowledge_base', kbId], ['project', projectId]]);
+    await assertResourcesShareWorkspace(db, [['knowledge_base', kbId], ['project', projectId]]);
     const created_at = new Date().toISOString();
     const result = await db.execute(
       `INSERT OR IGNORE INTO project_knowledge_base (project_id, kb_id, created_at)
@@ -142,14 +200,15 @@ export class KBService {
     }
   }
 
-  async unlinkProject(kbId: string, projectId: string): Promise<void> {
+  async unlinkProject(kbId: string, projectId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    await assertResourcesWorkspace(this.db, auth, [['knowledge_base', kbId], ['project', projectId]]);
     await this.db.execute(
       `DELETE FROM project_knowledge_base WHERE project_id = ? AND kb_id = ?`,
       [projectId, kbId]
     );
   }
 
-  async getLinkedProjectIds(kbId: string, adapter: DatabaseAdapter = this.db): Promise<string[]> {
+  private async getLinkedProjectIdsInternal(kbId: string, adapter: DatabaseAdapter = this.db): Promise<string[]> {
     const rows = await adapter.query<{ project_id: string }>(
       'SELECT project_id FROM project_knowledge_base WHERE kb_id = ?',
       [kbId]
@@ -157,15 +216,36 @@ export class KBService {
     return rows.map(r => r.project_id);
   }
 
-  async delete(id: string): Promise<void> {
+  private async getLinkedProjectIds(
+    kbId: string,
+    auth: AuthContext,
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<string[]> {
+    const workspaceId = workspaceIdFor(auth);
+    if (!workspaceId) return this.getLinkedProjectIdsInternal(kbId, adapter);
+
+    const rows = await adapter.query<{ project_id: string }>(
+      `SELECT pkb.project_id
+       FROM project_knowledge_base pkb
+       JOIN project p ON p.id = pkb.project_id
+       WHERE pkb.kb_id = ? AND p.workspace_id = ?
+       ORDER BY pkb.created_at`,
+      [kbId, workspaceId],
+    );
+    return rows.map(row => row.project_id);
+  }
+
+  async delete(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    await assertResourceWorkspace(this.db, auth, 'knowledge_base', id);
     await this.db.execute('DELETE FROM knowledge_base WHERE id = ?', [id]);
   }
 
   // --- Entities ---
 
-  async upsertEntity(data: UpsertKBEntity, actorId?: string, adapter?: DatabaseAdapter): Promise<KBEntity> {
-    if (!adapter) return this.db.transaction(tx => this.upsertEntity(data, actorId, tx));
+  async upsertEntity(data: UpsertKBEntity, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBEntity> {
+    if (!adapter) return this.db.transaction(tx => this.upsertEntity(data, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'knowledge_base', data.kb_id);
     const now = new Date().toISOString();
     let existing: KBEntity | null = null;
 
@@ -227,12 +307,14 @@ export class KBService {
     return resEntity;
   }
 
-  async getEntityById(id: string, adapter: DatabaseAdapter = this.db): Promise<KBEntity | null> {
+  async getEntityById(id: string, adapter: DatabaseAdapter = this.db, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBEntity | null> {
+    await assertResourceWorkspace(adapter, auth, 'kb_entity', id);
     const rows = await adapter.query<KBEntity>('SELECT * FROM kb_entity WHERE id = ?', [id]);
     return rows[0] || null;
   }
 
-  async listEntities(kbId: string, type?: string): Promise<KBEntity[]> {
+  async listEntities(kbId: string, type?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBEntity[]> {
+    await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
     if (type) {
       return this.db.query<KBEntity>(
         'SELECT * FROM kb_entity WHERE kb_id = ? AND type = ? ORDER BY name ASC',
@@ -242,14 +324,15 @@ export class KBService {
     return this.db.query<KBEntity>('SELECT * FROM kb_entity WHERE kb_id = ? ORDER BY name ASC', [kbId]);
   }
 
-  async deleteEntity(id: string): Promise<void> {
+  async deleteEntity(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    await assertResourceWorkspace(this.db, auth, 'kb_entity', id);
     await this.db.execute('DELETE FROM kb_entity WHERE id = ?', [id]);
   }
 
-  async updateEntity(id: string, data: Partial<UpsertKBEntity>, actorId?: string, adapter?: DatabaseAdapter): Promise<KBEntity> {
-    if (!adapter) return this.db.transaction(tx => this.updateEntity(id, data, actorId, tx));
+  async updateEntity(id: string, data: Partial<UpsertKBEntity>, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBEntity> {
+    if (!adapter) return this.db.transaction(tx => this.updateEntity(id, data, actorId, tx, auth));
     const db = adapter;
-    const existing = await this.getEntityById(id, db);
+    const existing = await this.getEntityById(id, db, auth);
     if (!existing) throw new Error(`KBEntity with ID ${id} not found`);
 
     const now = new Date().toISOString();
@@ -279,9 +362,19 @@ export class KBService {
 
   // --- Facts / Gained Knowledge ---
 
-  async addFact(data: AddGainedKnowledge, actorId?: string, adapter?: DatabaseAdapter): Promise<KBFact> {
-    if (!adapter) return this.db.transaction(tx => this.addFact(data, actorId, tx));
+  async addFact(data: AddGainedKnowledge, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBFact> {
+    if (!adapter) return this.db.transaction(tx => this.addFact(data, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'knowledge_base', data.kb_id);
+    if (data.entity_id) {
+      await assertResourcesWorkspace(db, auth, [['knowledge_base', data.kb_id], ['kb_entity', data.entity_id]]);
+      await assertResourcesShareWorkspace(db, [['knowledge_base', data.kb_id], ['kb_entity', data.entity_id]]);
+      const matchingEntities = await db.query<{ id: string }>(
+        'SELECT id FROM kb_entity WHERE id = ? AND kb_id = ?',
+        [data.entity_id, data.kb_id],
+      );
+      if (matchingEntities.length !== 1) throw new NotFoundError('Resource not found');
+    }
     const now = new Date().toISOString();
     const id = ulid();
     let entityId = data.entity_id || null;
@@ -293,7 +386,7 @@ export class KBService {
         name: data.entity_name || data.entity_identifier || 'Unknown Entity',
         identifier: data.entity_identifier,
         type: data.entity_type,
-      }, actorId, db);
+      }, actorId, db, auth);
       entityId = entity.id;
     } else if (!entityId) {
       // Auto-detect IP or email pattern in title or content if available
@@ -307,7 +400,7 @@ export class KBService {
           name: ipMatch[0],
           identifier: ipMatch[0],
           type: 'ip_address',
-        }, actorId, db);
+        }, actorId, db, auth);
         entityId = entity.id;
       } else if (emailMatch) {
         const entity = await this.upsertEntity({
@@ -315,7 +408,7 @@ export class KBService {
           name: emailMatch[0],
           identifier: emailMatch[0],
           type: 'email',
-        }, actorId, db);
+        }, actorId, db, auth);
         entityId = entity.id;
       }
     }
@@ -347,7 +440,7 @@ export class KBService {
     };
 
     if (entityId) {
-      const entity = await this.getEntityById(entityId, db);
+      const entity = await this.getEntityById(entityId, db, auth);
       if (entity) {
         fact.entity_name = entity.name;
         fact.entity_identifier = entity.identifier || undefined;
@@ -364,10 +457,13 @@ export class KBService {
     return fact;
   }
 
-  async listFacts(kbId?: string, entityId?: string, category?: string): Promise<KBFact[]> {
+  async listFacts(kbId?: string, entityId?: string, category?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBFact[]> {
+    if (kbId) await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
+    if (entityId) await assertResourceWorkspace(this.db, auth, 'kb_entity', entityId);
+    const scopedWorkspace = workspaceIdFor(auth);
     let sql = `SELECT f.*, e.name as entity_name, e.identifier as entity_identifier 
                FROM kb_fact f 
-               LEFT JOIN kb_entity e ON f.entity_id = e.id`;
+               LEFT JOIN kb_entity e ON f.entity_id = e.id AND e.kb_id = f.kb_id`;
     const params: unknown[] = [];
     const clauses: string[] = [];
 
@@ -383,6 +479,26 @@ export class KBService {
       clauses.push('f.category = ?');
       params.push(category);
     }
+    if (scopedWorkspace) {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM project_knowledge_base owner_link
+        JOIN project owner_project ON owner_project.id = owner_link.project_id
+        WHERE owner_link.kb_id = f.kb_id AND owner_project.workspace_id = ?
+      )`);
+      params.push(scopedWorkspace);
+      clauses.push(`NOT EXISTS (
+        SELECT 1 FROM project_knowledge_base foreign_link
+        JOIN project foreign_project ON foreign_project.id = foreign_link.project_id
+        WHERE foreign_link.kb_id = f.kb_id AND foreign_project.workspace_id <> ?
+      )`);
+      params.push(scopedWorkspace);
+      clauses.push(`(
+        f.entity_id IS NULL OR EXISTS (
+          SELECT 1 FROM kb_entity fact_entity
+          WHERE fact_entity.id = f.entity_id AND fact_entity.kb_id = f.kb_id
+        )
+      )`);
+    }
 
     if (clauses.length > 0) {
       sql += ' WHERE ' + clauses.join(' AND ');
@@ -393,18 +509,20 @@ export class KBService {
     return this.db.query<KBFact>(sql, params);
   }
 
-  async deleteFact(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.deleteFact(id, actorId, tx));
+  async deleteFact(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.deleteFact(id, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'kb_fact', id);
     const existingRows = await db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
     if (!existingRows[0]) return;
     await db.execute('DELETE FROM kb_fact WHERE id = ?', [id]);
     await this.logEventForKb(existingRows[0].kb_id, 'fact_deleted', id, actorId, { title: existingRows[0].title, kb_id: existingRows[0].kb_id }, db);
   }
 
-  async updateFact(id: string, data: Partial<AddGainedKnowledge>, actorId?: string, adapter?: DatabaseAdapter): Promise<KBFact> {
-    if (!adapter) return this.db.transaction(tx => this.updateFact(id, data, actorId, tx));
+  async updateFact(id: string, data: Partial<AddGainedKnowledge>, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBFact> {
+    if (!adapter) return this.db.transaction(tx => this.updateFact(id, data, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'kb_fact', id);
     const existingRows = await db.query<KBFact>('SELECT * FROM kb_fact WHERE id = ?', [id]);
     if (!existingRows[0]) throw new Error(`KBFact with ID ${id} not found`);
     const existing = existingRows[0];
@@ -417,13 +535,22 @@ export class KBService {
 
     let entityId = data.entity_id !== undefined ? data.entity_id : existing.entity_id;
 
+    if (data.entity_id) {
+      await assertResourceWorkspace(db, auth, 'kb_entity', data.entity_id);
+      const matchingEntities = await db.query<{ id: string }>(
+        'SELECT id FROM kb_entity WHERE id = ? AND kb_id = ?',
+        [data.entity_id, existing.kb_id],
+      );
+      if (matchingEntities.length !== 1) throw new NotFoundError('Resource not found');
+    }
+
     if (data.entity_name || data.entity_identifier) {
       const entity = await this.upsertEntity({
         kb_id: existing.kb_id,
         name: data.entity_name || data.entity_identifier || 'Unknown Entity',
         identifier: data.entity_identifier,
         type: data.entity_type,
-      }, actorId, db);
+      }, actorId, db, auth);
       entityId = entity.id;
     }
 
@@ -443,7 +570,7 @@ export class KBService {
     };
 
     if (entityId) {
-      const entity = await this.getEntityById(entityId, db);
+      const entity = await this.getEntityById(entityId, db, auth);
       if (entity) {
         fact.entity_name = entity.name;
         fact.entity_identifier = entity.identifier || undefined;
@@ -463,9 +590,20 @@ export class KBService {
 
   // --- Graph Relations ---
 
-  async addRelation(data: AddKBRelation, actorId?: string, adapter?: DatabaseAdapter): Promise<KBRelation> {
-    if (!adapter) return this.db.transaction(tx => this.addRelation(data, actorId, tx));
+  async addRelation(data: AddKBRelation, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBRelation> {
+    if (!adapter) return this.db.transaction(tx => this.addRelation(data, actorId, tx, auth));
     const db = adapter;
+    await assertResourcesWorkspace(db, auth, [
+      ['knowledge_base', data.kb_id], ['kb_entity', data.source_entity_id], ['kb_entity', data.target_entity_id],
+    ]);
+    await assertResourcesShareWorkspace(db, [
+      ['knowledge_base', data.kb_id], ['kb_entity', data.source_entity_id], ['kb_entity', data.target_entity_id],
+    ]);
+    const entityKbs = await db.query<{ id: string }>(
+      'SELECT id FROM kb_entity WHERE kb_id = ? AND id IN (?, ?)',
+      [data.kb_id, data.source_entity_id, data.target_entity_id],
+    );
+    if (entityKbs.length !== 2) throw new ValidationError('Knowledge base relation endpoints must belong to the selected knowledge base');
     const id = ulid();
     const created_at = new Date().toISOString();
 
@@ -475,8 +613,8 @@ export class KBService {
       [id, data.kb_id, data.source_entity_id, data.target_entity_id, data.relation_type, data.description || null, created_at]
     );
 
-    const source = await this.getEntityById(data.source_entity_id, db);
-    const target = await this.getEntityById(data.target_entity_id, db);
+    const source = await this.getEntityById(data.source_entity_id, db, auth);
+    const target = await this.getEntityById(data.target_entity_id, db, auth);
 
     const relation: KBRelation = {
       id,
@@ -501,41 +639,46 @@ export class KBService {
   }
 
 
-  async deleteRelation(id: string): Promise<void> {
+  async deleteRelation(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    await assertResourceWorkspace(this.db, auth, 'kb_relation', id);
     await this.db.execute('DELETE FROM kb_relation WHERE id = ?', [id]);
   }
 
   // --- Aggregated Knowledge & Graph Queries ---
 
-  async getEntityKnowledge(queryStr: string, kbIds?: string[]): Promise<EntityKnowledgeResult | null> {
+  async getEntityKnowledge(queryStr: string, kbIds?: string[], auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<EntityKnowledgeResult | null> {
+    const accessibleKbIds = kbIds?.length ? kbIds : (await this.list(undefined, auth)).map(kb => kb.id);
+    await assertResourcesWorkspace(this.db, auth, accessibleKbIds.map(id => ['knowledge_base', id]));
     let sql = 'SELECT * FROM kb_entity WHERE (id = ? OR identifier = ? OR LOWER(name) = LOWER(?))';
     const params: unknown[] = [queryStr, queryStr, queryStr];
 
-    if (kbIds && kbIds.length > 0) {
-      sql += ` AND kb_id IN (${kbIds.map(() => '?').join(',')})`;
-      params.push(...kbIds);
+    if (accessibleKbIds.length > 0) {
+      sql += ` AND kb_id IN (${accessibleKbIds.map(() => '?').join(',')})`;
+      params.push(...accessibleKbIds);
+    } else if (workspaceIdFor(auth)) {
+      return null;
     }
 
     const entities = await this.db.query<KBEntity>(sql, params);
     if (!entities[0]) return null;
 
     const entity = entities[0];
-    const facts = await this.listFacts(undefined, entity.id);
+    const facts = await this.listFacts(undefined, entity.id, undefined, auth);
 
     const outgoing = await this.db.query<KBRelation>(
       `SELECT r.*, e.name as target_entity_name 
        FROM kb_relation r 
-       JOIN kb_entity e ON r.target_entity_id = e.id 
-       WHERE r.source_entity_id = ?`,
-      [entity.id]
+       JOIN kb_entity e ON r.target_entity_id = e.id AND e.kb_id = r.kb_id
+       WHERE r.source_entity_id = ? AND r.kb_id = ?`,
+      [entity.id, entity.kb_id]
     );
 
     const incoming = await this.db.query<KBRelation>(
       `SELECT r.*, e.name as source_entity_name 
        FROM kb_relation r 
-       JOIN kb_entity e ON r.source_entity_id = e.id 
-       WHERE r.target_entity_id = ?`,
-      [entity.id]
+       JOIN kb_entity e ON r.source_entity_id = e.id AND e.kb_id = r.kb_id
+       WHERE r.target_entity_id = ? AND r.kb_id = ?`,
+      [entity.id, entity.kb_id]
     );
 
     return {
@@ -546,17 +689,31 @@ export class KBService {
     };
   }
 
-  async searchKnowledge(query: string, kbIds?: string[], limit: number = 20): Promise<{ facts: KBFact[]; entities: KBEntity[] }> {
+  async searchKnowledge(query: string, kbIds?: string[], limit: number = 20, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<{ facts: KBFact[]; entities: KBEntity[] }> {
+    const accessibleKbIds = kbIds?.length ? kbIds : (await this.list(undefined, auth)).map(kb => kb.id);
+    await assertResourcesWorkspace(this.db, auth, accessibleKbIds.map(id => ['knowledge_base', id]));
+    const scopedWorkspace = workspaceIdFor(auth);
     const pattern = `%${query}%`;
     let factSql = `SELECT f.*, e.name as entity_name, e.identifier as entity_identifier
                    FROM kb_fact f
-                   LEFT JOIN kb_entity e ON f.entity_id = e.id
+                   LEFT JOIN kb_entity e ON f.entity_id = e.id AND e.kb_id = f.kb_id
                    WHERE (f.title LIKE ? OR f.content LIKE ? OR f.category LIKE ?)`;
     const factParams: unknown[] = [pattern, pattern, pattern];
 
-    if (kbIds && kbIds.length > 0) {
-      factSql += ` AND f.kb_id IN (${kbIds.map(() => '?').join(',')})`;
-      factParams.push(...kbIds);
+    if (accessibleKbIds.length > 0) {
+      factSql += ` AND f.kb_id IN (${accessibleKbIds.map(() => '?').join(',')})`;
+      factParams.push(...accessibleKbIds);
+    } else if (scopedWorkspace) {
+      return { facts: [], entities: [] };
+    }
+
+    if (scopedWorkspace) {
+      factSql += ` AND (
+        f.entity_id IS NULL OR EXISTS (
+          SELECT 1 FROM kb_entity fact_entity
+          WHERE fact_entity.id = f.entity_id AND fact_entity.kb_id = f.kb_id
+        )
+      )`;
     }
 
     factSql += ' ORDER BY f.created_at DESC LIMIT ?';
@@ -567,9 +724,9 @@ export class KBService {
     let entitySql = `SELECT * FROM kb_entity WHERE (name LIKE ? OR identifier LIKE ? OR type LIKE ?)`;
     const entityParams: unknown[] = [pattern, pattern, pattern];
 
-    if (kbIds && kbIds.length > 0) {
-      entitySql += ` AND kb_id IN (${kbIds.map(() => '?').join(',')})`;
-      entityParams.push(...kbIds);
+    if (accessibleKbIds.length > 0) {
+      entitySql += ` AND kb_id IN (${accessibleKbIds.map(() => '?').join(',')})`;
+      entityParams.push(...accessibleKbIds);
     }
 
     entitySql += ' ORDER BY updated_at DESC LIMIT ?';
@@ -580,16 +737,17 @@ export class KBService {
     return { facts, entities };
   }
 
-  async getGraphTree(kbId?: string, projectId?: string): Promise<KBGraphTree> {
+  async getGraphTree(kbId?: string, projectId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBGraphTree> {
     let targetKbIds: string[] = [];
 
     if (kbId) {
+      await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
       targetKbIds = [kbId];
     } else if (projectId) {
-      const kbs = await this.list(projectId);
+      const kbs = await this.list(projectId, auth);
       targetKbIds = kbs.map(k => k.id);
     } else {
-      const kbs = await this.list();
+      const kbs = await this.list(undefined, auth);
       targetKbIds = kbs.map(k => k.id);
     }
 
@@ -608,7 +766,10 @@ export class KBService {
     );
 
     const links = await this.db.query<KBRelation>(
-      `SELECT * FROM kb_relation WHERE kb_id IN (${inClause})`,
+      `SELECT r.* FROM kb_relation r
+       JOIN kb_entity source ON source.id = r.source_entity_id AND source.kb_id = r.kb_id
+       JOIN kb_entity target ON target.id = r.target_entity_id AND target.kb_id = r.kb_id
+       WHERE r.kb_id IN (${inClause})`,
       targetKbIds
     );
 

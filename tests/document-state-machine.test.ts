@@ -89,6 +89,8 @@ describe('MUS-60 document review state machine', () => {
     const doc = await documents.create(
       { project_id: PROJECT_ID, title: 'State machine', content: 'draft' },
       architect.principal!.id,
+      undefined,
+      architect,
     );
 
     await expect(documents.setStatus(doc.id, {
@@ -128,9 +130,9 @@ describe('MUS-60 document review state machine', () => {
     await expect(documents.update(doc.id, {
       content: 'must not change',
       change_summary: 'post approval edit',
-    }, architect.principal!.id)).rejects.toMatchObject({ code: 'DOCUMENT_APPROVED_IMMUTABLE' });
+    }, architect.principal!.id, undefined, architect)).rejects.toMatchObject({ code: 'DOCUMENT_APPROVED_IMMUTABLE' });
 
-    const history = await documents.getHistory(doc.id);
+    const history = await documents.getHistory(doc.id, architect);
     expect(history).toHaveLength(1);
     const audits = await db.query<{ actor_id: string; action: string; payload: string }>(
       'SELECT actor_id, action, payload FROM audit_log WHERE target_id = ? ORDER BY created_at, action',
@@ -148,7 +150,12 @@ describe('MUS-60 document review state machine', () => {
       expect(JSON.parse(row.payload)).toHaveProperty('to_status');
     }
 
-    const juniorDoc = await documents.create({ project_id: PROJECT_ID, title: 'Junior submit', content: 'draft' });
+    const juniorDoc = await documents.create(
+      { project_id: PROJECT_ID, title: 'Junior submit', content: 'draft' },
+      junior.principal!.id,
+      undefined,
+      junior,
+    );
     await expect(documents.setStatus(juniorDoc.id, {
       status: 'in_review',
       expected_version: 1,
@@ -160,9 +167,14 @@ describe('MUS-60 document review state machine', () => {
   });
 
   it('rejects stale versions and serializes concurrent approval without phantom history or audit rows', async () => {
-    const doc = await documents.create({ project_id: PROJECT_ID, title: 'Concurrent', content: 'v1' });
+    const doc = await documents.create(
+      { project_id: PROJECT_ID, title: 'Concurrent', content: 'v1' },
+      senior.principal!.id,
+      undefined,
+      senior,
+    );
     await documents.setStatus(doc.id, { status: 'in_review', expected_version: 1 }, senior);
-    const edited = await documents.update(doc.id, { content: 'v2', change_summary: 'review fix' }, 'senior-user');
+    const edited = await documents.update(doc.id, { content: 'v2', change_summary: 'review fix' }, 'senior-user', undefined, senior);
 
     await expect(documents.setStatus(doc.id, {
       status: 'approved',
@@ -175,8 +187,8 @@ describe('MUS-60 document review state machine', () => {
     ]);
     expect(attempts.filter(result => result.status === 'fulfilled')).toHaveLength(1);
     expect(attempts.filter(result => result.status === 'rejected')).toHaveLength(1);
-    expect((await documents.getById(doc.id))?.status).toBe('approved');
-    expect(await documents.getHistory(doc.id)).toHaveLength(2);
+    expect((await documents.getById(doc.id, undefined, architect))?.status).toBe('approved');
+    expect(await documents.getHistory(doc.id, architect)).toHaveLength(2);
     expect(await db.query(
       "SELECT id FROM audit_log WHERE target_id = ? AND action = 'document.approve'",
       [doc.id],
@@ -184,7 +196,12 @@ describe('MUS-60 document review state machine', () => {
   });
 
   it('rolls back status, event, and audit together when canonical audit insertion fails', async () => {
-    const doc = await documents.create({ project_id: PROJECT_ID, title: 'Atomic', content: 'draft' });
+    const doc = await documents.create(
+      { project_id: PROJECT_ID, title: 'Atomic', content: 'draft' },
+      senior.principal!.id,
+      undefined,
+      senior,
+    );
     const failingAudit = {
       logAs: vi.fn(async () => { throw new Error('audit unavailable'); }),
     } as unknown as AuditService;
@@ -194,7 +211,7 @@ describe('MUS-60 document review state machine', () => {
       status: 'in_review',
       expected_version: 1,
     }, senior)).rejects.toThrow('audit unavailable');
-    expect((await documents.getById(doc.id))?.status).toBe('draft');
+    expect((await documents.getById(doc.id, undefined, senior))?.status).toBe('draft');
     expect(await db.query(
       "SELECT id FROM event WHERE entity_id = ? AND action = 'status_changed'",
       [doc.id],
@@ -202,7 +219,12 @@ describe('MUS-60 document review state machine', () => {
   });
 
   it('keeps REST and MCP permission refusals and successful transitions in parity', async () => {
-    const doc = await documents.create({ project_id: PROJECT_ID, title: 'Transport parity', content: 'draft' });
+    const doc = await documents.create(
+      { project_id: PROJECT_ID, title: 'Transport parity', content: 'draft' },
+      senior.principal!.id,
+      undefined,
+      senior,
+    );
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -237,7 +259,12 @@ describe('MUS-60 document review state machine', () => {
     expect(restRefusalResponse.status).toBe(403);
     const restRefusal = await restRefusalResponse.json();
 
-    const juniorRestDoc = await documents.create({ project_id: PROJECT_ID, title: 'Junior REST', content: 'draft' });
+    const juniorRestDoc = await documents.create(
+      { project_id: PROJECT_ID, title: 'Junior REST', content: 'draft' },
+      junior.principal!.id,
+      undefined,
+      junior,
+    );
     const juniorSubmit = await fetch(`${baseUrl}/api/v1/documents/${juniorRestDoc.id}/status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'x-test-role': 'junior' },
@@ -263,7 +290,12 @@ describe('MUS-60 document review state machine', () => {
       expected_version: 1,
     }, {})).rejects.toMatchObject({ refusal: restRefusal });
 
-    const juniorMcpDoc = await documents.create({ project_id: PROJECT_ID, title: 'Junior MCP', content: 'draft' });
+    const juniorMcpDoc = await documents.create(
+      { project_id: PROJECT_ID, title: 'Junior MCP', content: 'draft' },
+      junior.principal!.id,
+      undefined,
+      junior,
+    );
     const juniorMcp = createMcpServer(mcpServices, undefined, junior) as any;
     await expect(juniorMcp._registeredTools.set_document_status.handler({
       document_id: juniorMcpDoc.id,
@@ -316,6 +348,9 @@ describe('MUS-60 document review state machine', () => {
       dialect: 'postgres',
       query: async <T>(sql: string) => {
         queries.push(sql);
+        if (sql.includes('SELECT p.workspace_id FROM document')) {
+          return [{ workspace_id: WORKSPACE_ID }] as T[];
+        }
         return [row] as T[];
       },
       execute: async (sql: string): Promise<ExecutionResult> => {
@@ -334,7 +369,7 @@ describe('MUS-60 document review state machine', () => {
       expected_version: 3,
     }, senior);
     expect(transitioned.status).toBe('in_review');
-    expect(queries[0]).toMatch(/SELECT \* FROM document WHERE id = \? FOR UPDATE$/);
+    expect(queries).toContainEqual(expect.stringMatching(/SELECT \* FROM document WHERE id = \? FOR UPDATE$/));
     expect(writes[0]).toMatch(/WHERE id = \? AND status = \? AND version = \?$/);
     expect(audit.logAs).toHaveBeenCalledOnce();
   });

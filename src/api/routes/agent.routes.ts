@@ -33,8 +33,7 @@ export function createAgentRouter(
   // Global agent list
   router.get('/agents', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const auth = getAuth(req);
-      const agents = await agentService.list(config.auth.mode === 'enforced' ? auth?.workspace_id : undefined);
+      const agents = await agentService.list(req.authContext);
       res.json(agents);
     } catch (err) {
       next(err);

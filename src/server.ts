@@ -145,13 +145,17 @@ export async function startServer(options?: { db?: string }): Promise<void> {
     console.log(`Seeded ${seeded.length} preset roles; backfilled ${backfilled} agents`);
   }
 
-  const existingProjects = await services.projectService.list();
+  const bootstrapWorkspaceId = wsRows[0]?.id;
+  const bootstrapAuth = bootstrapWorkspaceId
+    ? { ...OPEN_AUTH_CONTEXT, workspace_id: bootstrapWorkspaceId, is_workspace_member: true }
+    : OPEN_AUTH_CONTEXT;
+  const existingProjects = await services.projectService.list(bootstrapAuth);
   if (existingProjects.length === 0) {
     console.log('No existing projects found. Creating default project "Alpha Agent Project"...');
     await services.projectService.create({
       name: 'Alpha Agent Project',
       description: 'Primary project for AI agent collaboration'
-    });
+    }, undefined, undefined, bootstrapAuth);
   }
 
   const authMiddleware = createAuthMiddleware(db, tokenService, roleService, agentService, sessionService);

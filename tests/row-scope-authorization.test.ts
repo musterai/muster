@@ -188,7 +188,7 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     await expect(cardService.update('card-other', { title: 'denied' }, userA, { auth })).rejects.toBeInstanceOf(PermissionDeniedError);
     await expect(cardService.update('card-expired-only', { title: 'denied' }, userA, { auth })).rejects.toBeInstanceOf(PermissionDeniedError);
     await expect(cardService.move('card-expired-assigned', { target_column_id: colA2 }, userA, { auth })).resolves.toMatchObject({ column_id: colA2 });
-    expect((await cardService.getById('card-other')).title).toBe('card-other');
+    expect((await cardService.getById('card-other', db, auth)).title).toBe('card-other');
   });
 
   it('validates workspace before admin bypass and gives missing/cross-workspace cards the same refusal', async () => {
@@ -199,7 +199,8 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
         refusal: expect.objectContaining({ required_permission: 'card.assign_others' }),
       });
     }
-    expect((await cardService.getById('card-cross')).title).toBe('card-cross');
+    expect(await db.query<{ title: string }>('SELECT title FROM card WHERE id = ?', ['card-cross']))
+      .toEqual([{ title: 'card-cross' }]);
   });
 
   it('keeps REST and MCP update/move refusals identical and prevents handler execution', async () => {
@@ -213,8 +214,8 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
       .rejects.toMatchObject({ refusal: expect.objectContaining({ required_permission: 'card.assign_others' }) });
     await expect(server._registeredTools.move_card.handler({ card_id: 'card-unassigned', target_column_id: colA2 }, {}))
       .rejects.toBeInstanceOf(PermissionDeniedError);
-    expect((await cardService.getById('card-other')).title).toBe('card-other');
-    expect((await cardService.getById('card-unassigned')).column_id).toBe(colA);
+    expect((await cardService.getById('card-other', db, currentAuth)).title).toBe('card-other');
+    expect((await cardService.getById('card-unassigned', db, currentAuth)).column_id).toBe(colA);
 
     const allowedRest = await rest('PUT', '/cards/card-own-agent', { title: 'rest-owned' });
     expect(allowedRest.status).toBe(200);
@@ -233,27 +234,21 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     const beforeEvents = await movedEvents();
 
     await expect(cardService.move('card-own-user', { target_column_id: colB }, userA, { auth: currentAuth }))
-      .rejects.toMatchObject({
-        refusal: expect.objectContaining({ required_permission: 'card.assign_others' }),
-      });
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
 
     const restDenied = await rest('PATCH', '/cards/card-own-agent/move', { target_column_id: 'missing-column' });
-    expect(restDenied.status).toBe(403);
+    expect(restDenied.status).toBe(404);
     expect(await restDenied.json()).toMatchObject({
-      error: 'forbidden',
-      required_permission: 'card.assign_others',
+      error: 'Resource not found',
+      code: 'NOT_FOUND',
     });
 
     const server = mcp(currentAuth);
     await expect(server._registeredTools.move_card.handler({ card_id: 'card-coassigned', target_column_id: colB }, {}))
-      .rejects.toMatchObject({
-        refusal: expect.objectContaining({ required_permission: 'card.assign_others' }),
-      });
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
 
     await expect(cardService.move('card-unassigned', { target_column_id: colB }, userA, { auth: adminAuth() }))
-      .rejects.toMatchObject({
-        refusal: expect.objectContaining({ required_permission: 'card.assign_others' }),
-      });
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
 
     expect(await snapshot()).toEqual(beforeCards);
     expect(await movedEvents()).toEqual(beforeEvents);
@@ -272,16 +267,16 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     const deniedRest = await rest('POST', '/cards/card-unassigned/claim', { agent_id: agentOther });
     expect(deniedRest.status).toBe(403);
     expect(await deniedRest.json()).toMatchObject({ required_permission: 'card.assign_others' });
-    expect((await cardService.getById('card-unassigned')).claimed_by).toBeNull();
+    expect((await cardService.getById('card-unassigned', db, currentAuth)).claimed_by).toBeNull();
 
     const server = mcp(currentAuth);
     await expect(server._registeredTools.claim_card.handler({ card_id: 'card-unassigned', agent_id: agentOther }, {}))
       .rejects.toMatchObject({ refusal: expect.objectContaining({ required_permission: 'card.assign_others' }) });
-    expect((await cardService.getById('card-unassigned')).assignees).toEqual([]);
+    expect((await cardService.getById('card-unassigned', db, currentAuth)).assignees).toEqual([]);
 
     const allowed = await rest('POST', '/cards/card-unassigned/claim', { agent_id: agentA });
     expect(allowed.status).toBe(200);
-    expect((await cardService.getById('card-unassigned')).claimed_by).toBe(agentA);
+    expect((await cardService.getById('card-unassigned', db, currentAuth)).claimed_by).toBe(agentA);
   });
 
   it('enforces agent lifecycle ownership directly, including removed agents and non-disclosing cross-workspace targets', async () => {
@@ -314,7 +309,7 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
       .rejects.toBeInstanceOf(PermissionDeniedError);
     await expect(agentService.register({ name: 'no-auth-new-agent' }, userA, undefined, wsA))
       .rejects.toBeInstanceOf(PermissionDeniedError);
-    expect((await cardService.getById('card-own-user')).title).toBe('card-own-user');
+    expect((await cardService.getById('card-own-user', db, juniorAuth())).title).toBe('card-own-user');
     expect((await agentService.getById(agentA))!.name).toBe(agentA);
   });
 
@@ -335,7 +330,7 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
       .rejects.toBeInstanceOf(PermissionDeniedError);
     expect(await agentService.getById('caller-selected-new-id')).toBeNull();
 
-    const listed = await agentService.list(wsA);
+    const listed = await agentService.list(currentAuth);
     expect(listed.map(agent => agent.id)).toContain(agentA);
     expect(listed.map(agent => agent.id)).not.toContain(agentB);
     const restListed = await rest('GET', '/agents');
