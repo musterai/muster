@@ -24,4 +24,3 @@ export const TERMINAL_WORKFLOW_ROLE: ColumnWorkflowRole = 'terminal';
 export const ACTIVE_WORKFLOW_ROLE: ColumnWorkflowRole = 'active';
 
 export type WorkflowConfigState = 'configured' | 'needs_review';
-

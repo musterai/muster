@@ -7,4 +7,3 @@ ALTER TABLE "column"
 
 CREATE INDEX IF NOT EXISTS idx_column_workflow_role
   ON "column" (board_id, workflow_role);
-
