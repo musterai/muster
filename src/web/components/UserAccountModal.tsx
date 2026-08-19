@@ -6,6 +6,7 @@ import { TokensView } from './TokensView.js';
 import { WorkspaceAdmin } from './WorkspaceAdmin.js';
 import { PrincipalChip } from './PrincipalChip.js';
 import { X, User, Palette, KeyRound, ShieldCheck, UserCircle, Check, Trash2 } from 'lucide-react';
+import { AccessibleDialog } from './AccessibleDialog.js';
 
 type AccountTab = 'appearance' | 'tokens' | 'admin' | 'profile';
 
@@ -30,14 +31,6 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
   const [name, setName] = useState(currentUser?.display_name || '');
   const [saving, setSaving] = useState(false);
   const [existingUsers, setExistingUsers] = useState<UserType[]>([]);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
 
   useEffect(() => {
     if (activeTab === 'profile' && authMode === 'open') {
@@ -74,11 +67,12 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
   };
 
   return (
-    <div className="muster-scrim" onClick={onClose}>
-      <div
-        className="muster-dialog w-full max-w-3xl max-h-[85vh] flex flex-col font-sans overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <AccessibleDialog
+      onClose={onClose}
+      titleId="account-dialog-title"
+      descriptionId="account-dialog-description"
+      className="w-full max-w-3xl max-h-[85vh] flex flex-col font-sans overflow-hidden"
+    >
         {/* Header */}
         <div className="p-4 border-b border-muster-border flex items-center justify-between bg-muster-surface">
           <div className="flex items-center space-x-3">
@@ -87,21 +81,24 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h2 className="text-sm font-bold muster-text-primary">{displayName}</h2>
+                <h2 id="account-dialog-title" className="text-sm font-bold muster-text-primary">{displayName}</h2>
                 <PrincipalChip name={displayName} kind="user" />
               </div>
-              <p className="text-[11px] muster-text-muted">Account Preferences & Workspace Settings</p>
+              <p id="account-dialog-description" className="text-[11px] muster-text-muted">Account Preferences & Workspace Settings</p>
             </div>
           </div>
 
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close account settings">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Modal Navigation Tabs */}
-        <div className="flex border-b border-muster-border/80 px-4 bg-muster-surface/60 overflow-x-auto no-scrollbar">
+        <div role="tablist" aria-label="Account settings sections" className="flex border-b border-muster-border/80 px-4 bg-muster-surface/60 overflow-x-auto no-scrollbar">
           <button
+            role="tab"
+            aria-selected={activeTab === 'appearance'}
+            aria-controls="account-panel-appearance"
             onClick={() => setActiveTab('appearance')}
             className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
               activeTab === 'appearance'
@@ -114,6 +111,9 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
           </button>
 
           <button
+            role="tab"
+            aria-selected={activeTab === 'tokens'}
+            aria-controls="account-panel-tokens"
             onClick={() => setActiveTab('tokens')}
             className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
               activeTab === 'tokens'
@@ -127,6 +127,9 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
 
           {workspaceId && (
             <button
+              role="tab"
+              aria-selected={activeTab === 'admin'}
+              aria-controls="account-panel-admin"
               onClick={() => setActiveTab('admin')}
               className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
                 activeTab === 'admin'
@@ -141,6 +144,9 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
 
           {authMode === 'open' && onSetLocalIdentity && (
             <button
+              role="tab"
+              aria-selected={activeTab === 'profile'}
+              aria-controls="account-panel-profile"
               onClick={() => setActiveTab('profile')}
               className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
                 activeTab === 'profile'
@@ -155,7 +161,7 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
         </div>
 
         {/* Tab Body Content */}
-        <div className="p-5 overflow-y-auto flex-1">
+        <div id={`account-panel-${activeTab}`} role="tabpanel" className="p-5 overflow-y-auto flex-1">
           {activeTab === 'appearance' && (
             <ThemePicker />
           )}
@@ -268,7 +274,6 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };

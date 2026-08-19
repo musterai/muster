@@ -521,6 +521,19 @@ html.light {
     gap: 0;
   }
 
+  .muster-touch-target {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .muster-card-action {
+    min-height: 2rem;
+  }
+
+  .muster-card-move {
+    min-height: 2rem;
+  }
+
   /* Primary — the profile accent. One primary action per view. */
   .muster-btn-primary {
     background-color: var(--color-accent-solid);
@@ -797,6 +810,44 @@ html.light {
   }
 }
 
+@media (max-width: 639px), (pointer: coarse) {
+  .muster-btn,
+  .muster-tab,
+  .muster-segmented-item,
+  .muster-card-action,
+  .muster-card-move,
+  .muster-input {
+    min-height: 2.75rem;
+  }
+
+  .muster-btn-icon,
+  .muster-card-action {
+    min-width: 2.75rem;
+  }
+
+  .muster-scrim {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .muster-scrim > .muster-dialog {
+    max-height: 90dvh;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* ══════════════════════════════════════════════════════════════
    Semantic text/fill helpers
    ══════════════════════════════════════════════════════════════ */
@@ -1001,4 +1052,3 @@ html.light {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
-

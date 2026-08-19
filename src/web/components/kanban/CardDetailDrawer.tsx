@@ -31,6 +31,7 @@ import { renderMarkdown } from '../../markdown.js';
 import { CardRelationSection } from './CardRelationSection.js';
 import { WorkLinkSection } from './WorkLinkSection.js';
 import { PRIORITY_BADGE_CLASSES } from '../../utils/card-helpers.js';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 interface CardDetailDrawerProps {
   cardDetails: CardDetails | null;
@@ -166,11 +167,18 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
   };
 
   return (
-    <div className="muster-scrim" onClick={onClose}>
-      <div
-        className="muster-dialog w-full max-w-4xl max-h-[90vh] flex flex-col mx-2 font-sans overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <AccessibleDialog
+      onClose={onClose}
+      titleId="card-detail-title"
+      descriptionId="card-detail-description"
+      className="w-full max-w-4xl max-h-[90vh] flex flex-col mx-2 font-sans overflow-hidden"
+    >
+        <h2 id="card-detail-title" className="sr-only">
+          {cardDetails ? `${cardDetails.key}: ${cardDetails.title}` : 'Create card'}
+        </h2>
+        <p id="card-detail-description" className="sr-only">
+          {cardDetails ? 'View and edit card details, assignments, links, and comments.' : 'Enter details for the new card.'}
+        </p>
         {/* Drawer Header */}
         <div className="p-4 border-b border-muster-border flex items-center justify-between bg-muster-surface flex-shrink-0">
           <div className="flex items-center space-x-3 min-w-0">
@@ -245,7 +253,12 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                 </button>
               </>
             )}
-            <button onClick={onClose} className="p-1 muster-text-muted hover:muster-text-primary rounded cursor-pointer" title="Close Task">
+            <button
+              onClick={onClose}
+              className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target"
+              title="Close Task"
+              aria-label="Close card details"
+            >
               <X className="w-5 h-5" />
             </button>
           </div>
@@ -669,7 +682,6 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
             </>
           )}
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };

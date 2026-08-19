@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Column } from '../../types.js';
 import { X, Plus, Layers, AlertCircle, Edit2, Trash2 } from 'lucide-react';
 import { api } from '../../api.js';
-import { useEscapeKey } from './useEscapeKey.js';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 interface NewBoardModalProps {
   projectId: string;
@@ -11,7 +11,6 @@ interface NewBoardModalProps {
 }
 
 export const NewBoardModal: React.FC<NewBoardModalProps> = ({ projectId, onClose, onSuccess }) => {
-  useEscapeKey(onClose);
   const [name, setName] = useState('');
   const [template, setTemplate] = useState<'simple' | 'standard'>('simple');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -36,19 +35,18 @@ export const NewBoardModal: React.FC<NewBoardModalProps> = ({ projectId, onClose
   };
 
   return (
-    <div className="muster-scrim">
-      <div className="muster-dialog w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
+    <AccessibleDialog onClose={onClose} titleId="new-board-title" className="w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="new-board-title" className="text-sm font-bold muster-text-primary flex items-center">
             <Layers className="w-4 h-4 mr-2 muster-accent" /> Create New Board
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close create board dialog">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {error && (
-          <div className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
+          <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{error}</span>
           </div>
@@ -56,8 +54,10 @@ export const NewBoardModal: React.FC<NewBoardModalProps> = ({ projectId, onClose
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="muster-label">Board Name</label>
+            <label htmlFor="new-board-name" className="muster-label">Board Name</label>
             <input
+              id="new-board-name"
+              data-dialog-initial-focus
               type="text"
               required
               value={name}
@@ -68,8 +68,9 @@ export const NewBoardModal: React.FC<NewBoardModalProps> = ({ projectId, onClose
           </div>
 
           <div>
-            <label className="muster-label">Board Structure / Lanes</label>
+            <label htmlFor="new-board-template" className="muster-label">Board Structure / Lanes</label>
             <select
+              id="new-board-template"
               value={template}
               onChange={(e) => setTemplate(e.target.value as 'simple' | 'standard')}
               className="muster-input"
@@ -96,8 +97,7 @@ export const NewBoardModal: React.FC<NewBoardModalProps> = ({ projectId, onClose
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };
 
@@ -108,7 +108,6 @@ interface NewColumnModalProps {
 }
 
 export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose, onSuccess }) => {
-  useEscapeKey(onClose);
   const [name, setName] = useState('');
   const [wipLimit, setWipLimit] = useState<string>('');
   const [isTerminal, setIsTerminal] = useState(false);
@@ -135,19 +134,18 @@ export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose
   };
 
   return (
-    <div className="muster-scrim" onClick={onClose}>
-      <div className="muster-dialog w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans" onClick={(e) => e.stopPropagation()}>
+    <AccessibleDialog onClose={onClose} titleId="new-column-title" className="w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="new-column-title" className="text-sm font-bold muster-text-primary flex items-center">
             <Plus className="w-4 h-4 mr-2 muster-accent" /> Add Column
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close add column dialog">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {error && (
-          <div className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
+          <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{error}</span>
           </div>
@@ -155,8 +153,10 @@ export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="muster-label">Column Name</label>
+            <label htmlFor="new-column-name" className="muster-label">Column Name</label>
             <input
+              id="new-column-name"
+              data-dialog-initial-focus
               type="text"
               required
               value={name}
@@ -167,8 +167,9 @@ export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose
           </div>
 
           <div>
-            <label className="muster-label">WIP Limit (Optional)</label>
+            <label htmlFor="new-column-wip" className="muster-label">WIP Limit (Optional)</label>
             <input
+              id="new-column-wip"
               type="number"
               min="1"
               value={wipLimit}
@@ -205,8 +206,7 @@ export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };
 
@@ -218,7 +218,6 @@ interface EditColumnModalProps {
 }
 
 export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClose, onSuccess, onDelete }) => {
-  useEscapeKey(onClose);
   const [name, setName] = useState(column.name);
   const [wipLimit, setWipLimit] = useState<string>(column.wip_limit !== null && column.wip_limit !== undefined ? String(column.wip_limit) : '');
   const [isTerminal, setIsTerminal] = useState(!!column.is_terminal);
@@ -245,19 +244,18 @@ export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClos
   };
 
   return (
-    <div className="muster-scrim" onClick={onClose}>
-      <div className="muster-dialog w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans" onClick={(e) => e.stopPropagation()}>
+    <AccessibleDialog onClose={onClose} titleId="edit-column-title" className="w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="edit-column-title" className="text-sm font-bold muster-text-primary flex items-center">
             <Edit2 className="w-4 h-4 mr-2 muster-accent" /> Edit Column Settings
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close edit column dialog">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {error && (
-          <div className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
+          <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{error}</span>
           </div>
@@ -265,8 +263,10 @@ export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClos
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="muster-label">Column Name</label>
+            <label htmlFor="edit-column-name" className="muster-label">Column Name</label>
             <input
+              id="edit-column-name"
+              data-dialog-initial-focus
               type="text"
               required
               value={name}
@@ -277,8 +277,9 @@ export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClos
           </div>
 
           <div>
-            <label className="muster-label">WIP Limit (Optional)</label>
+            <label htmlFor="edit-column-wip" className="muster-label">WIP Limit (Optional)</label>
             <input
+              id="edit-column-wip"
               type="number"
               min="1"
               value={wipLimit}
@@ -332,7 +333,6 @@ export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClos
             </button>
           </div>
         )}
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };

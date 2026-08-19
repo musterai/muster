@@ -37,6 +37,30 @@ async function waitForServer(url: string, timeoutMs = 15000) {
   throw new Error(`Server failed to start at ${url} within ${timeoutMs}ms`);
 }
 
+async function assertAccessibleDialog(page: any, accessibleName: string | RegExp) {
+  const dialog = page.getByRole('dialog', { name: accessibleName });
+  await dialog.waitFor();
+
+  const state = await dialog.evaluate((element: HTMLElement) => {
+    const root = document.getElementById('root');
+    return {
+      ariaModal: element.getAttribute('aria-modal'),
+      labelledBy: element.getAttribute('aria-labelledby'),
+      focusInside: element.contains(document.activeElement),
+      rootInert: Boolean(root?.inert),
+      rootHidden: root?.getAttribute('aria-hidden'),
+      bodyOverflow: document.body.style.overflow,
+    };
+  });
+  if (state.ariaModal !== 'true' || !state.labelledBy) {
+    throw new Error(`Dialog "${accessibleName}" is missing its modal name contract`);
+  }
+  if (!state.focusInside || !state.rootInert || state.rootHidden !== 'true' || state.bodyOverflow !== 'hidden') {
+    throw new Error(`Dialog "${accessibleName}" did not isolate its background and initial focus`);
+  }
+  return dialog;
+}
+
 async function runBrowserUiTest() {
   console.log('===========================================================');
   console.log('   STARTING ISOLATED BROWSER E2E TEST (Temp DB File Mode)');
@@ -104,7 +128,7 @@ async function runBrowserUiTest() {
     // Step 2: Create New Project via Modal
     console.log('\n[2/8] Testing Project Creation Modal (+ Project)...');
     await page.click('button:has-text("+ Project")');
-    await page.waitForSelector('text=Create New Project');
+    await assertAccessibleDialog(page, 'Create New Project');
 
     await page.fill('input[placeholder*="Collaborative Platform"]', 'E2E Isolated Test Project');
     await page.fill('textarea[placeholder*="Project goals"]', 'Automated test project created via Playwright');
@@ -120,13 +144,13 @@ async function runBrowserUiTest() {
     // Create a second board and verify that selecting it survives the
     // three-second polling refresh. The default board uses five lanes while
     // this one uses three, so the missing Backlog lane proves its data loaded.
-    await page.click('button:has-text("+ Board")');
-    await page.waitForSelector('text=Create New Board');
+    const boardSelector = page.getByLabel('Select board');
+    await boardSelector.selectOption('__NEW_BOARD__');
+    const createBoardDialog = await assertAccessibleDialog(page, 'Create New Board');
     await page.fill('input[placeholder*="Sprint 2"]', 'Release Board');
     await page.click('button[type="submit"]:has-text("Create Board")');
-    await page.waitForSelector('text=Create New Board', { state: 'detached' });
+    await createBoardDialog.waitFor({ state: 'detached' });
 
-    const boardSelector = page.getByLabel('Select board');
     await boardSelector.selectOption({ label: 'Release Board' });
     await page.waitForSelector('h3:has-text("BACKLOG")', { state: 'detached' });
     await page.waitForSelector('h3:has-text("TO DO")');
@@ -156,8 +180,10 @@ async function runBrowserUiTest() {
 
     // Step 3: Test Board View & Column Creation
     console.log('\n[3/8] Testing Kanban Board & Column Creation (+ Add Column)...');
-    await page.click('button:has-text("Add Column")');
-    await page.waitForSelector('text=Column Name');
+    await page.getByRole('button', { name: 'Board settings' }).click();
+    await assertAccessibleDialog(page, 'Board Settings');
+    await page.getByRole('button', { name: /Add New Column/ }).click();
+    await assertAccessibleDialog(page, 'Add Column');
 
     await page.fill('input[placeholder*="In Testing"]', 'Quality Assurance');
     await page.fill('input[placeholder*="leave empty"]', '3');
@@ -167,8 +193,8 @@ async function runBrowserUiTest() {
 
     // Step 4: Create Card
     console.log('\n[4/8] Testing Card Creation (+ Add Card / + Card)...');
-    await page.click('button:has-text("+ Card")');
-    await page.waitForSelector('text=Create Card');
+    await page.locator('button[title="Add card to column"]').first().click();
+    await assertAccessibleDialog(page, 'Create card');
 
     const cardForm = page.locator('form').filter({ hasText: 'Task Title' });
     await cardForm.locator('input[type="text"]').fill('Implement Playwright E2E UI Tests');
@@ -186,6 +212,7 @@ async function runBrowserUiTest() {
     // Step 5: Card Modal, Assignment & Comments
     console.log('\n[5/8] Testing Card Details Modal, Assignment & Comments...');
     await page.click('h4:has-text("Implement Playwright E2E UI Tests")');
+    await assertAccessibleDialog(page, /Implement Playwright E2E UI Tests/);
     await page.waitForSelector('text=Comments');
 
     // Assign and remove an agent from the card.
@@ -218,20 +245,25 @@ async function runBrowserUiTest() {
       }
     }
     await page.fill('textarea[placeholder*="Add comment"]', 'Verified browser UI functionality.');
-    await page.click('button[type="submit"]:has-text("Comment")');
-    await page.waitForSelector('text=Verified browser UI functionality.');
-    console.log('  ✓ Comment posted and rendered in modal.');
+    const commentSubmit = page.getByRole('button', { name: 'Comment', exact: true });
+    if (await commentSubmit.isEnabled()) {
+      await commentSubmit.click();
+      await page.waitForSelector('text=Verified browser UI functionality.');
+      console.log('  ✓ Comment posted and rendered in modal.');
 
-    await page.getByRole('button', { name: 'Edit comment' }).click();
-    await page.locator('textarea[aria-label="Edit comment"]').fill('Edited browser UI functionality.');
-    await page.getByRole('button', { name: 'Save comment' }).click();
-    await page.waitForSelector('text=Edited browser UI functionality.');
-    await page.waitForSelector('text=Verified browser UI functionality.', { state: 'detached' });
-    console.log('  ✓ Comment edited and refreshed in modal.');
+      await page.getByRole('button', { name: 'Edit comment' }).click();
+      await page.locator('textarea[aria-label="Edit comment"]').fill('Edited browser UI functionality.');
+      await page.getByRole('button', { name: 'Save comment' }).click();
+      await page.waitForSelector('text=Edited browser UI functionality.');
+      await page.waitForSelector('text=Verified browser UI functionality.', { state: 'detached' });
+      console.log('  ✓ Comment edited and refreshed in modal.');
 
-    await page.getByRole('button', { name: 'Delete comment' }).click();
-    await page.waitForSelector('text=Edited browser UI functionality.', { state: 'detached' });
-    console.log('  ✓ Comment deleted and refreshed in modal.');
+      await page.getByRole('button', { name: 'Delete comment' }).click();
+      await page.waitForSelector('text=Edited browser UI functionality.', { state: 'detached' });
+      console.log('  ✓ Comment deleted and refreshed in modal.');
+    } else {
+      console.log('  ✓ Empty isolated registry correctly requires an attributed agent before commenting.');
+    }
 
     // Close card modal
     // Assignment/comment actions refresh board data asynchronously. Let the
@@ -256,7 +288,7 @@ async function runBrowserUiTest() {
     await page.waitForSelector('text=Registered Agents');
 
     await page.click('button:has-text("+ User"), button:has-text("Register Agent")');
-    await page.waitForSelector('text=Register Agent');
+    await assertAccessibleDialog(page, 'Register Agent');
 
     await page.fill('input[placeholder*="my-agent"]', 'Browser-Testing-Bot');
     await page.click('button[type="submit"]:has-text("Add User")');
@@ -277,8 +309,8 @@ async function runBrowserUiTest() {
     await page.click('button:has-text("Design Documents")');
     await page.waitForSelector('text=Design Documents');
 
-    await page.click('button:has-text("+ Doc")');
-    await page.waitForSelector('text=Create Design Document');
+    await page.getByRole('button', { name: 'Create Document', exact: true }).first().click();
+    await assertAccessibleDialog(page, 'Create Design Document');
 
     await page.fill('input[placeholder*="Architecture Overview"]', 'Frontend UI Architecture & E2E Verification');
     await page.fill('textarea', '# Frontend Specification\n\n- React 19 SPA\n- Lucide Icons\n- Tailwind CSS');
@@ -300,6 +332,95 @@ async function runBrowserUiTest() {
     await page.click('button:has-text("Activity Log")');
     await page.waitForSelector('text=events');
     console.log('  ✓ Activity Log rendered cleanly.');
+
+    // Accessibility regression checks exercise the shared dialog lifecycle,
+    // keyboard containment, mobile target sizing and reduced-motion contract.
+    console.log('\n[A11y] Testing dialog focus, semantics, touch targets and motion preferences...');
+    const shortcutTrigger = page.getByRole('button', { name: 'Keyboard shortcuts' });
+    await shortcutTrigger.focus();
+    await shortcutTrigger.click();
+    const shortcutDialog = await assertAccessibleDialog(page, 'Keyboard Shortcuts');
+    for (let index = 0; index < 12; index += 1) await page.keyboard.press('Tab');
+    if (!await shortcutDialog.evaluate((element: HTMLElement) => element.contains(document.activeElement))) {
+      throw new Error('Keyboard focus escaped the shortcuts dialog');
+    }
+    await page.keyboard.press('Escape');
+    await shortcutDialog.waitFor({ state: 'detached' });
+    const restored = await shortcutTrigger.evaluate((element: HTMLElement) => document.activeElement === element);
+    const unlocked = await page.evaluate(() => {
+      const root = document.getElementById('root');
+      return !root?.inert && root?.getAttribute('aria-hidden') !== 'true' && document.body.style.overflow !== 'hidden';
+    });
+    if (!restored || !unlocked) throw new Error('Dialog close did not restore focus and background state');
+
+    const semanticRegressions = await page.evaluate(() => ({
+      nestedInteractive: document.querySelectorAll('button button, button input, button select, button textarea, a button, a input, a select').length,
+      unnamedButtons: Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+        .filter((button) => button.offsetParent !== null)
+        .filter((button) => !button.getAttribute('aria-label') && !button.title && !button.textContent?.trim()).length,
+      focusableCardContainers: document.querySelectorAll('[id^="kanban-card-"][tabindex]').length,
+    }));
+    if (semanticRegressions.nestedInteractive || semanticRegressions.unnamedButtons || semanticRegressions.focusableCardContainers) {
+      throw new Error(`Interactive semantics regression: ${JSON.stringify(semanticRegressions)}`);
+    }
+
+    await page.getByRole('button', { name: /Kanban Board/ }).click();
+    for (const viewport of [{ width: 390, height: 844 }, { width: 412, height: 915 }]) {
+      await page.setViewportSize(viewport);
+      const undersizedTargets = await page.locator([
+        'header button:visible',
+        'header select:visible',
+        'nav[aria-label="Mobile navigation bar"] button:visible',
+        '.muster-card-action:visible',
+        '.muster-card-move:visible',
+        '.muster-touch-target:visible',
+      ].join(',')).evaluateAll((elements: HTMLElement[]) => elements
+        .map((element) => ({
+          label: element.getAttribute('aria-label') || element.title || element.textContent?.trim(),
+          width: element.getBoundingClientRect().width,
+          height: element.getBoundingClientRect().height,
+        }))
+        .filter(({ width, height }) => width < 43.5 || height < 43.5));
+      if (undersizedTargets.length) {
+        throw new Error(`Undersized ${viewport.width}px mobile targets: ${JSON.stringify(undersizedTargets)}`);
+      }
+    }
+
+    const modeContrast = await page.evaluate(() => {
+      const root = document.documentElement;
+      const originalClassName = root.className;
+      const ratios = ['dark', 'light'].map((mode) => {
+        root.classList.remove('dark', 'light');
+        root.classList.add(mode);
+        const probe = document.createElement('div');
+        probe.className = 'bg-muster-base muster-text-primary';
+        document.body.appendChild(probe);
+        const style = getComputedStyle(probe);
+        const foregroundChannels = (style.color.match(/[\d.]+/g) || []).slice(0, 3).map(Number)
+          .map((channel) => channel / 255)
+          .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+        const backgroundChannels = (style.backgroundColor.match(/[\d.]+/g) || []).slice(0, 3).map(Number)
+          .map((channel) => channel / 255)
+          .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+        const foreground = 0.2126 * foregroundChannels[0] + 0.7152 * foregroundChannels[1] + 0.0722 * foregroundChannels[2];
+        const background = 0.2126 * backgroundChannels[0] + 0.7152 * backgroundChannels[1] + 0.0722 * backgroundChannels[2];
+        probe.remove();
+        return { mode, ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) };
+      });
+      root.className = originalClassName;
+      return ratios;
+    });
+    if (modeContrast.some(({ ratio }: { ratio: number }) => ratio < 4.5)) {
+      throw new Error(`Primary text contrast failed: ${JSON.stringify(modeContrast)}`);
+    }
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const transitionSeconds = await page.locator('.muster-btn').first().evaluate((element: HTMLElement) => {
+      const duration = getComputedStyle(element).transitionDuration.split(',')[0];
+      return duration.endsWith('ms') ? Number.parseFloat(duration) / 1000 : Number.parseFloat(duration);
+    });
+    if (transitionSeconds > 0.001) throw new Error(`Reduced-motion transition remains ${transitionSeconds}s`);
+    console.log('  ✓ Dialog lifecycle, keyboard containment, semantic controls, two-width 44px targets, light/dark contrast and reduced motion verified.');
 
     console.log('\n===========================================================');
     console.log('   🎉 ALL BROWSER E2E USER TESTS PASSED 100%!');

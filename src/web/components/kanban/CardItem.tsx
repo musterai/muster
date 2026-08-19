@@ -1,7 +1,7 @@
 import React from 'react';
 import { Draggable } from '@hello-pangea/dnd';
 import { Card, Column } from '../../types.js';
-import { Layers, Copy, Check, Edit2, Trash2 } from 'lucide-react';
+import { Layers, Copy, Check, Edit2, Trash2, GripVertical } from 'lucide-react';
 import { PrincipalChip } from '../PrincipalChip.js';
 import { PRIORITY_BADGE_CLASSES } from '../../utils/card-helpers.js';
 
@@ -49,14 +49,9 @@ export const CardItem: React.FC<CardItemProps> = ({
       {(dragProvided, dragSnapshot) => (
         <div
           id={`kanban-card-${card.id}`}
+          role="listitem"
           ref={dragProvided.innerRef}
-          tabIndex={focusedCardId === card.id ? 0 : -1}
           {...dragProvided.draggableProps}
-          {...dragProvided.dragHandleProps}
-          onClick={() => {
-            onFocusCard(card.id);
-            onOpenCard(card.id);
-          }}
           onMouseEnter={() => {
             if (card.is_epic) {
               onHoverEpicId?.(card.id);
@@ -65,7 +60,7 @@ export const CardItem: React.FC<CardItemProps> = ({
             }
           }}
           onMouseLeave={() => onHoverEpicId?.(null)}
-          className={`p-3.5 rounded-lg border transition-all cursor-pointer group ${
+          className={`p-3.5 rounded-lg border transition-all group ${
             isDimmed ? 'opacity-35 transition-opacity' : ''
           } ${
             focusedCardId === card.id
@@ -80,14 +75,25 @@ export const CardItem: React.FC<CardItemProps> = ({
           }`}
         >
           <div className="flex items-center justify-between mb-2">
-            <button
-              onClick={(e) => onCopyKey(card.key, card.id, e)}
-              className="flex items-center space-x-1 font-mono text-[10px] text-neutral-500 hover:text-brand-400 group-hover:text-brand-400"
-              title="Copy card key"
-            >
-              {copiedKeyCardId === card.id ? <Check className="w-2.5 h-2.5" /> : <Copy className="w-2.5 h-2.5" />}
-              <span>{card.key}</span>
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                {...dragProvided.dragHandleProps}
+                className="muster-btn muster-btn-icon muster-btn-ghost muster-card-action"
+                aria-label={`Drag ${card.key}: ${card.title}. Press Space to lift, then use arrow keys to reorder.`}
+                title="Drag or use the keyboard to reorder card"
+              >
+                <GripVertical className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+              <button
+                onClick={(e) => onCopyKey(card.key, card.id, e)}
+                className="muster-btn muster-btn-ghost muster-card-action font-mono text-[10px]"
+                aria-label={`Copy card key ${card.key}`}
+                title="Copy card key"
+              >
+                {copiedKeyCardId === card.id ? <Check className="w-3 h-3" aria-hidden="true" /> : <Copy className="w-3 h-3" aria-hidden="true" />}
+                <span>{card.key}</span>
+              </button>
+            </div>
             <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
               {!!card.board_name && (
                 <span className="muster-badge muster-badge-info text-[9px] font-mono shrink-0" title={`Board: ${card.board_name}`}>
@@ -106,8 +112,9 @@ export const CardItem: React.FC<CardItemProps> = ({
                   e.stopPropagation();
                   onOpenCard(card.id, true);
                 }}
-                className="muster-btn muster-btn-icon muster-btn-ghost"
+                className="muster-btn muster-btn-icon muster-btn-ghost muster-card-action"
                 title="Edit Task"
+                aria-label={`Edit ${card.key}: ${card.title}`}
               >
                 <Edit2 className="w-3 h-3" />
               </button>
@@ -116,8 +123,9 @@ export const CardItem: React.FC<CardItemProps> = ({
                   e.stopPropagation();
                   onDeleteCard(card.id, card.title);
                 }}
-                className="muster-btn muster-btn-icon muster-btn-ghost-danger"
+                className="muster-btn muster-btn-icon muster-btn-ghost-danger muster-card-action"
                 title="Delete Card"
+                aria-label={`Delete ${card.key}: ${card.title}`}
               >
                 <Trash2 className="w-3 h-3" />
               </button>
@@ -126,7 +134,7 @@ export const CardItem: React.FC<CardItemProps> = ({
 
           {card.parent_epic_key && (
             <div
-              className="inline-flex items-center text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand-950/50 border border-brand-500/40 text-brand-300 mb-2 hover:border-brand-400 cursor-pointer transition-colors max-w-full truncate"
+              className="inline-flex items-center text-[10px] font-mono px-1.5 py-0.5 rounded bg-brand-950/50 border border-brand-500/40 text-brand-300 mb-2 transition-colors max-w-full truncate"
               title={`Parent Epic: ${card.parent_epic_key} - ${card.parent_epic_title}`}
               onMouseEnter={(e) => {
                 e.stopPropagation();
@@ -143,8 +151,21 @@ export const CardItem: React.FC<CardItemProps> = ({
             </div>
           )}
 
-          <h4 className="text-xs font-sans font-semibold muster-text-primary group-hover:text-brand-200 line-clamp-2 mb-2">
-            {card.title}
+          <h4 className="text-xs font-sans font-semibold line-clamp-2 mb-2">
+            <button
+              type="button"
+              data-card-open
+              tabIndex={focusedCardId === card.id ? 0 : -1}
+              onFocus={() => onFocusCard(card.id)}
+              onClick={() => {
+                onFocusCard(card.id);
+                onOpenCard(card.id);
+              }}
+              className="muster-touch-target w-full text-left muster-text-primary group-hover:text-brand-200 rounded"
+              aria-label={`Open ${card.key}: ${card.title}`}
+            >
+              {card.title}
+            </button>
           </h4>
 
           {card.description && (
@@ -176,7 +197,7 @@ export const CardItem: React.FC<CardItemProps> = ({
                   await onMoveCard(card.id, targetColId);
                 }
               }}
-              className="bg-transparent muster-text-muted hover:muster-text-primary text-[10px] focus:outline-none cursor-pointer font-sans rounded px-1 py-0.5 border border-transparent hover:border-muster-border"
+              className="muster-card-move bg-transparent muster-text-muted hover:muster-text-primary text-[10px] cursor-pointer font-sans rounded px-1 py-0.5 border border-transparent hover:border-muster-border"
               title="Quick move to lane"
               aria-label={`Move ${card.title} to another lane`}
             >
