@@ -60,7 +60,16 @@ export function registerWorkspaceTools({ server, services, auth }: McpToolContex
       project_id: z.string(),
       name: z.string(),
       template: z.enum(['simple', 'standard']).optional(),
-      columns: z.array(z.string()).optional(),
+      columns: z.array(z.union([
+        z.string(),
+        z.object({
+          name: z.string(),
+          position: z.string().optional(),
+          wip_limit: z.number().nullable().optional(),
+          workflow_role: z.enum(['backlog', 'ready', 'active', 'review', 'terminal']).optional(),
+          is_terminal: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional(),
+        }).strict(),
+      ])).optional(),
     },
     withPermission('create_board', auth, async (args) => {
       const board = await services.boardService.create(args, resolveActor(auth), undefined, auth);
@@ -94,7 +103,9 @@ export function registerWorkspaceTools({ server, services, auth }: McpToolContex
     board_id: z.string(),
     name: z.string(),
     position: z.string().optional(),
-    wip_limit: z.number().optional()
+    wip_limit: z.number().optional(),
+    workflow_role: z.enum(['backlog', 'ready', 'active', 'review', 'terminal']).optional(),
+    is_terminal: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional(),
   }, withPermission('create_column', auth, async (args) => {
     const col = await services.columnService.create(args, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(col, null, 2) }] };
@@ -104,7 +115,10 @@ export function registerWorkspaceTools({ server, services, auth }: McpToolContex
     column_id: z.string(),
     name: z.string().optional(),
     wip_limit: z.number().nullable().optional(),
-    position: z.string().optional()
+    position: z.string().optional(),
+    workflow_role: z.enum(['backlog', 'ready', 'active', 'review', 'terminal']).optional(),
+    is_terminal: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional(),
+    confirm_impact: z.boolean().optional(),
   }, withPermission('update_column', auth, async ({ column_id, ...data }) => {
     const col = await services.columnService.update(column_id, data, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(col, null, 2) }] };

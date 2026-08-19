@@ -18,7 +18,11 @@ export interface Board {
   slug: string;
   created_at: string;
   updated_at: string;
+  workflow_config_state?: 'configured' | 'needs_review';
+  unclassified_column_ids?: string[];
 }
+
+export type ColumnWorkflowRole = 'backlog' | 'ready' | 'active' | 'review' | 'terminal';
 
 export interface Column {
   id: string;
@@ -26,6 +30,7 @@ export interface Column {
   name: string;
   position: string;
   wip_limit: number | null;
+  workflow_role: ColumnWorkflowRole | null;
   is_terminal: number;
 }
 
@@ -117,6 +122,13 @@ export interface CardDetails extends Card {
   linked_cards: LinkedCardSummary[];
   work_links: CardWorkLink[];
   epic_progress: { total: number; done: number } | null;
+  next_active_lane?: {
+    id: string;
+    board_id: string;
+    name: string;
+    position: string;
+    workflow_role: 'active';
+  } | null;
   comments: {
     id: string;
     card_id: string;

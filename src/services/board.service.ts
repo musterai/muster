@@ -1,19 +1,26 @@
 // File: src/services/board.service.ts
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
-import { Board, CreateBoard, UpdateBoard, Label, CreateLabel } from '../shared/types.js';
+import { Board, CreateBoard, UpdateBoard, Label, CreateLabel, type CreateBoardColumn } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { rankAfter } from '../shared/lexorank.js';
 import { deriveSlug } from '../shared/slug.js';
 import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
+import { WorkflowLanePolicy } from './workflow-lane.policy.js';
 
 export class BoardService {
   constructor(
     private db: DatabaseAdapter,
     private eventService?: EventService
-  ) {}
+  ) {
+  }
+
+  private async decorateBoard(board: Board, db: DatabaseAdapter = this.db): Promise<Board> {
+    const summary = await WorkflowLanePolicy.getBoardSummary(board.id, db);
+    return { ...board, ...summary };
+  }
 
   async create(data: CreateBoard, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board> {
     if (!adapter) {
@@ -46,27 +53,37 @@ export class BoardService {
     };
 
     // Default or custom columns
-    let defaultCols: { name: string; wip_limit: number | null; is_terminal: boolean }[] = [];
+    let defaultCols: Array<{
+      name: string;
+      wip_limit: number | null;
+      workflow_role: ReturnType<typeof WorkflowLanePolicy.roleFromCreateInput>;
+    }> = [];
 
     if (data.columns && data.columns.length > 0) {
-      defaultCols = data.columns.map((colName) => ({
-        name: colName,
-        wip_limit: colName.toLowerCase() === 'in progress' ? 3 : null,
-        is_terminal: colName.trim().toLowerCase() === 'done',
-      }));
+      defaultCols = data.columns.map((column) => {
+        const spec: CreateBoardColumn = typeof column === 'string' ? { name: column } : column;
+        const workflow_role = WorkflowLanePolicy.roleFromCreateInput(spec.workflow_role, spec.is_terminal);
+        return {
+          name: spec.name,
+          wip_limit: spec.wip_limit !== undefined
+            ? spec.wip_limit
+            : workflow_role === 'active' ? 3 : null,
+          workflow_role,
+        };
+      });
     } else if (data.template === 'simple') {
       defaultCols = [
-        { name: 'To Do', wip_limit: null, is_terminal: false },
-        { name: 'In Progress', wip_limit: 3, is_terminal: false },
-        { name: 'Done', wip_limit: null, is_terminal: true },
+        { name: 'To Do', wip_limit: null, workflow_role: 'ready' },
+        { name: 'In Progress', wip_limit: 3, workflow_role: 'active' },
+        { name: 'Done', wip_limit: null, workflow_role: 'terminal' },
       ];
     } else {
       defaultCols = [
-        { name: 'Backlog', wip_limit: null, is_terminal: false },
-        { name: 'To Do', wip_limit: null, is_terminal: false },
-        { name: 'In Progress', wip_limit: 3, is_terminal: false },
-        { name: 'In Review', wip_limit: 2, is_terminal: false },
-        { name: 'Done', wip_limit: null, is_terminal: true },
+        { name: 'Backlog', wip_limit: null, workflow_role: 'backlog' },
+        { name: 'To Do', wip_limit: null, workflow_role: 'ready' },
+        { name: 'In Progress', wip_limit: 3, workflow_role: 'active' },
+        { name: 'In Review', wip_limit: 2, workflow_role: 'review' },
+        { name: 'Done', wip_limit: null, workflow_role: 'terminal' },
       ];
     }
 
@@ -76,8 +93,8 @@ export class BoardService {
       const pos = rankAfter(lastRank);
       lastRank = pos;
       await db.execute(
-        `INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal) VALUES (?, ?, ?, ?, ?, ?)`,
-        [colId, id, col.name, pos, col.wip_limit, col.is_terminal ? 1 : 0]
+        `INSERT INTO "column" (id, board_id, name, position, wip_limit, workflow_role, is_terminal) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [colId, id, col.name, pos, col.wip_limit, col.workflow_role, WorkflowLanePolicy.projectionForRole(col.workflow_role)]
       );
     }
 
@@ -92,18 +109,19 @@ export class BoardService {
       }, db);
     }
 
-    return board;
+    return this.decorateBoard(board, db);
   }
 
   async getById(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board | null> {
     await assertResourceWorkspace(this.db, auth, 'board', id);
     const rows = await this.db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
-    return rows[0] || null;
+    return rows[0] ? this.decorateBoard(rows[0]) : null;
   }
 
   async list(projectId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board[]> {
     await assertResourceWorkspace(this.db, auth, 'project', projectId);
-    return this.db.query<Board>('SELECT * FROM board WHERE project_id = ? ORDER BY created_at ASC', [projectId]);
+    const rows = await this.db.query<Board>('SELECT * FROM board WHERE project_id = ? ORDER BY created_at ASC', [projectId]);
+    return Promise.all(rows.map(row => this.decorateBoard(row)));
   }
 
   async listPage(projectId: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<Board>> {
@@ -120,7 +138,8 @@ export class BoardService {
     sql += ' ORDER BY created_at ASC, id ASC LIMIT ?';
     params.push(limit + 1);
     const rows = await this.db.query<Board>(sql, params);
-    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+    const decorated = await Promise.all(rows.map(row => this.decorateBoard(row)));
+    return toPage(decorated, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
   async update(id: string, data: UpdateBoard, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board> {
@@ -158,7 +177,7 @@ export class BoardService {
       }, db);
     }
 
-    return updated;
+    return this.decorateBoard(updated, db);
   }
 
   async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {

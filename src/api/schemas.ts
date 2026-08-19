@@ -68,6 +68,7 @@ const documentStatus = z.enum(['draft', 'in_review', 'approved', 'archived']);
 const cardLinkType = z.enum(['blocks', 'blocked_by', 'relates_to', 'duplicates', 'parent_of', 'child_of']);
 const workLinkKind = z.enum(['branch', 'pull_request', 'commit', 'pipeline']);
 const workLinkProvider = z.enum(['forgejo', 'github', 'gitlab', 'other']);
+export const columnWorkflowRoleSchema = z.enum(['backlog', 'ready', 'active', 'review', 'terminal']);
 const paginationQuery = {
   cursor: z.string().trim().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
   limit: queryInteger(1, 100).optional(),
@@ -106,7 +107,16 @@ export const projectUpdateSchema = nonEmptyUpdate(strictObject({
 
 export const boardCreateSchema = strictObject({
   name: textSchema(MAX_NAME),
-  columns: z.array(textSchema(MAX_LABEL)).max(MAX_ARRAY_ITEMS).optional(),
+  columns: z.array(z.union([
+    textSchema(MAX_LABEL),
+    strictObject({
+      name: textSchema(MAX_LABEL),
+      position: textSchema(MAX_ID).optional(),
+      wip_limit: z.number().int().min(0).max(100_000).nullable().optional(),
+      workflow_role: columnWorkflowRoleSchema.optional(),
+      is_terminal: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional(),
+    }),
+  ])).max(MAX_ARRAY_ITEMS).optional(),
   template: z.enum(['simple', 'standard']).optional(),
 });
 export const boardUpdateSchema = nonEmptyUpdate(strictObject({ name: textSchema(MAX_NAME).optional() }));
@@ -115,13 +125,16 @@ export const columnCreateSchema = strictObject({
   name: textSchema(MAX_NAME),
   position: textSchema(MAX_ID).optional(),
   wip_limit: z.number().int().min(0).max(100_000).optional(),
+  workflow_role: columnWorkflowRoleSchema.optional(),
   is_terminal: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional(),
 });
 export const columnUpdateSchema = nonEmptyUpdate(strictObject({
   name: textSchema(MAX_NAME).optional(),
   position: textSchema(MAX_ID).optional(),
   wip_limit: z.number().int().min(0).max(100_000).nullable().optional(),
+  workflow_role: columnWorkflowRoleSchema.optional(),
   is_terminal: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional(),
+  confirm_impact: z.boolean().optional(),
 }));
 
 export const cardSearchQuerySchema = strictObject({

@@ -1,5 +1,5 @@
 // File: src/web/api.ts
-import { Project, Board, Column, Card, CardSummary, CardDetails, Document, DocumentSummary, DocumentVersion, DocumentVersionSummary, Agent, User, AuthMe, Role, Invitation, CreatedInvitation, DeviceGrantInfo, McpAuthorizeDetails, AuditRecord, Event, ProjectSummary, Label, KnowledgeBase, KBEntity, KBFact, KBFactSummary, KBRelation, EntityKnowledgeResult, KBGraphTree, CardLinkRelationType, CreateCardWorkLink, ApiToken, CreatedApiToken, Page } from './types.js';
+import { Project, Board, Column, Card, CardSummary, CardDetails, Document, DocumentSummary, DocumentVersion, DocumentVersionSummary, Agent, User, AuthMe, Role, Invitation, CreatedInvitation, DeviceGrantInfo, McpAuthorizeDetails, AuditRecord, Event, ProjectSummary, Label, KnowledgeBase, KBEntity, KBFact, KBFactSummary, KBRelation, EntityKnowledgeResult, KBGraphTree, CardLinkRelationType, CreateCardWorkLink, ApiToken, CreatedApiToken, Page, ColumnWorkflowRole } from './types.js';
 
 const API_BASE = '/api/v1';
 
@@ -111,7 +111,7 @@ export const api = {
 
   // Boards
   getBoards: (projectId: string) => fetchAllPages<Board>(`/projects/${projectId}/boards`),
-  createBoard: (projectId: string, name: string, template?: 'simple' | 'standard', columns?: string[]) =>
+  createBoard: (projectId: string, name: string, template?: 'simple' | 'standard', columns?: Array<string | { name: string; position?: string; wip_limit?: number | null; workflow_role?: ColumnWorkflowRole; is_terminal?: boolean | number }>) =>
     fetchJSON<Board>(`/projects/${projectId}/boards`, { method: 'POST', body: JSON.stringify({ name, template, columns }) }),
   getBoardDetails: async (id: string, projectId?: string) => {
     if (id === 'all' && projectId) {
@@ -132,8 +132,8 @@ export const api = {
   deleteBoard: (id: string) => fetchJSON<void>(`/boards/${id}`, { method: 'DELETE' }),
 
   // Columns
-  createColumn: (boardId: string, name: string, wipLimit?: number, isTerminal?: boolean) => fetchJSON<Column>(`/boards/${boardId}/columns`, { method: 'POST', body: JSON.stringify({ name, wip_limit: wipLimit, is_terminal: isTerminal }) }),
-  updateColumn: (id: string, data: Partial<Column>) => fetchJSON<Column>(`/columns/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  createColumn: (boardId: string, name: string, wipLimit?: number, workflowRole?: ColumnWorkflowRole) => fetchJSON<Column>(`/boards/${boardId}/columns`, { method: 'POST', body: JSON.stringify({ name, wip_limit: wipLimit, workflow_role: workflowRole }) }),
+  updateColumn: (id: string, data: Partial<Column> & { confirm_impact?: boolean }) => fetchJSON<Column>(`/columns/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   moveColumn: (id: string, position: string) => fetchJSON<Column>(`/columns/${id}`, { method: 'PUT', body: JSON.stringify({ position }) }),
   deleteColumn: (id: string) => fetchJSON<void>(`/columns/${id}`, { method: 'DELETE' }),
 

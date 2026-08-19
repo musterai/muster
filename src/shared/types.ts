@@ -1,5 +1,6 @@
 // File: src/shared/types.ts
 import type { AuthContext } from './auth-context.js';
+import type { ColumnWorkflowRole, WorkflowConfigState } from './workflow-lane.js';
 
 // ============================================================
 // Identity & access control
@@ -148,12 +149,25 @@ export interface Board {
   slug: string;
   created_at: string;
   updated_at: string;
+  /** Computed from the board's columns; exposed to management/read clients. */
+  workflow_config_state?: WorkflowConfigState;
+  /** Columns that still need explicit operator classification. */
+  unclassified_column_ids?: string[];
+}
+
+export interface CreateBoardColumn {
+  name: string;
+  position?: string;
+  wip_limit?: number | null;
+  workflow_role?: ColumnWorkflowRole;
+  /** Legacy compatibility projection; true maps to terminal. */
+  is_terminal?: boolean | number;
 }
 
 export interface CreateBoard {
   project_id: string;
   name: string;
-  columns?: string[];
+  columns?: Array<string | CreateBoardColumn>;
   template?: 'simple' | 'standard';
 }
 
@@ -167,7 +181,9 @@ export interface Column {
   name: string;
   position: string;
   wip_limit: number | null;
-  /** Cards sitting in a terminal column count toward an Epic's "done" total. A board may flag more than one (e.g. both "Done" and an archival lane). Display-only — never changes a card's own `status`. */
+  /** Stable workflow semantics; NULL means the legacy board needs review. */
+  workflow_role: ColumnWorkflowRole | null;
+  /** Compatibility projection derived from workflow_role === terminal. */
   is_terminal: number;
 }
 
@@ -176,6 +192,7 @@ export interface CreateColumn {
   name: string;
   position?: string;
   wip_limit?: number;
+  workflow_role?: ColumnWorkflowRole;
   is_terminal?: boolean | number;
 }
 
@@ -183,7 +200,9 @@ export interface UpdateColumn {
   name?: string;
   wip_limit?: number | null;
   position?: string;
+  workflow_role?: ColumnWorkflowRole;
   is_terminal?: boolean | number;
+  confirm_impact?: boolean;
 }
 
 // ============================================================
@@ -393,6 +412,13 @@ export interface CardDetails extends Card {
   work_links: CardWorkLink[];
   /** Only computed for Epics with at least one child (null otherwise, including non-Epics — never "0/0"). `done` counts children currently sitting in a terminal column. */
   epic_progress: { total: number; done: number } | null;
+  next_active_lane?: {
+    id: string;
+    board_id: string;
+    name: string;
+    position: string;
+    workflow_role: 'active';
+  } | null;
 }
 
 export type CardWorkLinkKind = 'branch' | 'pull_request' | 'commit' | 'pipeline';

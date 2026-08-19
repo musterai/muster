@@ -10,6 +10,7 @@ export * from './card-record.queries.js';
 export * from './card-move.operations.js';
 export * from './card-assignment.operations.js';
 export * from './card-relation.operations.js';
+export * from './workflow-lane.policy.js';
 export * from './comment.service.js';
 export * from './document.service.js';
 export * from './agent.service.js';

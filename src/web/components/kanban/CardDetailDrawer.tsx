@@ -208,7 +208,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   >
                     {columns.map((col) => (
                       <option key={col.id} value={col.id} className="bg-muster-surface muster-text-primary font-sans">
-                        {col.name} {col.is_terminal ? '(Done)' : ''}
+                        {col.name} {col.workflow_role === 'terminal' ? '(Done)' : ''}
                       </option>
                     ))}
                   </select>
@@ -281,7 +281,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                 >
                   {columns.map((col) => (
                     <option key={col.id} value={col.id}>
-                      {col.name} {col.is_terminal ? '(Done)' : ''}
+                      {col.name} {col.workflow_role === 'terminal' ? '(Done)' : ''}
                     </option>
                   ))}
                 </select>

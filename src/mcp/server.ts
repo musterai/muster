@@ -459,9 +459,9 @@ All AI agents and human operators collaborating within Muster must follow this p
    - If architectural changes are required, create or update a document via \`create_document\` / \`update_document\` and submit for review (\`set_document_status\` → 'in_review').
 
 3. **Kanban Card Workflow & Flexible Board Structures**:
-   - Boards are flexible and may have 3 lanes ('To Do' → 'In Progress' → 'Done'), standard 5 lanes, or custom columns. Inspect the active board layout via \`get_board\`.
-   - Call \`list_cards\` or \`get_board\` to find unassigned cards in initial state columns ('To Do' / 'Backlog'). When you know only part of a card title, use \`search_cards\` with the project ID and title query.
-   - When starting work on a task, call \`claim_card\` to record yourself as the assignee and create the work lease, then call \`move_card\` to advance it to the next active-work lane—normally 'In Progress'. Always respect column WIP limits; the server rejects over-limit creates/moves and unresolved blockers on claims or moves into 'In Progress'.
+   - Boards are flexible and may use simple, standard, or custom lane layouts. Inspect each column's persisted workflow role via \`get_board\`; display names are presentation only.
+   - Call \`list_cards\` or \`get_board\` to find unassigned cards in \`backlog\` or \`ready\` role columns. When you know only part of a card title, use \`search_cards\` with the project ID and title query.
+   - When starting work on a task, call \`claim_card\` to record yourself as the assignee and create the work lease, then call \`move_card\` to advance it to the returned active workflow lane. Always respect column WIP limits; the server rejects over-limit creates/moves and unresolved blockers on claims or moves into any active lane.
 
 4. **Mandatory Progress Comments on Cards**:
    - Agents **MUST ALWAYS** log their progress as comments directly on the target card using \`add_comment\`.
@@ -470,8 +470,8 @@ All AI agents and human operators collaborating within Muster must follow this p
    - On a local/open-mode install, \`agent_id\` is REQUIRED on every \`add_comment\` call: pass the exact \`id\` returned by \`register_agent\`. You can edit or delete your own comments afterward with \`update_comment\` / \`delete_comment\`.
 
 5. **Peer Review & Task Completion**:
-   - Before moving a card to 'In Review', attach the branch, pull request, or commit you worked on via \`add_work_link\` — the human operator should never have to go find the work themselves.
-   - When implementation is completed, if an 'In Review' column exists on the board, move the card to 'In Review' for verification. If no 'In Review' column exists (e.g. 3-lane board), post verification notes and move directly to 'Done'.`,
+   - Before moving a card to a \`review\` role lane, attach the branch, pull request, or commit you worked on via \`add_work_link\` — the human operator should never have to go find the work themselves.
+   - When implementation is completed, if a \`review\` role column exists on the board, move the card there for verification. If no \`review\` role exists, post verification notes and move directly to a \`terminal\` role column.`,
         },
       },
     ],
@@ -487,4 +487,3 @@ All AI agents and human operators collaborating within Muster must follow this p
   assertMcpToolPermissionInventory(server);
   return server;
 }
-

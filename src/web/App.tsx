@@ -91,7 +91,7 @@ export const App: React.FC = () => {
   );
   const activeBoardNotDoneCount = useMemo(() => {
     if (!selectedBoardId || !columns.length) return null;
-    const terminalColumnIds = new Set(columns.filter((col) => col.is_terminal === 1).map((col) => col.id));
+    const terminalColumnIds = new Set(columns.filter((col) => col.workflow_role === 'terminal').map((col) => col.id));
     return cards.filter((c) => !c.archived && !terminalColumnIds.has(c.column_id)).length;
   }, [selectedBoardId, columns, cards]);
 

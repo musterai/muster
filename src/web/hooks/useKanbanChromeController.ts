@@ -27,12 +27,14 @@ export interface BoardSettingsController {
   model: {
     board: Board;
     boardNameInput: string;
+    columns: Column[];
   };
   actions: {
     setBoardNameInput(name: string): void;
     rename(): void;
     close(): void;
     openNewColumn(): void;
+    editColumn(column: Column): void;
     deleteBoard(boardId: string): void;
   };
 }
@@ -57,6 +59,7 @@ interface UseKanbanChromeControllerOptions {
   onSelectBoard(boardId: string): void;
   onOpenNewBoard?(): void;
   onOpenNewColumn(): void;
+  onEditColumn(column: Column): void;
   onDeleteBoard(boardId: string): void;
   onRefresh(): void;
 }
@@ -70,6 +73,7 @@ export function useKanbanChromeController({
   onSelectBoard,
   onOpenNewBoard,
   onOpenNewColumn,
+  onEditColumn,
   onDeleteBoard,
   onRefresh,
 }: UseKanbanChromeControllerOptions) {
@@ -136,15 +140,16 @@ export function useKanbanChromeController({
   }), [boards, board, selectedBoardId, boardViewMode, cards, cardDateSortOrder, onSelectBoard, onOpenNewBoard, openBoardSettings, setBoardViewMode, toggleSort]);
 
   const settings = useMemo<BoardSettingsController | null>(() => board ? ({
-    model: { board, boardNameInput },
+    model: { board, boardNameInput, columns },
     actions: {
       setBoardNameInput,
       rename: renameBoard,
       close: closeBoardSettings,
       openNewColumn: onOpenNewColumn,
+      editColumn: onEditColumn,
       deleteBoard: onDeleteBoard,
     },
-  }) : null, [board, boardNameInput, renameBoard, closeBoardSettings, onOpenNewColumn, onDeleteBoard]);
+  }) : null, [board, boardNameInput, columns, renameBoard, closeBoardSettings, onOpenNewColumn, onEditColumn, onDeleteBoard]);
 
   const mobile = useMemo<MobileLaneController>(() => ({
     model: { columns, cards, focusedColumnIndex },

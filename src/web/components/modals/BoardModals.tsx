@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Column } from '../../types.js';
+import type { Column, ColumnWorkflowRole } from '../../types.js';
 import { X, Plus, Layers, AlertCircle, Edit2, Trash2 } from 'lucide-react';
 import { api } from '../../api.js';
 import { AccessibleDialog } from '../AccessibleDialog.js';
@@ -110,7 +110,7 @@ interface NewColumnModalProps {
 export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose, onSuccess }) => {
   const [name, setName] = useState('');
   const [wipLimit, setWipLimit] = useState<string>('');
-  const [isTerminal, setIsTerminal] = useState(false);
+  const [workflowRole, setWorkflowRole] = useState<ColumnWorkflowRole>('ready');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -122,7 +122,7 @@ export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose
     setError(null);
     try {
       const limit = wipLimit ? parseInt(wipLimit, 10) : undefined;
-      await api.createColumn(boardId, name, limit, isTerminal);
+      await api.createColumn(boardId, name, limit, workflowRole);
       onSuccess();
       onClose();
     } catch (err: any) {
@@ -179,15 +179,22 @@ export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose
             />
           </div>
 
-          <label className="flex items-center space-x-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={isTerminal}
-              onChange={(e) => setIsTerminal(e.target.checked)}
-              className="rounded border-muster-border bg-muster-base text-brand-600 focus:ring-brand-500 focus:ring-offset-0"
-            />
-            <span className="muster-label !mb-0">Terminal column (counts as "done" for Epic progress)</span>
-          </label>
+          <div>
+            <label htmlFor="new-column-role" className="muster-label">Workflow role</label>
+            <select
+              id="new-column-role"
+              value={workflowRole}
+              onChange={(e) => setWorkflowRole(e.target.value as ColumnWorkflowRole)}
+              className="muster-input"
+            >
+              <option value="backlog">Backlog — not ready to work</option>
+              <option value="ready">Ready — eligible for work</option>
+              <option value="active">Active — work in progress</option>
+              <option value="review">Review — awaiting verification</option>
+              <option value="terminal">Terminal — completed work</option>
+            </select>
+            <p className="mt-1 text-[10px] muster-text-muted">This role controls claim, move, completion, and Epic progress rules.</p>
+          </div>
 
           <div className="pt-3 flex justify-end space-x-2">
             <button
@@ -212,15 +219,16 @@ export const NewColumnModal: React.FC<NewColumnModalProps> = ({ boardId, onClose
 
 interface EditColumnModalProps {
   column: Column;
+  cardCount?: number;
   onClose: () => void;
   onSuccess: () => void;
   onDelete?: (columnId: string) => void;
 }
 
-export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClose, onSuccess, onDelete }) => {
+export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, cardCount = 0, onClose, onSuccess, onDelete }) => {
   const [name, setName] = useState(column.name);
   const [wipLimit, setWipLimit] = useState<string>(column.wip_limit !== null && column.wip_limit !== undefined ? String(column.wip_limit) : '');
-  const [isTerminal, setIsTerminal] = useState(!!column.is_terminal);
+  const [workflowRole, setWorkflowRole] = useState<ColumnWorkflowRole | ''>(column.workflow_role ?? '');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -232,7 +240,21 @@ export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClos
     setError(null);
     try {
       const limit = wipLimit.trim() !== '' ? parseInt(wipLimit, 10) : null;
-      await api.updateColumn(column.id, { name: name.trim(), wip_limit: limit, is_terminal: isTerminal ? 1 : 0 });
+      if (!workflowRole) {
+        setError('Select a workflow role before saving this lane.');
+        return;
+      }
+      const nextRole = workflowRole;
+      const roleChanged = nextRole !== column.workflow_role;
+      if (roleChanged && cardCount > 0 && !window.confirm(
+        `This lane contains ${cardCount} ${cardCount === 1 ? 'card' : 'cards'}. Changing its workflow role can change blocker enforcement, Epic progress, and completion meaning. Apply this role change?`,
+      )) return;
+      await api.updateColumn(column.id, {
+        name: name.trim(),
+        wip_limit: limit,
+        workflow_role: nextRole,
+        confirm_impact: roleChanged && cardCount > 0,
+      });
       onSuccess();
       onClose();
     } catch (err: any) {
@@ -289,15 +311,23 @@ export const EditColumnModal: React.FC<EditColumnModalProps> = ({ column, onClos
             />
           </div>
 
-          <label className="flex items-center space-x-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={isTerminal}
-              onChange={(e) => setIsTerminal(e.target.checked)}
-              className="rounded border-muster-border bg-muster-base text-brand-600 focus:ring-brand-500 focus:ring-offset-0"
-            />
-            <span className="muster-label !mb-0">Terminal column (counts as "done" for Epic progress)</span>
-          </label>
+          <div>
+            <label htmlFor="edit-column-role" className="muster-label">Workflow role</label>
+            <select
+              id="edit-column-role"
+              value={workflowRole}
+              onChange={(e) => setWorkflowRole(e.target.value as ColumnWorkflowRole | '')}
+              className="muster-input"
+            >
+              <option value="" disabled>Select a workflow role</option>
+              <option value="backlog">Backlog — not ready to work</option>
+              <option value="ready">Ready — eligible for work</option>
+              <option value="active">Active — work in progress</option>
+              <option value="review">Review — awaiting verification</option>
+              <option value="terminal">Terminal — completed work</option>
+            </select>
+            <p className="mt-1 text-[10px] muster-text-muted">Changing a role on a populated lane requires confirmation.</p>
+          </div>
 
           <div className="pt-3 flex justify-end space-x-2">
             <button

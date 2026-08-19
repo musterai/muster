@@ -95,17 +95,17 @@ All AI agents and human operators collaborating within this project must observe
    - Propose architectural updates using \`create_document\` or \`update_document\` with status \`in_review\`.
 
 3. **Kanban Card Workflow & Flexible Board Structures**:
-   - Boards may have 3 lanes ('To Do' → 'In Progress' → 'Done'), standard 5 lanes, or custom columns. Inspect active board layout via \`get_board\`.
-   - Select unassigned tasks from initial state columns ('To Do' or 'Backlog').
-   - When starting work on a task, call \`claim_card\` to record yourself as the assignee and create the work lease, then call \`move_card\` to advance it to the next active-work lane—normally 'In Progress'.
-   - Adhere strictly to WIP limits set on board columns; the server rejects over-limit card creates/moves and unresolved blockers on claims or moves into 'In Progress'.
-   - There is no separate card status field: 'In Review' is a board lane, 'blocked' is expressed via the \`blocks\`/\`blocked_by\` card relationship, and a card is active by default.
+   - Boards may have simple, standard, or custom lane layouts. Inspect each column's persisted workflow role via \`get_board\`; display names are presentation only.
+   - Select unassigned tasks from \`backlog\` or \`ready\` workflow-role columns.
+   - When starting work on a task, call \`claim_card\` to record yourself as the assignee and create the work lease, then call \`move_card\` to advance it to the returned \`active\` workflow-role lane.
+   - Adhere strictly to WIP limits set on board columns; the server rejects over-limit card creates/moves and unresolved blockers on claims or moves into any \`active\` lane.
+   - There is no separate card status field: \`review\` is an optional board role, \`blocked\` is expressed via the \`blocks\`/\`blocked_by\` card relationship, and a card is active by default.
 
 4. **Mandatory Progress Comments on Cards**:
    - Agents **MUST ALWAYS** log their progress as comments directly on the target card using \`add_comment\`.
    - Post card comments for task pickup, sub-task completions, intermediate milestones, blockers, architectural decisions, and test/verification results.
    - Always state current work using full human-readable task titles and work summaries out loud (e.g., \`Working on Muster Task "Create authentication middleware"\`), never raw ID strings like \`Work on card #01J3K...\`.
-   - When implementation is completed, move card to 'In Review' (if column exists) or directly to 'Done' (on simplified boards) after posting verification notes.`,
+   - When implementation is completed, move the card to a \`review\` role lane if one exists, or directly to a \`terminal\` role lane after posting verification notes.`,
       }, actorId, db, auth);
     }
 
@@ -222,7 +222,8 @@ All AI agents and human operators collaborating within this project must observe
       `SELECT COUNT(*) as count FROM card c 
        JOIN "column" col ON c.column_id = col.id 
        JOIN board b ON col.board_id = b.id 
-       WHERE b.project_id = ? AND c.archived = 0 AND col.is_terminal = 0`,
+       WHERE b.project_id = ? AND c.archived = 0
+         AND (col.workflow_role IS NULL OR col.workflow_role <> 'terminal')`,
       [id]
     );
     const not_done_card_count = Number(notDoneCards[0]?.count || 0);

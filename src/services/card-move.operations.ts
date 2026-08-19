@@ -115,7 +115,17 @@ export class CardMoveOperations {
             throw new MoveRetryError();
           }
           const targetColumnId = data.target_column_id ?? existing.column_id;
+          // Both sides of a cross-board move must be classified. A target-only
+          // check would let a card escape a legacy/ambiguous source board by
+          // moving it into a configured board.
+          await this.lanePolicy.assertWorkflowConfigured(existing.column_id, 'move cards', tx);
           const capacity = await this.lanePolicy.getColumnCapacity(targetColumnId, tx);
+          // A card move is workflow-sensitive even when the target is a
+          // non-active lane: fail closed while legacy columns still need
+          // classification rather than falling back to a display name.
+          if (targetColumnId !== existing.column_id) {
+            await this.lanePolicy.assertWorkflowConfigured(targetColumnId, 'move cards', tx);
+          }
           const isColumnChange = targetColumnId !== existing.column_id;
 
           if (
@@ -141,7 +151,7 @@ export class CardMoveOperations {
             overrideRules.push(details);
           }
 
-          if (isColumnChange && capacity.name.trim().toLowerCase() === 'in progress') {
+          if (isColumnChange && capacity.workflow_role === 'active') {
             const blockers = await this.lanePolicy.getUnresolvedBlockers(cardId, tx);
             if (blockers.length > 0) {
               const details = {
@@ -204,7 +214,7 @@ export class CardMoveOperations {
                 position,
               },
             }, tx);
-            if (isColumnChange && capacity.is_terminal === 1) {
+            if (isColumnChange && capacity.workflow_role === 'terminal') {
               await this.eventService.create({
                 project_id: projectId,
                 entity_type: 'card',

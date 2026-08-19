@@ -114,6 +114,7 @@ export class CardAssignmentOperations {
       const card = await this.records.requireCard(canonicalCardId, tx, true);
       await this.accessPolicy.assertCardWorkspaceScope(canonicalCardId, options.auth, tx);
       await assertAgentSelectorScope(tx, agentId, options.auth, 'card.assign_others');
+      await this.lanePolicy.assertWorkflowConfigured(card.column_id, 'claim cards', tx);
 
       const now = new Date();
       const nowIso = now.toISOString();

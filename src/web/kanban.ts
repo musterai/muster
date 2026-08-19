@@ -5,8 +5,8 @@ export type CardDateSortOrder = 'newest' | 'oldest';
 
 export const DONE_LANE_PAGE_SIZE = 25;
 
-export const isDoneLane = (columnName: string): boolean =>
-  columnName.trim().toLocaleLowerCase() === 'done';
+export const isTerminalLane = (workflowRole: string | null | undefined): boolean =>
+  workflowRole === 'terminal';
 
 export const sortCardsByUpdatedAt = (
   cards: Card[],
@@ -33,7 +33,9 @@ export const getLaneCards = (
   columnName: string,
   order: CardDateSortOrder,
   doneVisibleLimit = DONE_LANE_PAGE_SIZE,
-  columnMap?: Record<string, string>
+  columnMap?: Record<string, string>,
+  workflowRole?: string | null,
+  columnRoleMap?: Record<string, string | null | undefined>,
 ): { all: Card[]; visible: Card[]; hiddenCount: number } => {
   const isAllView = columnId.startsWith('all-col-');
   const targetName = columnName.trim().toLowerCase();
@@ -41,6 +43,9 @@ export const getLaneCards = (
     cards.filter((card) => {
       if (card.archived) return false;
       if (isAllView && columnMap) {
+        if (columnRoleMap && workflowRole !== undefined) {
+          return (columnRoleMap[card.column_id] ?? null) === workflowRole;
+        }
         const cardColName = (columnMap[card.column_id] || '').trim().toLowerCase();
         return cardColName === targetName;
       }
@@ -48,7 +53,8 @@ export const getLaneCards = (
     }),
     order
   );
-  const visible = isDoneLane(columnName)
+  const isTerminal = isTerminalLane(workflowRole);
+  const visible = isTerminal
     ? all.slice(0, doneVisibleLimit)
     : all;
 

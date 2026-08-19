@@ -6,10 +6,6 @@ import { CardItem } from './CardItem.js';
 
 const DONE_LANE_PAGE_SIZE = 10;
 
-function isDoneLane(columnName: string): boolean {
-  return columnName.trim().toLowerCase() === 'done';
-}
-
 interface KanbanColumnProps {
   column: Column;
   columnIndex: number;
@@ -172,7 +168,7 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
             ))}
             {provided.placeholder}
 
-            {isDoneLane(column.name) && columnCards.length > DONE_LANE_PAGE_SIZE && (
+            {column.workflow_role === 'terminal' && columnCards.length > DONE_LANE_PAGE_SIZE && (
               <div className="muster-panel p-3 space-y-2 text-center">
                 <p className="text-[10px] font-sans muster-text-muted">
                   Showing {visibleColumnCards.length} of {columnCards.length} cards

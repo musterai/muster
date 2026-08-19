@@ -109,7 +109,7 @@ export function createApplicationServices(
     cardRelationOperations,
     cardService,
     projectService: new ProjectService(db, eventService, boardService, documentService),
-    columnService: new ColumnService(db, eventService),
+    columnService: new ColumnService(db, eventService, auditService),
     commentService: new CommentService(db, eventService),
     kbService: new KBService(db, eventService),
     roleService: new RoleService(db, eventService),

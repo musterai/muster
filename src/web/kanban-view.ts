@@ -1,9 +1,10 @@
-import type { Board, Card, Column } from './types.js';
+import type { Board, Card, Column, ColumnWorkflowRole } from './types.js';
 import { computeReorderedPosition } from './kanban.js';
 
 export interface DisplayColumnModel {
   displayColumns: Column[];
   columnMap: Record<string, string>;
+  columnRoleMap: Record<string, ColumnWorkflowRole | null | undefined>;
 }
 
 /** Build the real or aggregate-board column model without React state. */
@@ -13,20 +14,23 @@ export function buildDisplayColumns(
   board: Board | null,
 ): DisplayColumnModel {
   const columnMap = Object.fromEntries(columns.map((column) => [column.id, column.name]));
-  if (selectedBoardId !== 'all' && board?.id !== 'all') return { displayColumns: columns, columnMap };
+  const columnRoleMap = Object.fromEntries(columns.map((column) => [column.id, column.workflow_role]));
+  if (selectedBoardId !== 'all' && board?.id !== 'all') return { displayColumns: columns, columnMap, columnRoleMap };
 
   const uniqueMap = new Map<string, Column>();
   for (const column of columns) {
     const nameKey = column.name.trim().toLowerCase();
-    if (!uniqueMap.has(nameKey)) {
-      uniqueMap.set(nameKey, {
+    const roleKey = column.workflow_role === undefined ? null : (column.workflow_role ?? 'unclassified');
+    const displayKey = roleKey === null ? nameKey : `${nameKey}::${roleKey}`;
+    if (!uniqueMap.has(displayKey)) {
+      uniqueMap.set(displayKey, {
         ...column,
-        id: `all-col-${nameKey.replace(/\s+/g, '-')}`,
+        id: `all-col-${displayKey.replace(/\s+/g, '-')}`,
         board_id: 'all',
       });
     }
   }
-  return { displayColumns: [...uniqueMap.values()], columnMap };
+  return { displayColumns: [...uniqueMap.values()], columnMap, columnRoleMap };
 }
 
 /** Resolve an aggregate-board lane back to the card's concrete board. */
@@ -36,6 +40,7 @@ export function resolveTargetColumnId(
   displayColumns: Column[],
   columns: Column[],
   cards: Card[],
+  _columnRoleMap?: Record<string, ColumnWorkflowRole | null | undefined>,
 ): string {
   if (!targetColumnId.startsWith('all-col-')) return targetColumnId;
   const targetColumn = displayColumns.find((column) => column.id === targetColumnId);
@@ -43,9 +48,17 @@ export function resolveTargetColumnId(
   if (!targetColumn || !targetCard) return targetColumnId;
 
   const targetName = targetColumn.name.trim().toLowerCase();
-  return columns.find((column) =>
-    column.board_id === targetCard.board_id && column.name.trim().toLowerCase() === targetName
-  )?.id ?? columns.find((column) => column.name.trim().toLowerCase() === targetName)?.id ?? targetColumnId;
+  const targetRole = targetColumn.workflow_role;
+  const roleMatches = targetRole !== undefined
+    ? columns.filter((column) => column.workflow_role === targetRole)
+    : [];
+  return roleMatches.find((column) => column.board_id === targetCard.board_id)?.id
+    ?? roleMatches[0]?.id
+    ?? columns.find((column) =>
+      column.board_id === targetCard.board_id && column.name.trim().toLowerCase() === targetName
+    )?.id
+    ?? columns.find((column) => column.name.trim().toLowerCase() === targetName)?.id
+    ?? targetColumnId;
 }
 
 export interface CardDropResolution {
@@ -64,6 +77,7 @@ export function resolveCardDrop({
   columns,
   displayColumns,
   columnMap,
+  columnRoleMap,
 }: {
   draggableId: string;
   sourceDroppableId: string;
@@ -74,6 +88,7 @@ export function resolveCardDrop({
   columns: Column[];
   displayColumns: Column[];
   columnMap: Record<string, string>;
+  columnRoleMap?: Record<string, ColumnWorkflowRole | null | undefined>;
 }): CardDropResolution {
   const targetDisplayColumnId = destinationDroppableId.split(':::')[0];
   let targetCards = cards.filter((card) => {
@@ -81,6 +96,9 @@ export function resolveCardDrop({
     if (targetDisplayColumnId.startsWith('all-col-')) {
       const targetColumn = displayColumns.find((column) => column.id === targetDisplayColumnId);
       if (!targetColumn) return false;
+      if (columnRoleMap && targetColumn.workflow_role !== undefined) {
+        return (columnRoleMap[card.column_id] ?? null) === targetColumn.workflow_role;
+      }
       return (columnMap[card.column_id] || '').trim().toLowerCase()
         === targetColumn.name.trim().toLowerCase();
     }
@@ -101,6 +119,7 @@ export function resolveCardDrop({
       displayColumns,
       columns,
       cards,
+      columnRoleMap,
     ),
     position: computeReorderedPosition(
       targetCards,

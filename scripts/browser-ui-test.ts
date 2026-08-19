@@ -548,13 +548,27 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
     await page.getByRole('button', { name: 'Board settings' }).click();
     await assertAccessibleDialog(page, 'Board Settings');
     await page.getByRole('button', { name: 'Add New Column', exact: true }).click();
-    await assertAccessibleDialog(page, 'Add Column');
+    const addColumnDialog = await assertAccessibleDialog(page, 'Add Column');
 
     await page.fill('input[placeholder*="In Testing"]', 'Quality Assurance');
     await page.fill('input[placeholder*="leave empty"]', '3');
+    await addColumnDialog.getByLabel('Workflow role').selectOption('review');
     await page.click('button[type="submit"]:has-text("Add Column")');
     await page.waitForSelector('h3:has-text("QUALITY ASSURANCE")');
-    console.log('  ✓ Custom column "QUALITY ASSURANCE" rendered on the board.');
+    await page.getByRole('button', { name: 'Board settings' }).click();
+    const updatedBoardSettings = await assertAccessibleDialog(page, 'Board Settings');
+    const qualityAssuranceLane = updatedBoardSettings
+      .getByRole('listitem')
+      .filter({ hasText: 'Quality Assurance' });
+    await qualityAssuranceLane.getByText('review', { exact: true }).waitFor();
+    await qualityAssuranceLane.getByRole('button', { name: 'Edit role' }).click();
+    const editColumnDialog = await assertAccessibleDialog(page, 'Edit Column Settings');
+    if (await editColumnDialog.getByLabel('Workflow role').inputValue() !== 'review') {
+      throw new Error('Workflow role did not persist through the board settings editor.');
+    }
+    await page.keyboard.press('Escape');
+    await editColumnDialog.waitFor({ state: 'detached' });
+    console.log('  ✓ Custom column rendered with its persisted review workflow role.');
 
     // Step 4: Create Card
     console.log('\n[4/8] Testing Card Creation (+ Add Card / + Card)...');

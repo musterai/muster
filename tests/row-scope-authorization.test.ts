@@ -141,13 +141,18 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
       [`scope-board-${suffix}`, `scope-project-${suffix}`, 'Board', `board-${suffix}`, now, now],
     );
     await db.execute(
-      'INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal) VALUES (?, ?, ?, ?, ?, ?)',
-      [firstColumn, `scope-board-${suffix}`, 'To Do', 'a', null, 0],
+      'INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal, workflow_role) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [firstColumn, `scope-board-${suffix}`, 'To Do', 'a', null, 0, 'active'],
     );
     if (secondColumn) {
       await db.execute(
-        'INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal) VALUES (?, ?, ?, ?, ?, ?)',
-        [secondColumn, `scope-board-${suffix}`, 'In Progress', 'b', null, 0],
+        'INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal, workflow_role) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [secondColumn, `scope-board-${suffix}`, 'In Progress', 'b', null, 1, 'terminal'],
+      );
+    } else {
+      await db.execute(
+        'INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal, workflow_role) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [`scope-col-${suffix}-terminal`, `scope-board-${suffix}`, 'Done', 'b', null, 1, 'terminal'],
       );
     }
   }

@@ -347,7 +347,7 @@ export class CardService {
     const columnIds = [...new Set(children.map(c => c.card.column_id))];
     const placeholders = columnIds.map(() => '?').join(', ');
     const terminalRows = await db.query<{ id: string }>(
-      `SELECT id FROM "column" WHERE is_terminal = 1 AND id IN (${placeholders})`,
+      `SELECT id FROM "column" WHERE workflow_role = 'terminal' AND id IN (${placeholders})`,
       columnIds
     );
     const terminalColumnIds = new Set(terminalRows.map(r => r.id));
@@ -681,7 +681,9 @@ export class CardService {
       options,
     );
     if (result.success === false) return result;
-    return this.getById(result.cardId, this.db, options.auth || OPEN_AUTH_CONTEXT);
+    const details = await this.getById(result.cardId, this.db, options.auth || OPEN_AUTH_CONTEXT);
+    const capacity = await this.lanePolicy.getColumnCapacity(details.column_id, this.db);
+    return { ...details, next_active_lane: await this.lanePolicy.nextActiveLane(capacity.board_id, this.db) };
   }
 
   async renewClaims(agentId: string, ttlSeconds: number = DEFAULT_CLAIM_TTL_SECONDS): Promise<void> {

@@ -2,12 +2,17 @@ import type { DatabaseAdapter } from '../db/adapter.js';
 import type { Card, MoveCard } from '../shared/types.js';
 import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { NotFoundError, ValidationError } from '../shared/errors.js';
+import type { ColumnWorkflowRole, WorkflowConfigState } from '../shared/workflow-lane.js';
+import { WorkflowLanePolicy } from './workflow-lane.policy.js';
 
 export interface ColumnCapacity {
   id: string;
   name: string;
   wip_limit: number | null;
   card_count: number;
+  workflow_role: ColumnWorkflowRole | null;
+  board_id: string;
+  workflow_config_state: WorkflowConfigState;
   is_terminal: number;
 }
 
@@ -91,21 +96,41 @@ export class CardLanePolicy {
     }
     const rows = await db.query<{
       id: string;
+      board_id: string;
       name: string;
       wip_limit: number | null;
       card_count: number | string;
+      workflow_role: ColumnWorkflowRole | null;
+      workflow_config_state: WorkflowConfigState;
       is_terminal: number | string;
     }>(
-      `SELECT col.id, col.name, col.wip_limit, col.is_terminal, COUNT(c.id) AS card_count
+      `SELECT col.id, col.board_id, col.name, col.wip_limit, col.workflow_role,
+              CASE WHEN (
+                NOT EXISTS (SELECT 1 FROM "column" cfg WHERE cfg.board_id = col.board_id
+                  AND (cfg.workflow_role IS NULL OR cfg.workflow_role NOT IN ('backlog', 'ready', 'active', 'review', 'terminal')))
+                AND EXISTS (SELECT 1 FROM "column" cfg WHERE cfg.board_id = col.board_id AND cfg.workflow_role = 'active')
+                AND EXISTS (SELECT 1 FROM "column" cfg WHERE cfg.board_id = col.board_id AND cfg.workflow_role = 'terminal')
+              ) THEN 'configured' ELSE 'needs_review' END AS workflow_config_state,
+              col.is_terminal, COUNT(c.id) AS card_count
        FROM "column" col
        LEFT JOIN card c ON c.column_id = col.id AND c.archived = 0
        WHERE col.id = ?
-       GROUP BY col.id, col.name, col.wip_limit, col.is_terminal`,
+       GROUP BY col.id, col.board_id, col.name, col.wip_limit, col.workflow_role, col.is_terminal`,
       [columnId],
     );
     const row = rows[0];
     if (!row) throw new NotFoundError(`Column with ID ${columnId} not found`);
     return { ...row, card_count: Number(row.card_count), is_terminal: Number(row.is_terminal) };
+  }
+
+  async assertWorkflowConfigured(columnId: string, operation: string, db: DatabaseAdapter = this.db): Promise<void> {
+    const rows = await db.query<{ board_id: string }>('SELECT board_id FROM "column" WHERE id = ?', [columnId]);
+    if (!rows[0]) throw new NotFoundError(`Column with ID ${columnId} not found`);
+    await WorkflowLanePolicy.assertConfigured(rows[0].board_id, operation, db);
+  }
+
+  async nextActiveLane(boardId: string, db: DatabaseAdapter = this.db) {
+    return WorkflowLanePolicy.nextActiveLane(boardId, db);
   }
 
   getUnresolvedBlockers(cardId: string, db: DatabaseAdapter = this.db): Promise<UnresolvedBlocker[]> {
@@ -117,7 +142,7 @@ export class CardLanePolicy {
        WHERE link.target_card_id = ?
          AND link.relation_type = 'blocks'
          AND blocker.archived = 0
-         AND blocker_column.is_terminal = 0
+         AND (blocker_column.workflow_role IS NULL OR blocker_column.workflow_role <> 'terminal')
        ORDER BY blocker.position ASC`,
       [cardId],
     );

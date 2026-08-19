@@ -77,7 +77,7 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
 
   server.tool('claim_card', {
     card_id: cardReferenceSchema,
-    agent_id: z.string().describe('Required — the principal/agent ID claiming the card. This also records the assignee and work lease. After a successful claim, call move_card to advance it to the next active-work lane.'),
+    agent_id: z.string().describe('Required — the principal/agent ID claiming the card. This also records the assignee and work lease. After a successful claim, call move_card to advance it to the next active-work lane selected by board role and position.'),
     ttl_seconds: z.number().optional().describe('Lease duration in seconds; defaults to 600 (10 minutes)'),
     operator_override: z.boolean().optional().describe('Explicitly bypass blocker rules when the authenticated caller has operator override authority'),
   }, withPermission('claim_card', auth, async ({ card_id, agent_id, ttl_seconds, operator_override }) => {
@@ -88,7 +88,7 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
       ? result
       : {
           ...result,
-          next_action: "Claim complete: assignment and work lease recorded. Immediately call move_card to advance this card to the next active-work lane (normally 'In Progress').",
+          next_action: "Claim complete: assignment and work lease recorded. Immediately call move_card to advance this card to the returned next active-work lane (next_active_lane; the board's active workflow role).",
         };
     return { content: [{ type: 'text', text: JSON.stringify(response, null, 2) }] };
   }));

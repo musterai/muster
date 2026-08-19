@@ -93,7 +93,7 @@ describe('MUS-34: Epic progress rollup', () => {
 
   it('children spanning terminal and non-terminal columns produce an accurate done/total count', async () => {
     const { todo, inProgress, done } = await setupBoard();
-    await columnService.update(done.id, { is_terminal: true });
+    await columnService.update(done.id, { is_terminal: true, confirm_impact: true });
 
     const epic = await cardService.create({ column_id: todo.id, title: 'Big epic', is_epic: true });
     const childDone1 = await cardService.create({ column_id: done.id, title: 'Done child 1' });
@@ -117,14 +117,14 @@ describe('MUS-34: Epic progress rollup', () => {
 
     expect((await cardService.getById(epic.id)).epic_progress).toEqual({ total: 1, done: 0 });
 
-    await columnService.update(done.id, { is_terminal: true });
+    await columnService.update(done.id, { is_terminal: true, confirm_impact: true });
     expect((await cardService.getById(epic.id)).epic_progress).toEqual({ total: 1, done: 1 });
   });
 
   it('multiple terminal columns on the same board all count toward done', async () => {
     const { todo, inProgress, done } = await setupBoard();
     await columnService.update(inProgress.id, { is_terminal: true }); // e.g. an "archived" lane, unusually
-    await columnService.update(done.id, { is_terminal: true });
+    await columnService.update(done.id, { is_terminal: true, confirm_impact: true });
 
     const epic = await cardService.create({ column_id: todo.id, title: 'Epic', is_epic: true });
     const childA = await cardService.create({ column_id: inProgress.id, title: 'A' });
@@ -142,7 +142,7 @@ describe('MUS-34: Epic progress rollup', () => {
     const { todo, done } = await setupBoard();
     const card = await cardService.create({ column_id: done.id, title: 'Untouched card' });
 
-    await columnService.update(done.id, { is_terminal: true });
+    await columnService.update(done.id, { is_terminal: true, confirm_impact: true });
 
     const refreshed = await cardService.getById(card.id);
     expect(refreshed.column_id).toBe(done.id);
@@ -151,7 +151,7 @@ describe('MUS-34: Epic progress rollup', () => {
 
   it('non-child links (blocks, related) on an Epic do not count toward its progress', async () => {
     const { todo, done } = await setupBoard();
-    await columnService.update(done.id, { is_terminal: true });
+    await columnService.update(done.id, { is_terminal: true, confirm_impact: true });
 
     const epic = await cardService.create({ column_id: todo.id, title: 'Epic', is_epic: true });
     const blocker = await cardService.create({ column_id: done.id, title: 'Unrelated blocker' });

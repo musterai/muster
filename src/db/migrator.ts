@@ -56,6 +56,7 @@ const SATISFIED_BY_SQUASH: Record<string, ColumnTarget[]> = {
   '002-invitation-created-at.sql': [{ table: 'invitation', column: 'created_at' }],
   '005-audit-log.sql': [{ table: 'audit_log', column: 'actor_kind' }],
   '006-terminal-columns.sql': [{ table: 'column', column: 'is_terminal' }],
+  '011-workflow-lane-roles.sql': [{ table: 'column', column: 'workflow_role' }],
   '007-project-board-slugs.sql': [
     { table: 'project', column: 'slug' },
     { table: 'board', column: 'slug' },
@@ -212,6 +213,9 @@ export class Migrator {
       if (await this.hasTables(tx, ['project', 'board', 'column', 'card'])) {
         await this.backfillCardKeys(tx);
         await this.repairLegacyRanks(tx);
+      }
+      if (await this.hasColumns(tx, [{ table: 'column', column: 'workflow_role' }])) {
+        await this.backfillWorkflowRoles(tx);
       }
     });
   }
@@ -472,6 +476,8 @@ export class Migrator {
         return this.hasIndexes(tx, CREDENTIAL_INDEXES);
       case '009-event-order.sql':
         return this.hasInitializedEventOrderSchema(tx);
+      case '011-workflow-lane-roles.sql':
+        return this.hasColumns(tx, SATISFIED_BY_SQUASH[migration.id]);
       default:
         return false;
     }
@@ -603,6 +609,58 @@ export class Migrator {
       for (let index = 0; index < laneCards.length; index++) {
         await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], laneCards[index].id]);
       }
+    }
+  }
+
+  /**
+   * Conservative, idempotent workflow-role backfill for pre-MUS-77 boards.
+   * Only exact canonical legacy names are classified. Display text that was
+   * renamed, localized, or otherwise made ambiguous remains NULL so the
+   * board is surfaced as needs_review instead of receiving guessed security
+   * semantics. An existing terminal projection always wins because it is the
+   * only legacy flag with an unambiguous meaning.
+   */
+  private async backfillWorkflowRoles(db: DatabaseAdapter): Promise<void> {
+    const rows = await db.query<{
+      id: string;
+      name: string;
+      is_terminal: number | string | null;
+      workflow_role: string | null;
+    }>(
+      `SELECT id, name, is_terminal, workflow_role
+         FROM "column"
+        ORDER BY board_id, position, id`,
+    );
+
+    for (const row of rows) {
+      // Never overwrite an explicit operator classification. This makes the
+      // backfill safe to rerun after a needs_review board is corrected.
+      if (row.workflow_role) {
+        const isTerminal = row.workflow_role === 'terminal' ? 1 : 0;
+        if (Number(row.is_terminal || 0) !== isTerminal) {
+          await db.execute('UPDATE "column" SET is_terminal = ? WHERE id = ?', [isTerminal, row.id]);
+        }
+        continue;
+      }
+
+      const normalized = row.name.trim().toLowerCase();
+      const role = Number(row.is_terminal || 0) === 1
+        ? 'terminal'
+        : normalized === 'backlog'
+          ? 'backlog'
+          : normalized === 'to do' || normalized === 'todo'
+            ? 'ready'
+            : normalized === 'in progress'
+              ? 'active'
+              : normalized === 'in review'
+                ? 'review'
+                : null;
+      if (!role) continue;
+
+      await db.execute(
+        'UPDATE "column" SET workflow_role = ?, is_terminal = ? WHERE id = ?',
+        [role, role === 'terminal' ? 1 : 0, row.id],
+      );
     }
   }
 }
