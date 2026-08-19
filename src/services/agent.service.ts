@@ -8,7 +8,12 @@ import type { AuthContext, PrincipalRef } from '../shared/auth-context.js';
 import { PermissionDeniedError, WORKSPACE_READ } from '../shared/permission-enforcer.js';
 import { config } from '../config/index.js';
 import { assertAgentSelectorScope } from './agent-scope.authorization.js';
-import { assertResourceWorkspace, assertWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
+import {
+  assertResourceWorkspace,
+  assertWorkspace,
+  bootstrapWorkspaceId,
+  workspaceIdFor,
+} from './helpers/workspace-scope.helper.js';
 
 export class AgentService {
   constructor(
@@ -69,7 +74,14 @@ export class AgentService {
           [operatorUserId],
         )
       : [];
-    const resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
+    let resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
+    // Open mode has no credential-derived workspace. Bind local registrations
+    // to the same deterministic bootstrap workspace used by project creation,
+    // inside this registration transaction. A genuinely workspace-less
+    // embedded database remains supported and produces an unscoped agent.
+    if (!resolvedWorkspaceId && config.auth.mode === 'open') {
+      resolvedWorkspaceId = await bootstrapWorkspaceId(db);
+    }
     if (requestAuth && resolvedWorkspaceId) assertWorkspace(requestAuth, resolvedWorkspaceId);
     if (requestAuth && !resolvedWorkspaceId && workspaceIdFor(requestAuth)) {
       throw new ValidationError('Agent registration requires the authenticated workspace');
@@ -112,7 +124,9 @@ export class AgentService {
       // re-parents an unassigned identity.
       const finalOperatorUserId = existing.operator_user_id || null;
       const finalRoleId = restrictToRoleId || existing.role_id || null;
-      const finalWorkspaceId = existing.workspace_id || null;
+      // A legacy/unscoped local identity is adopted by the bootstrap workspace
+      // on rebind. Never move an identity that already has concrete ownership.
+      const finalWorkspaceId = existing.workspace_id || resolvedWorkspaceId;
 
       await db.execute(
         `UPDATE agent SET name = ?, capabilities = ?, status = ?, last_seen_at = ?, operator_user_id = ?, role_id = ?, workspace_id = ? WHERE id = ?`,

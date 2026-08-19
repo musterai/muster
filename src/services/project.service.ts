@@ -8,7 +8,7 @@ import { DocumentService } from './document.service.js';
 import { deriveKeyPrefix } from '../shared/card-key.js';
 import { deriveSlug } from '../shared/slug.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
-import { assertResourceWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
+import { assertResourceWorkspace, bootstrapWorkspaceId, workspaceIdFor } from './helpers/workspace-scope.helper.js';
 
 export class ProjectService {
   constructor(
@@ -38,8 +38,7 @@ export class ProjectService {
     // only for the zero-config local/open bootstrap path.
     let workspaceId = workspaceIdFor(auth);
     if (!workspaceId) {
-      const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace ORDER BY created_at LIMIT 1');
-      workspaceId = wsRows[0]?.id || '';
+      workspaceId = (await bootstrapWorkspaceId(db)) || '';
     }
 
     await db.execute(

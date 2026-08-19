@@ -18,6 +18,21 @@ export type WorkspaceResource =
   | 'kb_fact'
   | 'kb_relation';
 
+/**
+ * Resolve the single-workspace-v1 bootstrap owner deterministically.
+ *
+ * This is intentionally a lookup, not an implicit creator: embedded service
+ * consumers may use AgentService without installing Muster's server bootstrap.
+ * The stable ID tie-breaker also keeps imported workspaces with equal legacy
+ * timestamps deterministic.
+ */
+export async function bootstrapWorkspaceId(db: DatabaseAdapter): Promise<string | null> {
+  const rows = await db.query<{ id: string }>(
+    'SELECT id FROM workspace ORDER BY created_at ASC, id ASC LIMIT 1',
+  );
+  return rows[0]?.id || null;
+}
+
 const RESOURCE_WORKSPACE_QUERIES: Record<WorkspaceResource, string> = {
   project: 'SELECT workspace_id FROM project WHERE id = ?',
   board: `SELECT p.workspace_id FROM board b JOIN project p ON p.id = b.project_id WHERE b.id = ?`,
