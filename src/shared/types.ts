@@ -238,6 +238,11 @@ export interface ClaimRefusal {
 export interface CardOperationOptions {
   /** Set only when the caller explicitly requests an override and has authority to use it. */
   operatorOverride?: boolean;
+  /**
+   * Credential-derived request context used for row-level authorization.
+   * Internal/open-mode callers may omit it; enforced transports must pass it.
+   */
+  auth?: import('./auth-context.js').AuthContext;
 }
 
 export interface CreateCard {
