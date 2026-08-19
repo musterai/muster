@@ -3,13 +3,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Project, Board, Column, Card, Agent, User, AuthMe, Document, Event, ProjectSummary } from './types.js';
 import { api, ApiError, getLocalProxyToken } from './api.js';
 import { Header } from './components/Header.js';
-import { AgentGrid } from './components/AgentGrid.js';
-import { KanbanBoard } from './components/KanbanBoard.js';
-import { DocumentVault } from './components/DocumentVault.js';
-import { TacticalTerminal } from './components/TacticalTerminal.js';
-import { KnowledgeBaseView } from './components/KnowledgeBase.js';
-import { TokensView } from './components/TokensView.js';
-import { WorkspaceAdmin } from './components/WorkspaceAdmin.js';
+import { AppWorkspaceView } from './components/AppWorkspaceView.js';
 import { MobileBottomNav } from './components/MobileBottomNav.js';
 import { UserAccountModal } from './components/UserAccountModal.js';
 import { ShortcutsHelpModal } from './components/ShortcutsHelpModal.js';
@@ -28,34 +22,9 @@ import {
   NewAgentModal,
   NewDocModal,
 } from './components/Modals.js';
+import { readBrowserLocation, updateBrowserLocation, type AppTab as TabType } from './navigation.js';
 
-type TabType = 'board' | 'agents' | 'docs' | 'activity' | 'kb' | 'tokens' | 'admin';
-
-// ─── URL Routing Helpers (HTML5 History API — No Hash) ─────────────────────────
-
-function parseLocation(): {
-  projectSlug: string | null;
-  tab: TabType;
-  boardSlug: string | null;
-  docId: string | null;
-  entityId: string | null;
-} {
-  const parts = window.location.pathname.split('/').filter(Boolean);
-  // Expected pattern: /projects/:projectSlug/:tab, /projects/:projectSlug/board/:boardSlug,
-  // /projects/:projectSlug/docs/:docId, or /projects/:projectSlug/kb/:entityId.
-  if (parts[0] === 'projects' && parts[1]) {
-    const projectSlug = parts[1];
-    const rawTab = parts[2];
-    const validTabs: TabType[] = ['board', 'agents', 'docs', 'activity', 'kb', 'tokens', 'admin'];
-    const tab = validTabs.includes(rawTab as TabType) ? (rawTab as TabType) : 'board';
-    const boardSlug = tab === 'board' && parts[3] ? parts[3] : null;
-    const docId = tab === 'docs' && parts[3] ? parts[3] : null;
-    const entityId = tab === 'kb' && parts[3] ? parts[3] : null;
-    return { projectSlug, tab, boardSlug, docId, entityId };
-  }
-  return { projectSlug: null, tab: 'board', boardSlug: null, docId: null, entityId: null };
-}
-
+const parseLocation = readBrowserLocation;
 
 function updateLocation(
   projectSlug: string | null,
@@ -64,29 +33,14 @@ function updateLocation(
   entityId?: string | null,
   boardSlug?: string | null,
   replace = false,
-) {
-  if (!projectSlug) return;
-  let targetPath = `/projects/${projectSlug}/${tab}`;
-  if (tab === 'board' && boardSlug) {
-    targetPath += `/${boardSlug}`;
-  } else if (tab === 'docs' && docId) {
-    targetPath += `/${docId}`;
-  } else if (tab === 'kb' && entityId) {
-    targetPath += `/${entityId}`;
-  }
-  if (window.location.pathname !== targetPath) {
-    if (replace) {
-      window.history.replaceState(null, '', targetPath);
-    } else {
-      window.history.pushState(null, '', targetPath);
-    }
-  }
+): void {
+  updateBrowserLocation(projectSlug, tab, { docId, entityId, boardSlug, replace });
 }
 
 // ─── Main App Component ────────────────────────────────────────────────────────
 
 export const App: React.FC = () => {
-  const initialNav = parseLocation();
+  const initialNav = readBrowserLocation();
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -606,103 +560,50 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Main Full-Width View Area */}
-      <main aria-labelledby="active-view-heading" className="flex-1 flex flex-col min-h-0 w-full px-4 sm:px-6 lg:px-8 pt-4 pb-16 md:pb-4 overflow-hidden">
-        <h1 id="active-view-heading" className="sr-only">{activeViewTitle[activeTab]}</h1>
-
-        {activeTab === 'agents' && (
-          <AgentGrid
-            agents={agents}
-            users={users}
-            cards={cards}
-            workspaceId={workspaceId}
-            onHeartbeat={handleAgentHeartbeat}
-            onUnregisterAgent={handleUnregisterAgent}
-            onOpenRegisterAgent={() => setShowRegisterAgentModal(true)}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-
-        {activeTab === 'board' && (
-          <KanbanBoard
-            boards={boards}
-            board={board}
-            selectedBoardId={selectedBoardId}
-            onSelectBoard={handleSelectBoard}
-            columns={columns}
-            cards={cards}
-            agents={agents}
-            users={users}
-            currentUser={currentUser}
-            documents={documents}
-            projectId={selectedProjectId}
-            newCardRequest={newCardRequest}
-            openCardRequest={openCardRequest}
-            onMoveCard={handleMoveCard}
-            onMoveColumn={handleMoveColumn}
-            onNewCardRequestHandled={() => setNewCardRequest(null)}
-            onOpenCardRequestHandled={() => setOpenCardRequest(null)}
-            onOpenNewColumn={() => setShowNewColumnModal(true)}
-            onOpenNewBoard={() => setShowNewBoardModal(true)}
-            onDeleteBoard={handleDeleteBoard}
-            onOpenDocumentInVault={(docId) => {
-              setActiveTab('docs');
-              handleSelectDoc(docId);
-            }}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-
-        {activeTab === 'docs' && (
-          <DocumentVault
-            documents={documents}
-            selectedDocId={selectedDocId}
-            onSelectDoc={handleSelectDoc}
-            onOpenNewDoc={() => setShowNewDocModal(true)}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-        {activeTab === 'kb' && (
-          <KnowledgeBaseView
-            currentProject={projects.find((p) => p.id === selectedProjectId) || null}
-            initialEntityId={selectedEntityId}
-            onSelectEntity={(entityId) => {
-              setSelectedEntityId(entityId);
-              if (selectedProjectId) {
-                updateLocation(selectedProjectId, 'kb', null, entityId);
-              }
-            }}
-          />
-        )}
-
-
-        {activeTab === 'activity' && (
-          <TacticalTerminal
-            events={events}
-            agents={agents}
-            cards={cards}
-            documents={documents}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-        {activeTab === 'tokens' && (
-          <div className="muster-panel p-6 max-w-4xl mx-auto my-8 space-y-4">
-            <h2 className="text-sm font-bold muster-text-primary">API Tokens Management</h2>
-            <TokensView />
-          </div>
-        )}
-
-        {activeTab === 'admin' && (
-          workspaceId
-            ? <WorkspaceAdmin workspaceId={workspaceId} currentUser={currentUser} authMode={authMode} />
-            : <div className="text-center py-16 muster-text-muted text-sm">No workspace found yet.</div>
-        )}
-      </main>
-
+      <AppWorkspaceView
+        activeTab={activeTab}
+        activeViewTitle={activeViewTitle[activeTab]}
+        projects={projects}
+        selectedProjectId={selectedProjectId}
+        boards={boards}
+        board={board}
+        selectedBoardId={selectedBoardId}
+        columns={columns}
+        cards={cards}
+        agents={agents}
+        users={users}
+        currentUser={currentUser}
+        authMode={authMode}
+        documents={documents}
+        events={events}
+        workspaceId={workspaceId}
+        selectedDocId={selectedDocId}
+        selectedEntityId={selectedEntityId}
+        newCardRequest={newCardRequest}
+        openCardRequest={openCardRequest}
+        onAgentHeartbeat={handleAgentHeartbeat}
+        onUnregisterAgent={handleUnregisterAgent}
+        onRequestRegisterAgent={() => setShowRegisterAgentModal(true)}
+        onRefresh={loadProjectData}
+        onSelectBoard={handleSelectBoard}
+        onMoveCard={handleMoveCard}
+        onMoveColumn={handleMoveColumn}
+        onNewCardRequestHandled={() => setNewCardRequest(null)}
+        onOpenCardRequestHandled={() => setOpenCardRequest(null)}
+        onRequestNewColumn={() => setShowNewColumnModal(true)}
+        onRequestNewBoard={() => setShowNewBoardModal(true)}
+        onDeleteBoard={handleDeleteBoard}
+        onOpenDocumentInVault={(docId) => {
+          setActiveTab('docs');
+          handleSelectDoc(docId);
+        }}
+        onSelectDoc={handleSelectDoc}
+        onRequestNewDoc={() => setShowNewDocModal(true)}
+        onSelectEntity={(entityId) => {
+          setSelectedEntityId(entityId);
+          if (selectedProjectId) updateLocation(selectedProjectId, 'kb', null, entityId);
+        }}
+      />
       {/* Mobile Bottom Navigation Bar */}
       <MobileBottomNav activeTab={activeTab} onSelectTab={handleSelectTab} />
 

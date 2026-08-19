@@ -5,6 +5,9 @@ import { App } from './App.js';
 import { DeviceApproval } from './components/DeviceApproval.js';
 import { McpConsent } from './components/McpConsent.js';
 import './index.css';
+import './styles/semantic-utilities.css';
+import './styles/markdown.css';
+import './styles/responsive-utilities.css';
 
 // /device (MUS-28's login approval page) and /mcp/authorize (MUS-29's
 // consent screen) are standalone screens outside the /projects/:id app
