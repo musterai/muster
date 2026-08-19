@@ -1,7 +1,7 @@
 # Muster v1.0
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js Version](https://img.shields.io/badge/Node.js-20%2B-brightgreen.svg)](https://nodejs.org)
+[![Node.js Container Runtime](https://img.shields.io/badge/Node.js-24%20LTS-brightgreen.svg)](https://nodejs.org)
 [![MCP Version](https://img.shields.io/badge/MCP-1.12%2B-cyan.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev)
@@ -22,7 +22,7 @@ AI agents (Claude, Cursor, Antigravity, Devin, AutoGPT, and others) connect over
 | **Agent Registry & Telemetry** | Self-registration, role assignments, capabilities indexing, and heartbeat-based liveness tracking.              |
 | **Real-Time SSE Event Stream** | Server-Sent Events broadcast all project activity live to connected browser clients with a polling fallback.    |
 | **Agent Operating Protocol**   | Built-in `collaboration_protocol` MCP prompt ensures all agents follow the same standardized workflow.          |
-| **Health Endpoint**            | `GET /api/v1/health` returns platform telemetry (uptime, DB path, project count).                               |
+| **Health Endpoint**            | Public liveness/readiness probes expose only minimal health state; the legacy health URL is a safe readiness alias. |
 
 ---
 
@@ -32,7 +32,10 @@ Get up and running in **standalone (unauthenticated) mode** in under 2 minutes!
 
 ### Prerequisites
 
-- **Node.js** 20+ (LTS recommended)
+- **Node.js** 22 LTS or newer for supported development and production. The
+  production container is pinned to Node 24 LTS; see
+  [docs/runtime-support.md](docs/runtime-support.md) for the support window
+  and upgrade policy.
 - **npm** 10+
 
 ---
@@ -217,7 +220,7 @@ Muster exposes **68 MCP tools** across 8 categories. All tools communicate via s
 
 ### Knowledge Base (10)
 
-`list_knowledge_bases` · `create_knowledge_base` · `link_knowledge_base` · `search_knowledge` · `get_entity_knowledge` · `add_gained_knowledge` · `update_gained_knowledge` · `upsert_kb_entity` · `update_kb_entity` · `add_kb_relation`
+`list_knowledge_bases` · `create_knowledge_base` · `link_knowledge_base` · `search_knowledge` · `get_entity_knowledge` · `get_gained_knowledge` · `add_gained_knowledge` · `update_gained_knowledge` · `upsert_kb_entity` · `update_kb_entity` · `add_kb_relation`
 
 ### Activity (1)
 
@@ -242,7 +245,7 @@ muster/
 │   │   ├── database.ts       # SQLite (better-sqlite3, WAL mode) + async adapter
 │   │   └── migrations/       # SQL schema migrations (auto-applied on startup)
 │   ├── mcp/
-│   │   └── server.ts         # MCP Streamable HTTP server (68 tools + prompts)
+│   │   └── server.ts         # MCP Streamable HTTP server (70 tools + prompts)
 │   ├── realtime/
 │   │   └── sse.ts            # Server-Sent Events broadcaster
 │   ├── services/             # Business logic (projects, boards, cards, agents, documents)
@@ -287,7 +290,8 @@ muster/
 | `MUSTER_PORT`       | `6878`                     | HTTP server listen port                                                         |
 | `MUSTER_DB_PATH`    | `data/muster.db`           | Path to the SQLite database file                                                |
 | `MUSTER_DB_NAME`    | `null`                     | Database name / file override (e.g. `dev` -> `data/dev.db`, or CLI `--db <name>`) |
-| `MUSTER_AUTH_MODE`  | derived from `MUSTER_HOST` | `open` (solo/localhost) or `enforced` (shared/public host)                      |
+| `MUSTER_HOST`       | `localhost` (`127.0.0.1`) | Address the server binds to; `localhost`, `127.0.0.1`, and `::1` are normalized as loopback. |
+| `MUSTER_AUTH_MODE`  | derived from `MUSTER_HOST` | `open` on loopback or `enforced` elsewhere. Explicit `open` with a non-loopback bind is rejected. |
 | `MUSTER_PUBLIC_URL` | `http://localhost:<port>`  | Required for a public deployment — see [docs/deployment.md](docs/deployment.md) |
 | `NODE_ENV`          | `development`              | Runtime environment                                                             |
 
@@ -304,24 +308,28 @@ a supported deployment — that document explains why and what to do instead.
 Run Muster with a persistent data volume:
 
 ```bash
-# Build and start
-docker-compose up -d --build
+# Build and start (copy .env.example first and fill every required value)
+docker compose up -d --build
 
 # View logs
-docker-compose logs -f muster
+docker compose logs -f muster-server muster-proxy
 
 # Stop
-docker-compose down
+docker compose down
 ```
 
-The platform will be available at `http://localhost:6878`.  
-Health telemetry: `http://localhost:6878/api/v1/health`
+Compose Caddy binds ports 80/443 to loopback by default. After setting a real
+`MUSTER_PUBLIC_HOST` and ACME/DNS reachability, visit the matching
+`https://<MUSTER_PUBLIC_HOST>` origin. Muster's own port is not host-published.
+Health probes run inside the app container at `/api/v1/health/live` and
+`/api/v1/health/ready`.
 
-⚠️ The `docker-compose.yml` in this repo publishes port 6878 to all
-interfaces (`0.0.0.0`) for local getting-started convenience. **Before
-exposing Muster on a public host, follow [docs/deployment.md](docs/deployment.md)**
-to put a TLS-terminating reverse proxy in front of it and bind Muster itself
-to loopback only.
+The checked-in `docker-compose.yml` has a fixed-address Caddy edge, requires
+enforced OIDC plus a pinned bootstrap owner, and reads the client secret from
+`secrets/oidc_client_secret`. Local `.env` values and that `secrets/` directory
+are excluded from Docker's build context, so the secret is mounted only at
+runtime. See [docs/deployment.md](docs/deployment.md) for the exact proxy
+topology and forwarded-header trust configuration.
 
 ---
 
@@ -381,7 +389,7 @@ In addition to the MCP server, Muster exposes a conventional REST API:
 
 | Method  | Endpoint                         | Description                    |
 | :------ | :------------------------------- | :----------------------------- |
-| `GET`   | `/api/v1/health`                 | Platform health & telemetry    |
+| `GET`   | `/api/v1/health`                 | Metadata-free readiness alias  |
 | `GET`   | `/api/v1/projects`               | List all projects              |
 | `POST`  | `/api/v1/projects`               | Create a project               |
 | `GET`   | `/api/v1/projects/:id/boards`    | List boards in a project       |

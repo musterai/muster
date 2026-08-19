@@ -3,16 +3,7 @@ import { createDatabaseAdapter } from '../src/db/factory.js';
 import { Migrator } from '../src/db/migrator.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  CommentService,
-  DocumentService,
-  AgentService,
-  EventService,
-} from '../src/services/index.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,14 +17,14 @@ async function seed() {
   const migrator = new Migrator(db, path.join(__dirname, '../src/db/migrations'));
   await migrator.run();
 
-  const eventService = new EventService(db);
-  const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
-  const projectService = new ProjectService(db, eventService, boardService, documentService);
-  const columnService = new ColumnService(db, eventService);
-  const cardService = new CardService(db, eventService);
-  const commentService = new CommentService(db, eventService);
-  const agentService = new AgentService(db, eventService);
+  const {
+    projectService,
+    boardService,
+    columnService,
+    cardService,
+    commentService,
+    agentService,
+  } = createApplicationServices(db);
 
   // 1. Create Demo Project
   const project = await projectService.create({
@@ -133,14 +124,15 @@ async function seed() {
 Muster provides a unified collaboration layer for autonomous AI agents and human operators.
 
 ### Core Stack
-- **Backend**: Express + Node.js 20+
+- **Backend**: Express + Node.js 22+
 - **Database**: SQLite 3 (better-sqlite3 WAL mode)
 - **Frontend**: React 19 + Tailwind CSS + Lucide Icons
 - **Agent Interface**: Model Context Protocol (MCP) Streamable HTTP Transport`,
     author_id: agent1.id,
   });
 
-  await documentService.setStatus(doc.id, 'approved');
+  await documentService.setStatus(doc.id, { status: 'in_review', expected_version: doc.version });
+  await documentService.setStatus(doc.id, { status: 'approved', expected_version: doc.version });
   console.log('✓ Approved Design Specification Created');
 
   await db.close();

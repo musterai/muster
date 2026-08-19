@@ -21,6 +21,14 @@ import { RoleService } from '../../services/role.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { createRateLimiter } from '../middleware/generic-rate-limiter.js';
+import { validateRequest } from '../middleware/validate.js';
+import { decodeCursor, encodeCursor, normalizePageLimit } from '../../shared/pagination.js';
+import {
+  oauthAuthorizeDetailsQuerySchema,
+  oauthAuthorizeQuerySchema,
+  oauthConsentSchema,
+  oauthRegisterSchema,
+} from '../schemas.js';
 
 // Registration is cheap but unauthenticated — a flat per-IP cap keeps it
 // from being used to fill the oauth_client table.
@@ -37,14 +45,14 @@ function protectedResourceMetadataUrl(): string {
 export function createWellKnownRouter(): Router {
   const router = Router();
 
-  router.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
+  router.get('/.well-known/oauth-protected-resource', ...validateRequest(), (_req: Request, res: Response) => {
     res.json({
       resource: canonicalMcpResource(),
       authorization_servers: [config.oidc.publicUrl],
     });
   });
 
-  router.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response) => {
+  router.get('/.well-known/oauth-authorization-server', ...validateRequest(), (_req: Request, res: Response) => {
     const base = config.oidc.publicUrl;
     res.json({
       issuer: base,
@@ -72,6 +80,13 @@ function parseRedirectUri(raw: unknown): string | null {
   }
 }
 
+/** Preserve registered query parameters while adding protocol response data. */
+function appendRedirectParameters(redirectUri: string, parameters: URLSearchParams): string {
+  const redirect = new URL(redirectUri);
+  for (const [name, value] of parameters) redirect.searchParams.set(name, value);
+  return redirect.toString();
+}
+
 export function createMcpOAuthRouter(
   db: DatabaseAdapter,
   oauthService: McpOAuthService,
@@ -81,12 +96,14 @@ export function createMcpOAuthRouter(
   const router = Router();
 
   // ── RFC 7591 Dynamic Client Registration ──
-  router.post('/oauth/register', registerRateLimiter, async (req: Request, res: Response) => {
+  router.post('/oauth/register', registerRateLimiter, ...validateRequest({ body: oauthRegisterSchema }), async (req: Request, res: Response) => {
     try {
       const client = await oauthService.registerClient({
         client_name: req.body?.client_name,
         redirect_uris: req.body?.redirect_uris,
         token_endpoint_auth_method: req.body?.token_endpoint_auth_method,
+        grant_types: req.body?.grant_types,
+        response_types: req.body?.response_types,
       });
       res.status(201).json({
         client_id: client.client_id,
@@ -103,7 +120,7 @@ export function createMcpOAuthRouter(
 
   // ── Authorization request — validates what it safely can before ever
   //    redirecting anywhere, then hands off to the SPA consent screen ──
-  router.get('/oauth/authorize', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/oauth/authorize', ...validateRequest({ query: oauthAuthorizeQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { response_type, client_id, code_challenge, code_challenge_method, resource } = req.query;
       const redirectUri = parseRedirectUri(req.query.redirect_uri);
@@ -138,7 +155,7 @@ export function createMcpOAuthRouter(
       if (qs.has('error')) {
         if (typeof req.query.state === 'string') qs.set('state', req.query.state);
         qs.set('iss', config.oidc.publicUrl);
-        res.redirect(`${redirectUri}?${qs.toString()}`);
+        res.redirect(appendRedirectParameters(redirectUri, qs));
         return;
       }
 
@@ -152,7 +169,7 @@ export function createMcpOAuthRouter(
   });
 
   // ── Consent screen data ──
-  router.get('/oauth/authorize/details', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/oauth/authorize/details', ...validateRequest({ query: oauthAuthorizeDetailsQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = req.authContext;
       if (!auth?.principal || auth.principal.kind !== 'user' || !auth.workspace_id) {
@@ -171,15 +188,28 @@ export function createMcpOAuthRouter(
         return;
       }
 
-      const agents = await agentService.list();
-      const myAgents = agents.filter(a => a.operator_user_id === auth.principal!.id);
-      const roles = await roleService.list(auth.workspace_id);
+      const limit = normalizePageLimit(req.query.limit as number | undefined);
+      const scope = `oauth-authorize-details:${clientId}:${auth.workspace_id}:${auth.principal.id}`;
+      const outer = decodeCursor(req.query.cursor as string | undefined, scope, 2);
+      const phase = outer?.[0] || 'agents';
+      const nestedCursor = outer?.[1] || undefined;
+      const agentPage = phase === 'agents' ? await agentService.listOwnedPage(auth.workspace_id, auth.principal.id, { cursor: nestedCursor, limit }) : null;
+      let rolePage = phase === 'roles' ? await roleService.listPage(auth.workspace_id, { cursor: nestedCursor, limit }, auth) : null;
+      if (phase === 'agents' && !agentPage?.page.has_more && (agentPage?.items.length || 0) < limit) {
+        rolePage = await roleService.listPage(auth.workspace_id, { limit: limit - (agentPage?.items.length || 0) }, auth);
+      }
+      const hasMore = Boolean(agentPage?.page.has_more || rolePage?.page.has_more || (phase === 'agents' && !rolePage));
+      const nextPhase = agentPage?.page.has_more ? 'agents' : 'roles';
+      const nextNested = agentPage?.page.has_more ? (agentPage.page.next_cursor || '') : (rolePage?.page.next_cursor || '');
 
       res.json({
         client_name: client.client_name || client.client_id,
         resource: canonicalMcpResource(),
-        agents: myAgents.map(a => ({ id: a.id, name: a.name, role_id: a.role_id })),
-        roles: roles.map(r => ({ id: r.id, name: r.name })),
+        agents: (agentPage?.items || []).map(a => ({ id: a.id, name: a.name, role_id: a.role_id })),
+        roles: (rolePage?.items || []).map(r => ({ id: r.id, name: r.name })),
+        // A mixed final-agent/first-role page has already consumed role rows;
+        // retain that nested role keyset when changing the outer phase.
+        page: { limit, has_more: hasMore, next_cursor: hasMore ? encodeCursor(scope, [nextPhase, nextNested]) : null },
       });
     } catch (err) {
       next(err);
@@ -187,7 +217,7 @@ export function createMcpOAuthRouter(
   });
 
   // ── Consent decision ──
-  router.post('/oauth/authorize/consent', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/oauth/authorize/consent', ...validateRequest({ body: oauthConsentSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = req.authContext;
       if (!auth?.principal || auth.principal.kind !== 'user' || !auth.workspace_id) {
@@ -209,7 +239,7 @@ export function createMcpOAuthRouter(
 
       if (decision !== 'approve') {
         qs.set('error', 'access_denied');
-        res.json({ redirect_uri: `${redirectUri}?${qs.toString()}` });
+        res.json({ redirect_uri: appendRedirectParameters(redirectUri, qs) });
         return;
       }
 
@@ -226,18 +256,18 @@ export function createMcpOAuthRouter(
       // already operates, or register a new one bound to them right now.
       let agentPrincipalId: string;
       if (typeof agent_id === 'string' && agent_id) {
-        const existing = await agentService.getById(agent_id);
+        const existing = await agentService.assertAgentScope(agent_id, auth, 'agent.manage_others');
         if (!existing || existing.operator_user_id !== auth.principal.id) {
           res.status(403).json({ error: 'invalid_request', error_description: 'That agent is not one you operate.' });
           return;
         }
         agentPrincipalId = existing.id;
         if (existing.role_id !== role_id) {
-          await agentService.update(existing.id, { role_id });
+          await agentService.update(existing.id, { role_id }, { workspaceId: auth.workspace_id, auth });
         }
       } else {
         const name = typeof new_agent_name === 'string' && new_agent_name.trim() ? new_agent_name.trim() : (client.client_name || 'MCP Agent');
-        const created = await agentService.register({ name }, auth.principal.id, role_id);
+        const created = await agentService.register({ name }, auth.principal.id, role_id, auth.workspace_id, auth);
         agentPrincipalId = created.id;
       }
 
@@ -253,7 +283,7 @@ export function createMcpOAuthRouter(
       });
 
       qs.set('code', code);
-      res.json({ redirect_uri: `${redirectUri}?${qs.toString()}` });
+      res.json({ redirect_uri: appendRedirectParameters(redirectUri, qs) });
     } catch (err) {
       next(err);
     }

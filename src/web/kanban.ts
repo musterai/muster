@@ -1,12 +1,12 @@
 import { Card } from './types.js';
-import { rankBetween } from '../shared/lexorank.js';
+import { RankError, rankBefore, rankBetween } from '../shared/lexorank.js';
 
 export type CardDateSortOrder = 'newest' | 'oldest';
 
 export const DONE_LANE_PAGE_SIZE = 25;
 
-export const isDoneLane = (columnName: string): boolean =>
-  columnName.trim().toLocaleLowerCase() === 'done';
+export const isTerminalLane = (workflowRole: string | null | undefined): boolean =>
+  workflowRole === 'terminal';
 
 export const sortCardsByUpdatedAt = (
   cards: Card[],
@@ -30,25 +30,31 @@ export const sortCardsByUpdatedAt = (
 export const getLaneCards = (
   cards: Card[],
   columnId: string,
-  columnName: string,
   order: CardDateSortOrder,
   doneVisibleLimit = DONE_LANE_PAGE_SIZE,
-  columnMap?: Record<string, string>
+  workflowRole?: string | null,
+  columnRoleMap?: Record<string, string | null | undefined>,
 ): { all: Card[]; visible: Card[]; hiddenCount: number } => {
   const isAllView = columnId.startsWith('all-col-');
-  const targetName = columnName.trim().toLowerCase();
   const all = sortCardsByUpdatedAt(
     cards.filter((card) => {
       if (card.archived) return false;
-      if (isAllView && columnMap) {
-        const cardColName = (columnMap[card.column_id] || '').trim().toLowerCase();
-        return cardColName === targetName;
+      if (isAllView) {
+        if (columnRoleMap && workflowRole) {
+          return (columnRoleMap[card.column_id] ?? null) === workflowRole;
+        }
+        const unclassifiedPrefix = 'all-col-unclassified-';
+        const sourceColumnId = columnId.startsWith(unclassifiedPrefix)
+          ? columnId.slice(unclassifiedPrefix.length)
+          : null;
+        return sourceColumnId !== null && card.column_id === sourceColumnId;
       }
       return card.column_id === columnId;
     }),
     order
   );
-  const visible = isDoneLane(columnName)
+  const isTerminal = isTerminalLane(workflowRole);
+  const visible = isTerminal
     ? all.slice(0, doneVisibleLimit)
     : all;
 
@@ -73,5 +79,23 @@ export const computeReorderedPosition = (
 
   const before = reordered[destinationIndex - 1];
   const after = reordered[destinationIndex + 1];
-  return rankBetween(before?.position ?? null, after?.position ?? null);
+  try {
+    return rankBetween(before?.position ?? null, after?.position ?? null);
+  } catch (error) {
+    // Adjacent legacy ranks such as `a`/`aa` have no representable
+    // fractional rank. Preserve the insertion intent as a server-side hint;
+    // CardService will rebalance the affected lane transactionally. This
+    // keeps drag/drop usable while the canonical rank is repaired server-side.
+    if (!(error instanceof RankError) || error.code !== 'RANK_SPACE_EXHAUSTED') throw error;
+    if (before) return before.position;
+    if (after) {
+      try {
+        return rankBefore(after.position);
+      } catch (fallbackError) {
+        if (!(fallbackError instanceof RankError) || fallbackError.code !== 'RANK_SPACE_EXHAUSTED') throw fallbackError;
+        return after.position;
+      }
+    }
+    return 'm';
+  }
 };

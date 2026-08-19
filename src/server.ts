@@ -12,90 +12,63 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createDatabaseAdapter } from './db/factory.js';
 import { Migrator } from './db/migrator.js';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  CommentService,
-  DocumentService,
-  AgentService,
-  EventService,
-  KBService,
-  RoleService,
-} from './services/index.js';
-import { SSEManager } from './realtime/sse.js';
-import { createRouter } from './api/router.js';
 import { errorHandler } from './api/middleware/error-handler.js';
-import { createMcpServer, Services } from './mcp/server.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { config, setDatabaseOverride } from './config/index.js';
+import { config, formatHostForUrl, isLoopbackHost, setDatabaseOverride, validateDeploymentConfig } from './config/index.js';
 import { OPEN_AUTH_CONTEXT } from './shared/auth-context.js';
 import { ulid } from 'ulid';
-import { TokenService } from './services/token.service.js';
-import { SessionService } from './services/session.service.js';
-import { OidcService } from './services/oidc.service.js';
-import { InvitationService } from './services/invitation.service.js';
-import { UserService } from './services/user.service.js';
-import { DeviceGrantService } from './services/device-grant.service.js';
-import { McpOAuthService } from './services/mcp-oauth.service.js';
-import { AuditService } from './services/audit.service.js';
 import { createAuthMiddleware } from './api/middleware/auth.js';
 import { createWellKnownRouter, canonicalMcpResource } from './api/routes/mcp-oauth.routes.js';
 import { corsMiddleware, securityHeadersMiddleware } from './api/middleware/security.js';
 import { createRateLimiter } from './api/middleware/generic-rate-limiter.js';
+import { createTransportRuntime } from './application/transport-runtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/**
+ * Bind an Express application to the already-validated listener address.
+ * Exported so the socket-level configuration tests exercise the same binding
+ * call used by the production server.
+ */
+export function listenApplication(
+  app: express.Express,
+  port: number,
+  host: string,
+  callback?: () => void,
+): ReturnType<typeof app.listen> {
+  return app.listen(port, host, callback);
+}
 
 export async function startServer(options?: { db?: string }): Promise<void> {
   if (options?.db) {
     setDatabaseOverride(options.db);
   }
 
+  // Validate the effective deployment before opening the database. In
+  // enforced/public mode a missing OIDC secret or unsafe origin must fail
+  // closed rather than leaving a partially initialized service behind.
+  const deployment = validateDeploymentConfig();
+  config.trustedProxies = deployment.trustedProxies;
+  config.oidc.publicUrl = deployment.publicUrl;
+  config.oidc.issuer = deployment.oidcIssuer;
+  config.oidc.clientId = deployment.oidcClientId;
+  config.oidc.clientSecret = deployment.oidcClientSecret;
+  config.oidc.bootstrapOwnerSubject = deployment.bootstrapOwnerSubject;
+
   const db = createDatabaseAdapter();
 
   const migrator = new Migrator(db, path.join(__dirname, 'db/migrations'));
   await migrator.run();
 
-  const sseManager = new SSEManager();
-  const eventService = new EventService(db, async (evt) => {
-    sseManager.broadcast(evt.project_id, evt);
-  });
-
-  const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
-  const kbService = new KBService(db, eventService);
-  const roleService = new RoleService(db, eventService);
-  const tokenService = new TokenService(db);
-  const sessionService = new SessionService(db);
-  const oidcService = new OidcService(db);
-  const invitationService = new InvitationService(db);
-  const userService = new UserService(db);
-  const auditService = new AuditService(db);
-  const deviceGrantService = new DeviceGrantService(db, tokenService, auditService);
-  const agentService = new AgentService(db, eventService);
-  const mcpOAuthService = new McpOAuthService(db, tokenService, agentService, auditService);
-  const services: Services = {
-    projectService: new ProjectService(db, eventService, boardService, documentService),
-    boardService,
-    columnService: new ColumnService(db, eventService),
-    cardService: new CardService(db, eventService),
-    commentService: new CommentService(db, eventService),
-    documentService,
+  const runtime = createTransportRuntime(db);
+  const { services, sseManager } = runtime;
+  const {
     agentService,
-    eventService,
-    kbService,
     roleService,
-    tokenService,
     sessionService,
-    oidcService,
-    invitationService,
-    auditService,
-    deviceGrantService,
-    mcpOAuthService,
-    userService,
-  };
+    tokenService,
+  } = services;
 
   // Bootstrap: create default workspace and project if empty
   const workspaces = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
@@ -118,18 +91,26 @@ export async function startServer(options?: { db?: string }): Promise<void> {
     console.log(`Seeded ${seeded.length} preset roles; backfilled ${backfilled} agents`);
   }
 
-  const existingProjects = await services.projectService.list();
+  const bootstrapWorkspaceId = wsRows[0]?.id;
+  const bootstrapAuth = bootstrapWorkspaceId
+    ? { ...OPEN_AUTH_CONTEXT, workspace_id: bootstrapWorkspaceId, is_workspace_member: true }
+    : OPEN_AUTH_CONTEXT;
+  const existingProjects = await services.projectService.list(bootstrapAuth);
   if (existingProjects.length === 0) {
     console.log('No existing projects found. Creating default project "Alpha Agent Project"...');
     await services.projectService.create({
       name: 'Alpha Agent Project',
       description: 'Primary project for AI agent collaboration'
-    });
+    }, undefined, undefined, bootstrapAuth);
   }
 
   const authMiddleware = createAuthMiddleware(db, tokenService, roleService, agentService, sessionService);
 
   const app = express();
+  // Forwarded headers are ignored by default. Operators must explicitly list
+  // the proxy IP/CIDR(s) that can reach this process; this keeps direct-client
+  // X-Forwarded-* spoofing from changing protocol, host, or client IP.
+  app.set('trust proxy', config.trustedProxies);
   app.use(corsMiddleware);
   app.use(securityHeadersMiddleware);
   // Explicit, not the body-parser default — large enough for a real design
@@ -138,6 +119,10 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   // SQLite. Document/card content itself is capped tighter still — see
   // document.service.ts / card.service.ts.
   app.use(express.json({ limit: '5mb' }));
+  // OAuth device/token clients commonly use application/x-www-form-urlencoded;
+  // keep parsing bounded and do not enable nested object coercion at this
+  // public boundary.
+  app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
   // RFC 8615 well-known URIs must live at the true origin root, not under /api.
   app.use(createWellKnownRouter());
@@ -151,8 +136,7 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   // checks in auth.ts compare against '/api/v1/auth/' etc.
   app.use((req, res, next) => authMiddleware(req, res, next));
 
-  const apiRouter = createRouter(services, sseManager, db);
-  app.use('/api', apiRouter);
+  app.use('/api', runtime.restRouter);
 
   const publicDir = config.publicDir;
   if (fs.existsSync(publicDir)) {
@@ -173,7 +157,7 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   // MCP Streamable HTTP Transport
   app.post('/mcp', mcpRateLimiter, async (req: Request, res: Response) => {
     const auth = (req as any).authContext || OPEN_AUTH_CONTEXT;
-    const mcpServer = createMcpServer(services, req, auth);
+    const mcpServer = runtime.createMcpServer(req, auth);
 
     const mcpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -215,28 +199,34 @@ export async function startServer(options?: { db?: string }): Promise<void> {
     services.cardService.releaseExpiredLeases().catch(console.error);
   }, 60000);
 
-  // Warn if binding to non-loopback with auth=open
   const host = config.host;
-  if (config.auth.mode === 'open' && host !== 'localhost' && host !== '127.0.0.1') {
-    console.warn(
-      `\n⚠  WARNING: MUSTER_AUTH_MODE=open but binding to host "${host}".\n` +
-      `   Set MUSTER_AUTH_MODE=enforced and configure a reverse proxy with TLS\n` +
-      `   before exposing on a non-local interface.\n`
+  if (config.auth.mode === 'open' && !isLoopbackHost(host)) {
+    // This should be unreachable because resolveListenerConfig() rejects the
+    // contradictory environment at module load. Keep the invariant here too
+    // in case an embedding caller mutates the exported config object.
+    throw new Error(
+      `Unsafe listener configuration: open authentication cannot bind non-loopback host "${host}"`
     );
   }
 
   const initialPort = config.port;
 
   const listenOnPort = (port: number) => {
-    const server = app.listen(port, '0.0.0.0', () => {
-      const activeDb = config.db.type === 'sqlite' ? config.db.path : (config.db.url || 'n/a');
+    const server = listenApplication(app, port, host, () => {
+      const activeDb = config.db.type === 'sqlite'
+        ? `sqlite at ${config.db.path}`
+        : 'postgres (configured)';
+      const displayHost = formatHostForUrl(host);
       console.log(`\n======================================================`);
       console.log(`  Muster v1.0.0 - ONLINE`);
       console.log(`======================================================`);
-      console.log(`  • Web UI:   http://${config.host}:${port}`);
-      console.log(`  • REST API: http://${config.host}:${port}/api/v1`);
-      console.log(`  • MCP Tool: POST http://${config.host}:${port}/mcp`);
+      console.log(`  • Bind:     ${displayHost}:${port}`);
+      console.log(`  • Web UI:   http://${displayHost}:${port}`);
+      console.log(`  • REST API: http://${displayHost}:${port}/api/v1`);
+      console.log(`  • MCP Tool: POST http://${displayHost}:${port}/mcp`);
       console.log(`  • Auth:     ${config.auth.mode}`);
+      console.log(`  • Public URL: ${config.oidc.publicUrl}`);
+      console.log(`  • Trusted proxies: ${config.trustedProxies.length > 0 ? config.trustedProxies.join(', ') : 'none'}`);
       console.log(`  • Database: ${activeDb}`);
       console.log(`======================================================\n`);
     });

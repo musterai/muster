@@ -1,28 +1,43 @@
 // File: src/services/board.service.ts
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
-import { Board, CreateBoard, UpdateBoard, Label, CreateLabel } from '../shared/types.js';
+import { Board, CreateBoard, UpdateBoard, Label, CreateLabel, type CreateBoardColumn } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { rankAfter } from '../shared/lexorank.js';
 import { deriveSlug } from '../shared/slug.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
+import { WorkflowLanePolicy } from './workflow-lane.policy.js';
 
 export class BoardService {
   constructor(
     private db: DatabaseAdapter,
     private eventService?: EventService
-  ) {}
+  ) {
+  }
 
-  async create(data: CreateBoard, actorId?: string): Promise<Board> {
+  private async decorateBoard(board: Board, db: DatabaseAdapter = this.db): Promise<Board> {
+    const summary = await WorkflowLanePolicy.getBoardSummary(board.id, db);
+    return { ...board, ...summary };
+  }
+
+  async create(data: CreateBoard, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board> {
+    if (!adapter) {
+      return this.db.transaction(tx => this.create(data, actorId, tx, auth));
+    }
+    const db = adapter;
+    await assertResourceWorkspace(db, auth, 'project', data.project_id);
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
-    const existingSlugs = await this.db.query<{ slug: string }>(
+    const existingSlugs = await db.query<{ slug: string }>(
       `SELECT slug FROM board WHERE project_id = ? AND slug IS NOT NULL`,
       [data.project_id]
     );
     const slug = deriveSlug(data.name, new Set(existingSlugs.map(b => b.slug)));
 
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO board (id, project_id, name, slug, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [id, data.project_id, data.name, slug, created_at, updated_at]
@@ -38,27 +53,37 @@ export class BoardService {
     };
 
     // Default or custom columns
-    let defaultCols: { name: string; wip_limit: number | null; is_terminal: boolean }[] = [];
+    let defaultCols: Array<{
+      name: string;
+      wip_limit: number | null;
+      workflow_role: ReturnType<typeof WorkflowLanePolicy.roleFromCreateInput>;
+    }> = [];
 
     if (data.columns && data.columns.length > 0) {
-      defaultCols = data.columns.map((colName) => ({
-        name: colName,
-        wip_limit: colName.toLowerCase() === 'in progress' ? 3 : null,
-        is_terminal: colName.trim().toLowerCase() === 'done',
-      }));
+      defaultCols = data.columns.map((column) => {
+        const spec: CreateBoardColumn = typeof column === 'string' ? { name: column } : column;
+        const workflow_role = WorkflowLanePolicy.roleFromCreateInput(spec.workflow_role, spec.is_terminal);
+        return {
+          name: spec.name,
+          wip_limit: spec.wip_limit !== undefined
+            ? spec.wip_limit
+            : workflow_role === 'active' ? 3 : null,
+          workflow_role,
+        };
+      });
     } else if (data.template === 'simple') {
       defaultCols = [
-        { name: 'To Do', wip_limit: null, is_terminal: false },
-        { name: 'In Progress', wip_limit: 3, is_terminal: false },
-        { name: 'Done', wip_limit: null, is_terminal: true },
+        { name: 'To Do', wip_limit: null, workflow_role: 'ready' },
+        { name: 'In Progress', wip_limit: 3, workflow_role: 'active' },
+        { name: 'Done', wip_limit: null, workflow_role: 'terminal' },
       ];
     } else {
       defaultCols = [
-        { name: 'Backlog', wip_limit: null, is_terminal: false },
-        { name: 'To Do', wip_limit: null, is_terminal: false },
-        { name: 'In Progress', wip_limit: 3, is_terminal: false },
-        { name: 'In Review', wip_limit: 2, is_terminal: false },
-        { name: 'Done', wip_limit: null, is_terminal: true },
+        { name: 'Backlog', wip_limit: null, workflow_role: 'backlog' },
+        { name: 'To Do', wip_limit: null, workflow_role: 'ready' },
+        { name: 'In Progress', wip_limit: 3, workflow_role: 'active' },
+        { name: 'In Review', wip_limit: 2, workflow_role: 'review' },
+        { name: 'Done', wip_limit: null, workflow_role: 'terminal' },
       ];
     }
 
@@ -67,9 +92,9 @@ export class BoardService {
       const colId = ulid();
       const pos = rankAfter(lastRank);
       lastRank = pos;
-      await this.db.execute(
-        `INSERT INTO "column" (id, board_id, name, position, wip_limit, is_terminal) VALUES (?, ?, ?, ?, ?, ?)`,
-        [colId, id, col.name, pos, col.wip_limit, col.is_terminal ? 1 : 0]
+      await db.execute(
+        `INSERT INTO "column" (id, board_id, name, position, wip_limit, workflow_role, is_terminal) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [colId, id, col.name, pos, col.wip_limit, col.workflow_role, WorkflowLanePolicy.projectionForRole(col.workflow_role)]
       );
     }
 
@@ -81,23 +106,48 @@ export class BoardService {
         action: 'created',
         actor_id: actorId,
         payload: { name: board.name },
-      });
+      }, db);
     }
 
-    return board;
+    return this.decorateBoard(board, db);
   }
 
-  async getById(id: string): Promise<Board | null> {
+  async getById(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board | null> {
+    await assertResourceWorkspace(this.db, auth, 'board', id);
     const rows = await this.db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
-    return rows[0] || null;
+    return rows[0] ? this.decorateBoard(rows[0]) : null;
   }
 
-  async list(projectId: string): Promise<Board[]> {
-    return this.db.query<Board>('SELECT * FROM board WHERE project_id = ? ORDER BY created_at ASC', [projectId]);
+  async list(projectId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board[]> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const rows = await this.db.query<Board>('SELECT * FROM board WHERE project_id = ? ORDER BY created_at ASC', [projectId]);
+    return Promise.all(rows.map(row => this.decorateBoard(row)));
   }
 
-  async update(id: string, data: UpdateBoard, actorId?: string): Promise<Board> {
-    const existing = await this.getById(id);
+  async listPage(projectId: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<Board>> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `boards:${projectId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [projectId];
+    let sql = 'SELECT * FROM board WHERE project_id = ?';
+    if (cursor) {
+      sql += ' AND (created_at > ? OR (created_at = ? AND id > ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY created_at ASC, id ASC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<Board>(sql, params);
+    const decorated = await Promise.all(rows.map(row => this.decorateBoard(row)));
+    return toPage(decorated, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
+  async update(id: string, data: UpdateBoard, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx, auth));
+    const db = adapter;
+    await assertResourceWorkspace(db, auth, 'board', id);
+    const rows = await db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) throw new Error(`Board with ID ${id} not found`);
 
     const name = data.name !== undefined ? data.name : existing.name;
@@ -105,14 +155,14 @@ export class BoardService {
     let slug = existing.slug;
 
     if (!slug) {
-      const existingSlugs = await this.db.query<{ slug: string }>(
+      const existingSlugs = await db.query<{ slug: string }>(
         `SELECT slug FROM board WHERE project_id = ? AND id != ? AND slug IS NOT NULL`,
         [existing.project_id, id]
       );
       slug = deriveSlug(name, new Set(existingSlugs.map(b => b.slug)));
     }
 
-    await this.db.execute('UPDATE board SET name = ?, slug = ?, updated_at = ? WHERE id = ?', [name, slug, updated_at, id]);
+    await db.execute('UPDATE board SET name = ?, slug = ?, updated_at = ? WHERE id = ?', [name, slug, updated_at, id]);
 
     const updated: Board = { ...existing, name, slug, updated_at };
 
@@ -124,17 +174,21 @@ export class BoardService {
         action: 'updated',
         actor_id: actorId,
         payload: { name },
-      });
+      }, db);
     }
 
-    return updated;
+    return this.decorateBoard(updated, db);
   }
 
-  async delete(id: string, actorId?: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx, auth));
+    const db = adapter;
+    await assertResourceWorkspace(db, auth, 'board', id);
+    const rows = await db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
+    const existing = rows[0] || null;
     if (!existing) throw new Error(`Board with ID ${id} not found`);
 
-    await this.db.execute('DELETE FROM board WHERE id = ?', [id]);
+    await db.execute('DELETE FROM board WHERE id = ?', [id]);
 
     if (this.eventService) {
       await this.eventService.create({
@@ -143,12 +197,13 @@ export class BoardService {
         entity_id: id,
         action: 'deleted',
         actor_id: actorId,
-      });
+      }, db);
     }
   }
 
   // Label management
-  async createLabel(data: CreateLabel): Promise<Label> {
+  async createLabel(data: CreateLabel, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Label> {
+    await assertResourceWorkspace(this.db, auth, 'board', data.board_id);
     const id = ulid();
     await this.db.execute(
       'INSERT INTO label (id, board_id, name, color) VALUES (?, ?, ?, ?)',
@@ -157,7 +212,25 @@ export class BoardService {
     return { id, board_id: data.board_id, name: data.name, color: data.color };
   }
 
-  async listLabels(boardId: string): Promise<Label[]> {
+  async listLabels(boardId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Label[]> {
+    await assertResourceWorkspace(this.db, auth, 'board', boardId);
     return this.db.query<Label>('SELECT * FROM label WHERE board_id = ?', [boardId]);
+  }
+
+  async listLabelsPage(boardId: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<Label>> {
+    await assertResourceWorkspace(this.db, auth, 'board', boardId);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `board-labels:${boardId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [boardId];
+    let sql = 'SELECT * FROM label WHERE board_id = ?';
+    if (cursor) {
+      sql += ' AND (name > ? OR (name = ? AND id > ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY name ASC, id ASC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<Label>(sql, params);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.name, row.id]));
   }
 }

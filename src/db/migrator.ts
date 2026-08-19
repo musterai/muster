@@ -1,9 +1,133 @@
 // File: src/db/migrator.ts
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseAdapter } from './adapter.js';
 import { deriveKeyPrefix, formatCardKey } from '../shared/card-key.js';
 import { deriveSlug } from '../shared/slug.js';
+import { rebalanceRanks } from '../shared/lexorank.js';
+
+/**
+ * The schema is the clean-slate schema described by the approved multi-user
+ * design.  The value is deliberately independent from the numbered migration
+ * filenames: a schema revision can contain several ordered migrations.
+ */
+export const MIGRATION_SCHEMA_VERSION = '1';
+export const MIGRATION_TOOL_VERSION = '1.0.0';
+
+const MIGRATION_LOCK_KEY = 69069;
+
+const LEDGER_SQL = `
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    id             TEXT PRIMARY KEY,
+    checksum       TEXT NOT NULL,
+    applied_at     TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    tool_version   TEXT NOT NULL
+  );
+`;
+
+type MigrationFile = {
+  id: string;
+  filename: string;
+  sql: string;
+  checksum: string;
+  number: number | null;
+};
+
+type AppliedMigration = {
+  id: string;
+  checksum: string;
+  applied_at: string;
+  schema_version: string;
+  tool_version: string;
+};
+
+type ColumnTarget = { table: string; column: string };
+type IndexTarget = { table: string; index: string };
+
+// 001 is the approved squash and already contains these columns.  The later
+// files remain in the repository so an older pre-squash database can be
+// upgraded, but executing their ALTER TABLE against a fresh 001 database
+// would be a duplicate-column error (and PostgreSQL aborts the whole tx on
+// that error).  Preflighting these known compatibility patches keeps the SQL
+// file itself parser-safe while still recording the migration exactly once.
+const SATISFIED_BY_SQUASH: Record<string, ColumnTarget[]> = {
+  '002-invitation-created-at.sql': [{ table: 'invitation', column: 'created_at' }],
+  '005-audit-log.sql': [{ table: 'audit_log', column: 'actor_kind' }],
+  '006-terminal-columns.sql': [{ table: 'column', column: 'is_terminal' }],
+  '011-workflow-lane-roles.sql': [{ table: 'column', column: 'workflow_role' }],
+  '007-project-board-slugs.sql': [
+    { table: 'project', column: 'slug' },
+    { table: 'board', column: 'slug' },
+  ],
+};
+
+// These are the tables created by the approved 001 clean-schema squash.  A
+// pre-ledger database is only adopted when this recognizable baseline exists;
+// arbitrary existing data is never silently treated as migrated.
+const INITIAL_SCHEMA_TABLES = [
+  'workspace',
+  'principal',
+  'app_user',
+  'identity',
+  'role',
+  'workspace_member',
+  'invitation',
+  'oidc_transaction',
+  'session',
+  'api_token',
+  'audit_log',
+  'agent',
+  'project',
+  'board',
+  'column',
+  'card',
+  'card_assignee',
+  'card_link',
+  'card_work_link',
+  'comment',
+  'label',
+  'card_label',
+  'document',
+  'document_version',
+  'card_document',
+  'attachment',
+  'event',
+  'knowledge_base',
+  'project_knowledge_base',
+  'kb_entity',
+  'kb_fact',
+  'kb_relation',
+];
+
+const CREDENTIAL_INDEXES: IndexTarget[] = [
+  { table: 'api_token', index: 'idx_api_token_token_hash' },
+  { table: 'session', index: 'idx_session_token_hash' },
+  { table: 'invitation', index: 'idx_invitation_token_hash' },
+  { table: 'invitation', index: 'idx_invitation_pending_email' },
+];
+
+const EVENT_ORDER_INDEXES: IndexTarget[] = [
+  { table: 'event', index: 'idx_event_order' },
+  { table: 'event', index: 'idx_event_project_order' },
+];
+
+function checksum(sql: string): string {
+  return createHash('sha256').update(sql, 'utf8').digest('hex');
+}
+
+function migrationNumber(id: string): number | null {
+  const match = id.match(/^(\d+)(?:[-_.]|$)/);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function asString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Migration ledger has an invalid ${field}; refusing to continue.`);
+  }
+  return value;
+}
 
 /**
  * The migrations directory is one canonical set of files, not a fork per
@@ -30,63 +154,345 @@ export class Migrator {
   }
 
   async run(): Promise<void> {
+    const migrations = this.loadMigrations();
+    if (migrations.length === 0) return;
+
+    // The first transaction creates the ledger and, when appropriate, adopts
+    // the one explicitly supported pre-ledger baseline.  It also validates
+    // every existing row while the startup lock is held, so two processes can
+    // never make different decisions about the same history.
+    await this.db.transaction(async (tx) => {
+      await this.acquireMigrationLock(tx);
+      await this.ensureLedger(tx, migrations);
+    });
+
+    // Each migration has its own transaction.  This preserves already
+    // committed versions when a later migration fails while guaranteeing that
+    // a migration's DDL and ledger row commit or roll back together.
+    for (const migration of migrations) {
+      await this.db.transaction(async (tx) => {
+        await this.acquireMigrationLock(tx);
+        const applied = await this.readLedger(tx);
+        this.validateLedger(applied, migrations);
+
+        if (applied.some(row => row.id === migration.id)) return;
+
+        const migrationIndex = migrations.findIndex(item => item.id === migration.id);
+        for (const previous of migrations.slice(0, migrationIndex)) {
+          if (!applied.some(row => row.id === previous.id)) {
+            throw new Error(
+              `Migration history is incomplete before "${migration.id}"; refusing to apply out of order. ` +
+              'Restore the missing migration ledger entry from a backup.',
+            );
+          }
+        }
+
+        if (!(await this.isSatisfiedByExistingSchema(tx, migration))) {
+          const sql = this.db.dialect === 'postgres' ? translateForPostgres(migration.sql) : migration.sql;
+          await tx.migrate(sql);
+        }
+
+        await tx.execute(
+          `INSERT INTO schema_migrations (id, checksum, applied_at, schema_version, tool_version)
+           VALUES (?, ?, ?, ?, ?)`,
+          [migration.id, migration.checksum, new Date().toISOString(), MIGRATION_SCHEMA_VERSION, MIGRATION_TOOL_VERSION],
+        );
+      });
+    }
+
+    // Backfills are data repair associated with the final schema shape. Keep
+    // them behind the same startup lock and in a transaction so an interrupted
+    // repair can be retried without leaving half-populated derived fields.
+    await this.db.transaction(async (tx) => {
+      await this.acquireMigrationLock(tx);
+      const applied = await this.readLedger(tx);
+      this.validateLedger(applied, migrations);
+      if (await this.hasTables(tx, ['project', 'board'])) {
+        await this.backfillSlugs(tx);
+      }
+      if (await this.hasTables(tx, ['project', 'board', 'column', 'card'])) {
+        await this.backfillCardKeys(tx);
+        await this.repairLegacyRanks(tx);
+      }
+      if (await this.hasColumns(tx, [{ table: 'column', column: 'workflow_role' }])) {
+        await this.backfillWorkflowRoles(tx);
+      }
+    });
+  }
+
+  private loadMigrations(): MigrationFile[] {
     let targetDir = this.migrationsDir;
     if (!fs.existsSync(targetDir) || fs.readdirSync(targetDir).filter(f => f.endsWith('.sql')).length === 0) {
       const srcDir = path.join(process.cwd(), 'src/db/migrations');
-      if (fs.existsSync(srcDir)) {
-        targetDir = srcDir;
-      }
+      if (fs.existsSync(srcDir)) targetDir = srcDir;
     }
 
-    if (!fs.existsSync(targetDir)) return;
+    if (!fs.existsSync(targetDir)) return [];
 
-    const files = fs.readdirSync(targetDir).filter(f => f.endsWith('.sql')).sort();
-    if (files.length === 0) return;
-
-    // Splitting is a naive `;`-scan below, so `--` line comments are
-    // stripped first — a semicolon inside a comment (e.g. "one grant;
-    // rotating on reuse") would otherwise silently cut a CREATE TABLE in
-    // half and fail with a confusing "syntax error near ..." far from its
-    // actual cause. None of these files put `--` inside a string literal.
-    const stripLineComments = (sql: string): string =>
-      sql.split('\n').map(line => line.replace(/--.*$/, '')).join('\n');
-
-    const sqlToRun = files
-      .map(file => stripLineComments(fs.readFileSync(path.join(targetDir, file), 'utf-8')))
-      .join('\n;\n');
-
-    const statements = sqlToRun
-      .split(';')
-      .map(s => s.trim())
-      .filter(s => s.length > 0)
-      .map(stmt => this.db.dialect === 'postgres' ? translateForPostgres(stmt) : stmt);
-
-    for (const stmt of statements) {
-      try {
-        await this.db.migrate(stmt);
-      } catch (err: any) {
-        // Column-already-exists is the one error every migration here is
-        // meant to tolerate (idempotent ADD COLUMN, e.g. 002/005) — the
-        // exact wording differs by dialect: SQLite says "duplicate column
-        // name", Postgres says `column "x" of relation "y" already exists`.
-        const message: string = err.message || '';
-        if (message.includes('duplicate column name') || (message.includes('column') && message.includes('already exists'))) {
-          continue;
+    return fs.readdirSync(targetDir)
+      .filter(filename => filename.endsWith('.sql'))
+      .sort((left, right) => {
+        const leftNumber = migrationNumber(left);
+        const rightNumber = migrationNumber(right);
+        if (leftNumber !== null && rightNumber !== null && leftNumber !== rightNumber) {
+          return leftNumber - rightNumber;
         }
-        throw err;
+        return left.localeCompare(right);
+      })
+      .map(filename => {
+        const sql = fs.readFileSync(path.join(targetDir, filename), 'utf8');
+        return {
+          id: filename,
+          filename,
+          sql,
+          checksum: checksum(sql),
+          number: migrationNumber(filename),
+        };
+      });
+  }
+
+  private async acquireMigrationLock(tx: DatabaseAdapter): Promise<void> {
+    if (tx.dialect === 'postgres') {
+      // SQLite's BEGIN IMMEDIATE (inside SQLiteAdapter.transaction) already
+      // serializes writers. PostgreSQL has a real pool, so use a transaction
+      // advisory lock as the portable boundary for migration startup.
+      await tx.execute('SELECT pg_advisory_xact_lock(?)', [MIGRATION_LOCK_KEY]);
+    }
+  }
+
+  private async ensureLedger(tx: DatabaseAdapter, migrations: MigrationFile[]): Promise<void> {
+    const tables = await this.listTables(tx);
+    const ledgerExisted = tables.has('schema_migrations');
+    const applicationSchemaExists = [...tables].some(name => name !== 'schema_migrations' && name !== 'sqlite_sequence');
+
+    await tx.migrate(LEDGER_SQL);
+
+    let applied: AppliedMigration[];
+    try {
+      applied = await this.readLedger(tx);
+    } catch (error) {
+      throw new Error(`Migration ledger is unreadable; refusing to continue: ${(error as Error).message}`);
+    }
+
+    if (ledgerExisted) {
+      if (applied.length === 0 && applicationSchemaExists) {
+        throw new Error(
+          'Migration ledger is empty while application tables exist; refusing to reinterpret existing data. ' +
+          'Restore schema_migrations from a backup or use the supported pre-release baseline.',
+        );
+      }
+      this.validateLedger(applied, migrations);
+      return;
+    }
+
+    if (!applicationSchemaExists) return;
+
+    // A database from before MUS-69 has no ledger.  Only the recognizable
+    // clean-schema squash is supported; arbitrary legacy schemas fail closed.
+    if (!migrations.some(migration => migration.id === '001-initial.sql') || !(await this.hasTables(tx, INITIAL_SCHEMA_TABLES))) {
+      throw new Error(
+        'Existing database has no migration ledger and is not the supported clean-schema baseline; ' +
+        'refusing to reinterpret old production data.',
+      );
+    }
+
+    // Adopt only the contiguous prefix that the schema can prove it has.
+    // In particular, a pre-ledger database through 007 has no event_order
+    // column or sequence yet. Recording every migration there would cause
+    // startup to skip 009 and make the next event write fail at runtime.
+    const baselineMigrations: MigrationFile[] = [];
+    for (const migration of migrations) {
+      if (!(await this.isMigrationSatisfiedBySchema(tx, migration))) break;
+      baselineMigrations.push(migration);
+    }
+
+    const now = new Date().toISOString();
+    for (const migration of baselineMigrations) {
+      await tx.execute(
+        `INSERT INTO schema_migrations (id, checksum, applied_at, schema_version, tool_version)
+         VALUES (?, ?, ?, ?, ?)`,
+        [migration.id, migration.checksum, now, MIGRATION_SCHEMA_VERSION, MIGRATION_TOOL_VERSION],
+      );
+    }
+    this.validateLedger(await this.readLedger(tx), migrations);
+  }
+
+  private async readLedger(tx: DatabaseAdapter): Promise<AppliedMigration[]> {
+    try {
+      const rows = await tx.query<Record<string, unknown>>(
+        `SELECT id, checksum, applied_at, schema_version, tool_version
+           FROM schema_migrations
+          ORDER BY id`,
+      );
+      return rows.map(row => ({
+        id: asString(row.id, 'id'),
+        checksum: asString(row.checksum, 'checksum'),
+        applied_at: asString(row.applied_at, 'applied_at'),
+        schema_version: asString(row.schema_version, 'schema_version'),
+        tool_version: asString(row.tool_version, 'tool_version'),
+      }));
+    } catch (error) {
+      throw new Error(`schema_migrations cannot be read: ${(error as Error).message}`);
+    }
+  }
+
+  private validateLedger(applied: AppliedMigration[], migrations: MigrationFile[]): void {
+    const known = new Map(migrations.map(migration => [migration.id, migration]));
+    const seen = new Set<string>();
+    let highestAppliedNumber: number | null = null;
+
+    for (const row of applied) {
+      if (seen.has(row.id)) {
+        throw new Error(`Migration ledger contains duplicate id "${row.id}"; refusing to continue.`);
+      }
+      seen.add(row.id);
+
+      const schemaVersion = Number(row.schema_version);
+      if (!Number.isInteger(schemaVersion) || schemaVersion < 1) {
+        throw new Error(`Migration ledger has invalid schema version "${row.schema_version}" for "${row.id}".`);
+      }
+      if (schemaVersion > Number(MIGRATION_SCHEMA_VERSION)) {
+        throw new Error(
+          `Migration ledger references future schema version "${row.schema_version}" in "${row.id}"; ` +
+          'upgrade this binary before starting the server.',
+        );
+      }
+
+      const migration = known.get(row.id);
+      if (!migration) {
+        throw new Error(
+          `Migration ledger contains unknown migration "${row.id}"; refusing to run with a future or edited history.`,
+        );
+      }
+      if (row.checksum !== migration.checksum) {
+        throw new Error(
+          `Migration checksum mismatch for "${row.id}"; restore the original file or add a new migration instead of editing history.`,
+        );
+      }
+
+      if (migration.number !== null && (highestAppliedNumber === null || migration.number > highestAppliedNumber)) {
+        highestAppliedNumber = migration.number;
       }
     }
 
-    await this.backfillSlugs();
-    await this.backfillCardKeys();
+    if (highestAppliedNumber !== null) {
+      for (const migration of migrations) {
+        if (migration.number !== null && migration.number <= highestAppliedNumber && !seen.has(migration.id)) {
+          throw new Error(
+            `Migration ledger is missing historical migration "${migration.id}"; refusing to continue out of order.`,
+          );
+        }
+      }
+    }
+  }
+
+  private async listTables(tx: DatabaseAdapter): Promise<Set<string>> {
+    const rows = tx.dialect === 'sqlite'
+      ? await tx.query<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+      : await tx.query<{ table_name: string }>(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+    return new Set(rows.map(row => ('name' in row ? row.name : row.table_name)));
+  }
+
+  private async hasTables(tx: DatabaseAdapter, names: string[]): Promise<boolean> {
+    const tables = await this.listTables(tx);
+    return names.every(name => tables.has(name));
+  }
+
+  private async hasColumns(tx: DatabaseAdapter, targets: ColumnTarget[]): Promise<boolean> {
+    for (const target of targets) {
+      if (!(await this.columnExists(tx, target))) return false;
+    }
+    return true;
+  }
+
+  private async columnExists(tx: DatabaseAdapter, target: ColumnTarget): Promise<boolean> {
+    if (tx.dialect === 'sqlite') {
+      const rows = await tx.query<{ name: string }>(`PRAGMA table_info("${target.table}")`);
+      return rows.some(row => row.name === target.column);
+    }
+    const rows = await tx.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = ? AND column_name = ?`,
+      [target.table, target.column],
+    );
+    return rows.length > 0;
+  }
+
+  private async hasIndexes(tx: DatabaseAdapter, targets: IndexTarget[]): Promise<boolean> {
+    for (const target of targets) {
+      if (!(await this.indexExists(tx, target))) return false;
+    }
+    return true;
+  }
+
+  private async indexExists(tx: DatabaseAdapter, target: IndexTarget): Promise<boolean> {
+    if (tx.dialect === 'sqlite') {
+      const rows = await tx.query<{ name: string }>(`PRAGMA index_list("${target.table}")`);
+      return rows.some(row => row.name === target.index);
+    }
+    const rows = await tx.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = ? AND indexname = ?`,
+      [target.table, target.index],
+    );
+    return rows.length > 0;
+  }
+
+  private async hasInitializedEventOrderSchema(tx: DatabaseAdapter): Promise<boolean> {
+    const hasStructure = await this.hasTables(tx, ['event', 'event_order_sequence'])
+      && await this.hasColumns(tx, [
+        { table: 'event', column: 'event_order' },
+        { table: 'event_order_sequence', column: 'next_order' },
+      ])
+      && await this.hasIndexes(tx, EVENT_ORDER_INDEXES);
+    if (!hasStructure) return false;
+
+    const sequence = await tx.query<{ id: number }>(
+      'SELECT id FROM event_order_sequence WHERE id = 1 LIMIT 1',
+    );
+    return sequence.length === 1;
+  }
+
+  /**
+   * A no-ledger database can be adopted only if it proves each migration in
+   * order.  This deliberately treats a partially applied migration as not
+   * adopted; migration execution will then either finish a supported shape or
+   * fail visibly instead of recording a false history row.
+   */
+  private async isMigrationSatisfiedBySchema(tx: DatabaseAdapter, migration: MigrationFile): Promise<boolean> {
+    switch (migration.id) {
+      case '001-initial.sql':
+        return this.hasTables(tx, INITIAL_SCHEMA_TABLES);
+      case '002-invitation-created-at.sql':
+      case '005-audit-log.sql':
+      case '006-terminal-columns.sql':
+      case '007-project-board-slugs.sql':
+        return this.hasColumns(tx, SATISFIED_BY_SQUASH[migration.id]);
+      case '003-device-grant.sql':
+        return this.hasTables(tx, ['device_grant']);
+      case '004-mcp-oauth.sql':
+        return this.hasTables(tx, ['oauth_client', 'oauth_authorization_code', 'oauth_refresh_token']);
+      case '008-credential-indexes.sql':
+        return this.hasIndexes(tx, CREDENTIAL_INDEXES);
+      case '009-event-order.sql':
+        return this.hasInitializedEventOrderSchema(tx);
+      case '011-workflow-lane-roles.sql':
+        return this.hasColumns(tx, SATISFIED_BY_SQUASH[migration.id]);
+      default:
+        return false;
+    }
+  }
+
+  private async isSatisfiedByExistingSchema(tx: DatabaseAdapter, migration: MigrationFile): Promise<boolean> {
+    return this.isMigrationSatisfiedBySchema(tx, migration);
   }
 
   /**
    * Populate URL slugs for rows created before slugs were introduced. The
    * ordered pass makes collision suffixes deterministic across restarts.
    */
-  private async backfillSlugs(): Promise<void> {
-    const projects = await this.db.query<{ id: string; name: string; slug: string | null }>(
+  private async backfillSlugs(db: DatabaseAdapter): Promise<void> {
+    const projects = await db.query<{ id: string; name: string; slug: string | null }>(
       `SELECT id, name, slug FROM project ORDER BY created_at ASC, id ASC`
     );
     const projectSlugs = new Set(projects.map(project => project.slug).filter((slug): slug is string => !!slug));
@@ -95,10 +501,10 @@ export class Migrator {
       if (project.slug) continue;
       const slug = deriveSlug(project.name, projectSlugs);
       projectSlugs.add(slug);
-      await this.db.execute(`UPDATE project SET slug = ? WHERE id = ?`, [slug, project.id]);
+      await db.execute(`UPDATE project SET slug = ? WHERE id = ?`, [slug, project.id]);
     }
 
-    const boards = await this.db.query<{ id: string; project_id: string; name: string; slug: string | null }>(
+    const boards = await db.query<{ id: string; project_id: string; name: string; slug: string | null }>(
       `SELECT id, project_id, name, slug FROM board ORDER BY created_at ASC, id ASC`
     );
     const slugsByProject = new Map<string, Set<string>>();
@@ -112,19 +518,19 @@ export class Migrator {
       const taken = slugsByProject.get(board.project_id)!;
       const slug = deriveSlug(board.name, taken);
       taken.add(slug);
-      await this.db.execute(`UPDATE board SET slug = ? WHERE id = ?`, [slug, board.id]);
+      await db.execute(`UPDATE board SET slug = ? WHERE id = ?`, [slug, board.id]);
     }
 
-    await this.db.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_slug ON project(slug)`);
-    await this.db.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_board_project_slug ON board(project_id, slug)`);
+    await db.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_slug ON project(slug)`);
+    await db.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_board_project_slug ON board(project_id, slug)`);
   }
 
   /**
    * Assigns key_prefix/key to any project/card rows left over from before
    * card keys were introduced. No-op once every row has been backfilled.
    */
-  private async backfillCardKeys(): Promise<void> {
-    const projects = await this.db.query<{ id: string; name: string; key_prefix: string | null }>(
+  private async backfillCardKeys(db: DatabaseAdapter): Promise<void> {
+    const projects = await db.query<{ id: string; name: string; key_prefix: string | null }>(
       `SELECT id, name, key_prefix FROM project ORDER BY created_at ASC`
     );
     if (projects.length === 0) return;
@@ -134,10 +540,10 @@ export class Migrator {
       if (project.key_prefix) continue;
       const prefix = deriveKeyPrefix(project.name, taken);
       taken.add(prefix);
-      await this.db.execute(`UPDATE project SET key_prefix = ? WHERE id = ?`, [prefix, project.id]);
+      await db.execute(`UPDATE project SET key_prefix = ? WHERE id = ?`, [prefix, project.id]);
     }
 
-    const cards = await this.db.query<{ id: string; project_id: string }>(
+    const cards = await db.query<{ id: string; project_id: string }>(
       `SELECT c.id, b.project_id FROM card c
        JOIN "column" col ON c.column_id = col.id
        JOIN board b ON col.board_id = b.id
@@ -147,7 +553,7 @@ export class Migrator {
     if (cards.length === 0) return;
 
     const seqByProject = new Map<string, number>();
-    const prefixRows = await this.db.query<{ id: string; key_prefix: string; card_seq: number }>(
+    const prefixRows = await db.query<{ id: string; key_prefix: string; card_seq: number }>(
       `SELECT id, key_prefix, card_seq FROM project`
     );
     const prefixByProject = new Map(prefixRows.map(p => [p.id, p.key_prefix]));
@@ -158,11 +564,103 @@ export class Migrator {
       if (!prefix) continue;
       const seq = (seqByProject.get(card.project_id) || 0) + 1;
       seqByProject.set(card.project_id, seq);
-      await this.db.execute(`UPDATE card SET key = ? WHERE id = ?`, [formatCardKey(prefix, seq), card.id]);
+      await db.execute(`UPDATE card SET key = ? WHERE id = ?`, [formatCardKey(prefix, seq), card.id]);
     }
 
     for (const [projectId, seq] of seqByProject) {
-      await this.db.execute(`UPDATE project SET card_seq = ? WHERE id = ?`, [seq, projectId]);
+      await db.execute(`UPDATE project SET card_seq = ? WHERE id = ?`, [seq, projectId]);
+    }
+  }
+
+  /**
+   * Repair every lane at startup, not only lanes touched by a new move. The
+   * ordered id tie-break makes duplicate/legacy values stable and the whole
+   * pass runs under the startup transaction/lock, so no reader observes a
+   * partially repaired lane.
+   */
+  private async repairLegacyRanks(db: DatabaseAdapter): Promise<void> {
+    const columns = await db.query<{ id: string; board_id: string; position: string }>(
+      `SELECT id, board_id, position FROM "column" ORDER BY board_id, position, id`,
+    );
+    const columnsByBoard = new Map<string, typeof columns>();
+    for (const column of columns) {
+      const boardColumns = columnsByBoard.get(column.board_id) || [];
+      boardColumns.push(column);
+      columnsByBoard.set(column.board_id, boardColumns);
+    }
+    for (const boardColumns of columnsByBoard.values()) {
+      const ranks = rebalanceRanks(boardColumns.length);
+      for (let index = 0; index < boardColumns.length; index++) {
+        await db.execute('UPDATE "column" SET position = ? WHERE id = ?', [ranks[index], boardColumns[index].id]);
+      }
+    }
+
+    const cards = await db.query<{ id: string; column_id: string; position: string }>(
+      `SELECT id, column_id, position FROM card ORDER BY column_id, position, id`,
+    );
+    const cardsByColumn = new Map<string, typeof cards>();
+    for (const card of cards) {
+      const laneCards = cardsByColumn.get(card.column_id) || [];
+      laneCards.push(card);
+      cardsByColumn.set(card.column_id, laneCards);
+    }
+    for (const laneCards of cardsByColumn.values()) {
+      const ranks = rebalanceRanks(laneCards.length);
+      for (let index = 0; index < laneCards.length; index++) {
+        await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], laneCards[index].id]);
+      }
+    }
+  }
+
+  /**
+   * Conservative, idempotent workflow-role backfill for pre-MUS-77 boards.
+   * Only exact canonical legacy names are classified. Display text that was
+   * renamed, localized, or otherwise made ambiguous remains NULL so the
+   * board is surfaced as needs_review instead of receiving guessed security
+   * semantics. An existing terminal projection always wins because it is the
+   * only legacy flag with an unambiguous meaning.
+   */
+  private async backfillWorkflowRoles(db: DatabaseAdapter): Promise<void> {
+    const rows = await db.query<{
+      id: string;
+      name: string;
+      is_terminal: number | string | null;
+      workflow_role: string | null;
+    }>(
+      `SELECT id, name, is_terminal, workflow_role
+         FROM "column"
+        ORDER BY board_id, position, id`,
+    );
+
+    for (const row of rows) {
+      // Never overwrite an explicit operator classification. This makes the
+      // backfill safe to rerun after a needs_review board is corrected.
+      if (row.workflow_role) {
+        const isTerminal = row.workflow_role === 'terminal' ? 1 : 0;
+        if (Number(row.is_terminal || 0) !== isTerminal) {
+          await db.execute('UPDATE "column" SET is_terminal = ? WHERE id = ?', [isTerminal, row.id]);
+        }
+        continue;
+      }
+
+      const normalized = row.name.trim().toLowerCase();
+      const role = Number(row.is_terminal || 0) === 1
+        ? 'terminal'
+        : normalized === 'backlog'
+          ? 'backlog'
+          : normalized === 'to do' || normalized === 'todo'
+            ? 'ready'
+            : normalized === 'in progress'
+              ? 'active'
+              : normalized === 'in review'
+                ? 'review'
+                : null;
+      if (!role) continue;
+
+      await db.execute(
+        'UPDATE "column" SET workflow_role = ?, is_terminal = ? WHERE id = ?',
+        [role, role === 'terminal' ? 1 : 0, row.id],
+      );
     }
   }
 }

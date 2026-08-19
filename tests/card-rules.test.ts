@@ -39,7 +39,7 @@ describe('server-side card rules', () => {
     boardService = new BoardService(db, eventService);
     projectService = new ProjectService(db, eventService, boardService);
     columnService = new ColumnService(db, eventService);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
   });
 
@@ -139,3 +139,4 @@ describe('server-side card rules', () => {
     expect(events.some(event => event.action === 'override' && event.payload?.operation === 'move')).toBe(true);
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

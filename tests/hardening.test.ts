@@ -256,7 +256,7 @@ describe('MUS-30: oversized content is rejected before reaching the database', (
     await db.execute('INSERT INTO board (id, project_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ['board-x', 'proj-x', 'Board', now, now]);
     await db.execute('INSERT INTO "column" (id, board_id, name, position) VALUES (?, ?, ?, ?)', ['col-x', 'board-x', 'To Do', 'a']);
 
-    const cardService = new CardService(db);
+    const cardService = createCardServiceForTest(db);
     await expect(cardService.create({ column_id: 'col-x', title: 'x', description: 'a'.repeat(200_001) })).rejects.toThrow('exceeds the maximum length');
 
     const rows = await db.query('SELECT * FROM card');
@@ -268,3 +268,4 @@ describe('MUS-30: oversized content is rejected before reaching the database', (
     }
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

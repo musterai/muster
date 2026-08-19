@@ -1,18 +1,11 @@
 // File: src/web/App.tsx
-import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import React, { lazy, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Project, Board, Column, Card, Agent, User, AuthMe, Document, Event, ProjectSummary } from './types.js';
 import { api, ApiError, getLocalProxyToken } from './api.js';
 import { Header } from './components/Header.js';
-import { AgentGrid } from './components/AgentGrid.js';
-import { KanbanBoard } from './components/KanbanBoard.js';
-import { DocumentVault } from './components/DocumentVault.js';
-import { TacticalTerminal } from './components/TacticalTerminal.js';
-import { KnowledgeBaseView } from './components/KnowledgeBase.js';
-import { TokensView } from './components/TokensView.js';
-import { WorkspaceAdmin } from './components/WorkspaceAdmin.js';
+import { AppWorkspaceView } from './components/AppWorkspaceView.js';
 import { MobileBottomNav } from './components/MobileBottomNav.js';
-import { UserAccountModal } from './components/UserAccountModal.js';
-import { ShortcutsHelpModal } from './components/ShortcutsHelpModal.js';
+import { LazyBoundary } from './components/LazyBoundary.js';
 import { ThemeProvider } from './ThemeContext.js';
 import {
   shouldAlertOnCompletion,
@@ -20,42 +13,36 @@ import {
   fireBrowserNotification,
   requestNotificationPermission,
 } from './notifications.js';
+import { readBrowserLocation, updateBrowserLocation, type AppTab as TabType } from './navigation.js';
 import {
-  NewProjectModal,
-  EditProjectModal,
-  NewBoardModal,
-  NewColumnModal,
-  NewAgentModal,
-  NewDocModal,
-} from './components/Modals.js';
+  WorkspaceViewProviders,
+  type WorkspaceViewControllers,
+  useWorkspaceViewControllers,
+} from './WorkspaceViewContext.js';
+import { useAppDialogController } from './hooks/useAppDialogController.js';
 
-type TabType = 'board' | 'agents' | 'docs' | 'activity' | 'kb' | 'tokens' | 'admin';
+const UserAccountModal = lazy(() => import('./components/UserAccountModal.js').then((module) => ({ default: module.UserAccountModal })));
+const ShortcutsHelpModal = lazy(() => import('./components/ShortcutsHelpModal.js').then((module) => ({ default: module.ShortcutsHelpModal })));
 
-// ─── URL Routing Helpers (HTML5 History API — No Hash) ─────────────────────────
+const loadModals = () => import('./components/Modals.js');
+const NewProjectModal = lazy(() => loadModals().then((module) => ({ default: module.NewProjectModal })));
+const EditProjectModal = lazy(() => loadModals().then((module) => ({ default: module.EditProjectModal })));
+const NewBoardModal = lazy(() => loadModals().then((module) => ({ default: module.NewBoardModal })));
+const NewColumnModal = lazy(() => loadModals().then((module) => ({ default: module.NewColumnModal })));
+const NewAgentModal = lazy(() => loadModals().then((module) => ({ default: module.NewAgentModal })));
+const NewDocModal = lazy(() => loadModals().then((module) => ({ default: module.NewDocModal })));
 
-function parseLocation(): {
-  projectSlug: string | null;
-  tab: TabType;
-  boardSlug: string | null;
-  docId: string | null;
-  entityId: string | null;
-} {
-  const parts = window.location.pathname.split('/').filter(Boolean);
-  // Expected pattern: /projects/:projectSlug/:tab, /projects/:projectSlug/board/:boardSlug,
-  // /projects/:projectSlug/docs/:docId, or /projects/:projectSlug/kb/:entityId.
-  if (parts[0] === 'projects' && parts[1]) {
-    const projectSlug = parts[1];
-    const rawTab = parts[2];
-    const validTabs: TabType[] = ['board', 'agents', 'docs', 'activity', 'kb', 'tokens', 'admin'];
-    const tab = validTabs.includes(rawTab as TabType) ? (rawTab as TabType) : 'board';
-    const boardSlug = tab === 'board' && parts[3] ? parts[3] : null;
-    const docId = tab === 'docs' && parts[3] ? parts[3] : null;
-    const entityId = tab === 'kb' && parts[3] ? parts[3] : null;
-    return { projectSlug, tab, boardSlug, docId, entityId };
-  }
-  return { projectSlug: null, tab: 'board', boardSlug: null, docId: null, entityId: null };
-}
+const parseLocation = readBrowserLocation;
 
+const ACTIVE_VIEW_TITLE: Record<TabType, string> = {
+  board: 'Kanban board',
+  agents: 'Agents',
+  docs: 'Design documents',
+  activity: 'Activity log',
+  kb: 'Knowledge base',
+  tokens: 'API tokens',
+  admin: 'Workspace administration',
+};
 
 function updateLocation(
   projectSlug: string | null,
@@ -64,29 +51,14 @@ function updateLocation(
   entityId?: string | null,
   boardSlug?: string | null,
   replace = false,
-) {
-  if (!projectSlug) return;
-  let targetPath = `/projects/${projectSlug}/${tab}`;
-  if (tab === 'board' && boardSlug) {
-    targetPath += `/${boardSlug}`;
-  } else if (tab === 'docs' && docId) {
-    targetPath += `/${docId}`;
-  } else if (tab === 'kb' && entityId) {
-    targetPath += `/${entityId}`;
-  }
-  if (window.location.pathname !== targetPath) {
-    if (replace) {
-      window.history.replaceState(null, '', targetPath);
-    } else {
-      window.history.pushState(null, '', targetPath);
-    }
-  }
+): void {
+  updateBrowserLocation(projectSlug, tab, { docId, entityId, boardSlug, replace });
 }
 
 // ─── Main App Component ────────────────────────────────────────────────────────
 
 export const App: React.FC = () => {
-  const initialNav = parseLocation();
+  const initialNav = readBrowserLocation();
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -94,6 +66,7 @@ export const App: React.FC = () => {
   const [selectedDocId, setSelectedDocId] = useState<string | null>(initialNav.docId);
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(initialNav.entityId);
   const [summary, setSummary] = useState<ProjectSummary | null>(null);
+  const [viewFocusVersion, setViewFocusVersion] = useState(initialNav.tab === 'board' ? 0 : 1);
 
   const [boards, setBoards] = useState<Board[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState<string | null>(null);
@@ -116,26 +89,37 @@ export const App: React.FC = () => {
   const [notificationState, setNotificationState] = useState<'granted' | 'denied' | 'default' | 'unsupported'>(() =>
     typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
   );
-
   const activeBoardNotDoneCount = useMemo(() => {
     if (!selectedBoardId || !columns.length) return null;
-    const terminalColumnIds = new Set(columns.filter((col) => col.is_terminal === 1).map((col) => col.id));
+    const terminalColumnIds = new Set(columns.filter((col) => col.workflow_role === 'terminal').map((col) => col.id));
     return cards.filter((c) => !c.archived && !terminalColumnIds.has(c.column_id)).length;
   }, [selectedBoardId, columns, cards]);
 
-  // Modals visibility
-  const [showNewProjectModal, setShowNewProjectModal] = useState(false);
-  const [showEditProjectModal, setShowEditProjectModal] = useState(false);
-  const [showNewBoardModal, setShowNewBoardModal] = useState(false);
-  const [showNewColumnModal, setShowNewColumnModal] = useState(false);
-  const [showRegisterAgentModal, setShowRegisterAgentModal] = useState(false);
-  const [showNewDocModal, setShowNewDocModal] = useState(false);
-  const [showUserAccountModal, setShowUserAccountModal] = useState(false);
-  const [userAccountInitialTab, setUserAccountInitialTab] = useState<'appearance' | 'tokens' | 'admin' | 'profile'>('appearance');
-  const [showShortcutsHelpModal, setShowShortcutsHelpModal] = useState(false);
-  const [newCardRequest, setNewCardRequest] = useState<{ columnId?: string; token: number } | null>(null);
-  const newCardTokenRef = useRef(0);
-  const [openCardRequest, setOpenCardRequest] = useState<{ cardId: string; token: number } | null>(null);
+  const {
+    showNewProjectModal,
+    setShowNewProjectModal,
+    showEditProjectModal,
+    setShowEditProjectModal,
+    showNewBoardModal,
+    setShowNewBoardModal,
+    showNewColumnModal,
+    setShowNewColumnModal,
+    showRegisterAgentModal,
+    setShowRegisterAgentModal,
+    showNewDocModal,
+    setShowNewDocModal,
+    showUserAccountModal,
+    setShowUserAccountModal,
+    userAccountInitialTab,
+    setUserAccountInitialTab,
+    showShortcutsHelpModal,
+    setShowShortcutsHelpModal,
+    newCardRequest,
+    setNewCardRequest,
+    openCardRequest,
+    setOpenCardRequest,
+    requestNewCard,
+  } = useAppDialogController();
 
   const rememberSelectedBoard = useCallback((boardId: string | null) => {
     selectedBoardIdRef.current = boardId;
@@ -261,7 +245,7 @@ export const App: React.FC = () => {
   }, [selectedProjectId, loadProjects, rememberSelectedBoard]);
 
   // Sync state when selectedProjectId or activeTab or selectedDocId changes
-  const handleSelectProject = (projectId: string) => {
+  const handleSelectProject = useCallback((projectId: string) => {
     setBoards([]);
     rememberSelectedBoard(null);
     setBoard(null);
@@ -271,9 +255,12 @@ export const App: React.FC = () => {
     selectedBoardSlugRef.current = null;
     const project = projects.find((candidate) => candidate.id === projectId);
     updateLocation(project?.slug ?? null, activeTab, selectedDocId, selectedEntityId, null);
-  };
+  }, [activeTab, projects, rememberSelectedBoard, selectedDocId, selectedEntityId]);
 
-  const handleSelectTab = (tab: TabType) => {
+  const handleSelectTab = useCallback((tab: TabType) => {
+    if (tab !== activeTab) {
+      setViewFocusVersion((version) => version + 1);
+    }
     setActiveTab(tab);
     const project = projects.find((candidate) => candidate.id === selectedProjectId);
     if (project) {
@@ -282,9 +269,9 @@ export const App: React.FC = () => {
         : null;
       updateLocation(project.slug, tab, selectedDocId, selectedEntityId, boardSlug);
     }
-  };
+  }, [activeTab, boards, projects, selectedDocId, selectedEntityId, selectedProjectId]);
 
-  const handleSelectBoard = async (boardId: string) => {
+  const handleSelectBoard = useCallback(async (boardId: string) => {
     if (boardId === selectedBoardIdRef.current) return;
 
     rememberSelectedBoard(boardId);
@@ -307,15 +294,15 @@ export const App: React.FC = () => {
       console.error('Failed to select board:', err);
       loadProjectData();
     }
-  };
+  }, [boards, loadProjectData, projects, rememberSelectedBoard, selectedProjectId]);
 
-  const handleSelectDoc = (docId: string) => {
+  const handleSelectDoc = useCallback((docId: string) => {
     setSelectedDocId(docId);
     const project = projects.find((candidate) => candidate.id === selectedProjectId);
     if (project) {
       updateLocation(project.slug, 'docs', docId, null);
     }
-  };
+  }, [projects, selectedProjectId]);
 
   // Handle Browser Back / Forward buttons (popstate)
   useEffect(() => {
@@ -330,6 +317,7 @@ export const App: React.FC = () => {
         rememberSelectedBoard(boards.find((candidate) => candidate.slug === boardSlug)?.id ?? null);
       }
       setActiveTab(tab);
+      setViewFocusVersion((version) => version + 1);
       setSelectedDocId(docId);
       setSelectedEntityId(entityId);
 
@@ -459,7 +447,7 @@ export const App: React.FC = () => {
     setNotificationState(permission);
   }, []);
 
-  const handleMoveCard = async (cardId: string, targetColumnId: string, position?: string) => {
+  const handleMoveCard = useCallback(async (cardId: string, targetColumnId: string, position?: string) => {
     setBoardActionError(null);
     try {
       await api.moveCard(cardId, targetColumnId, position);
@@ -469,42 +457,41 @@ export const App: React.FC = () => {
       setBoardActionError(`Card move refused: ${message}`);
       console.error('Failed to move card:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleMoveColumn = async (columnId: string, position: string) => {
+  const handleMoveColumn = useCallback(async (columnId: string, position: string) => {
     try {
       await api.moveColumn(columnId, position);
       loadProjectData();
     } catch (err) {
       console.error('Failed to move column:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleAgentHeartbeat = async (agentId: string) => {
+  const handleAgentHeartbeat = useCallback(async (agentId: string) => {
     try {
       await api.agentHeartbeat(agentId);
       loadProjectData();
     } catch (err) {
       console.error('Failed to send heartbeat:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleUnregisterAgent = async (agentId: string) => {
+  const handleUnregisterAgent = useCallback(async (agentId: string) => {
     try {
       await api.unregisterAgent(agentId);
       loadProjectData();
     } catch (err) {
       console.error('Failed to unregister agent:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleOpenNewCardModal = (colId?: string) => {
-    newCardTokenRef.current += 1;
-    setNewCardRequest({ columnId: colId, token: newCardTokenRef.current });
+  const handleOpenNewCardModal = useCallback((colId?: string) => {
+    requestNewCard(colId);
     if (activeTab !== 'board') {
       handleSelectTab('board');
     }
-  };
+  }, [activeTab, handleSelectTab, requestNewCard]);
 
   const handleDeleteProject = async (projectId: string) => {
     try {
@@ -518,7 +505,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleDeleteBoard = async (boardId: string) => {
+  const handleDeleteBoard = useCallback(async (boardId: string) => {
     try {
       await api.deleteBoard(boardId);
       if (selectedBoardIdRef.current === boardId) {
@@ -528,7 +515,60 @@ export const App: React.FC = () => {
     } catch (err) {
       console.error('Failed to delete board:', err);
     }
-  };
+  }, [loadProjectData, rememberSelectedBoard]);
+
+  const requestRegisterAgent = useCallback(() => setShowRegisterAgentModal(true), []);
+  const handleNewCardRequestHandled = useCallback(() => setNewCardRequest(null), []);
+  const handleOpenCardRequestHandled = useCallback(() => setOpenCardRequest(null), []);
+  const requestNewColumn = useCallback(() => setShowNewColumnModal(true), []);
+  const requestNewBoard = useCallback(() => setShowNewBoardModal(true), []);
+  const requestNewDocument = useCallback(() => setShowNewDocModal(true), []);
+  const handleOpenDocumentInVault = useCallback((docId: string) => {
+    setViewFocusVersion((version) => version + 1);
+    setActiveTab('docs');
+    handleSelectDoc(docId);
+  }, [handleSelectDoc]);
+  const handleSelectEntity = useCallback((entityId: string | null) => {
+    setSelectedEntityId(entityId);
+    const project = projects.find((candidate) => candidate.id === selectedProjectId);
+    if (project) updateLocation(project.slug, 'kb', null, entityId);
+  }, [projects, selectedProjectId]);
+
+  const currentProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
+  );
+  const workspaceControllers = useWorkspaceViewControllers({
+    navigation: { activeTab, activeViewTitle: ACTIVE_VIEW_TITLE[activeTab], viewFocusVersion },
+    board: {
+      data: { boards, board, selectedBoardId, columns, cards, agents, users, currentUser, documents, projectId: selectedProjectId },
+      requests: { newCard: newCardRequest, openCard: openCardRequest },
+      actions: {
+        selectBoard: handleSelectBoard, moveCard: handleMoveCard, moveColumn: handleMoveColumn,
+        newCardRequestHandled: handleNewCardRequestHandled,
+        openCardRequestHandled: handleOpenCardRequestHandled,
+        requestNewColumn, requestNewBoard, deleteBoard: handleDeleteBoard,
+        openDocumentInVault: handleOpenDocumentInVault, refresh: loadProjectData,
+      },
+    },
+    agents: {
+      data: { agents, users, cards, workspaceId },
+      actions: {
+        heartbeat: handleAgentHeartbeat, unregister: handleUnregisterAgent,
+        requestRegister: requestRegisterAgent, refresh: loadProjectData,
+      },
+    },
+    documents: {
+      data: { documents, selectedDocId },
+      actions: { select: handleSelectDoc, requestNew: requestNewDocument, refresh: loadProjectData },
+    },
+    knowledge: {
+      data: { currentProject, selectedEntityId },
+      actions: { selectEntity: handleSelectEntity },
+    },
+    activity: { data: { events, agents, cards, documents }, actions: { refresh: loadProjectData } },
+    admin: { workspaceId, currentUser, authMode },
+  } satisfies WorkspaceViewControllers);
 
   return (
     <ThemeProvider userId={currentUser?.id ?? null}>
@@ -563,7 +603,7 @@ export const App: React.FC = () => {
       />
 
       {connectionError && (
-        <div className="flex-none bg-danger-950 border-b border-danger-600/40 text-danger-300 text-xs font-sans px-4 py-2 text-center">
+        <div role="alert" className="flex-none bg-danger-950 border-b border-danger-600/40 text-danger-300 text-xs font-sans px-4 py-2 text-center">
           {connectionError}
         </div>
       )}
@@ -597,178 +637,107 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Main Full-Width View Area */}
-      <main className="flex-1 flex flex-col min-h-0 w-full px-4 sm:px-6 lg:px-8 pt-4 pb-16 md:pb-4 overflow-hidden">
-
-        {activeTab === 'agents' && (
-          <AgentGrid
-            agents={agents}
-            users={users}
-            cards={cards}
-            workspaceId={workspaceId}
-            onHeartbeat={handleAgentHeartbeat}
-            onUnregisterAgent={handleUnregisterAgent}
-            onOpenRegisterAgent={() => setShowRegisterAgentModal(true)}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-
-        {activeTab === 'board' && (
-          <KanbanBoard
-            boards={boards}
-            board={board}
-            selectedBoardId={selectedBoardId}
-            onSelectBoard={handleSelectBoard}
-            columns={columns}
-            cards={cards}
-            agents={agents}
-            users={users}
-            currentUser={currentUser}
-            documents={documents}
-            projectId={selectedProjectId}
-            newCardRequest={newCardRequest}
-            openCardRequest={openCardRequest}
-            onMoveCard={handleMoveCard}
-            onMoveColumn={handleMoveColumn}
-            onNewCardRequestHandled={() => setNewCardRequest(null)}
-            onOpenCardRequestHandled={() => setOpenCardRequest(null)}
-            onOpenNewColumn={() => setShowNewColumnModal(true)}
-            onOpenNewBoard={() => setShowNewBoardModal(true)}
-            onDeleteBoard={handleDeleteBoard}
-            onOpenDocumentInVault={(docId) => {
-              setActiveTab('docs');
-              handleSelectDoc(docId);
-            }}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-
-        {activeTab === 'docs' && (
-          <DocumentVault
-            documents={documents}
-            selectedDocId={selectedDocId}
-            onSelectDoc={handleSelectDoc}
-            onOpenNewDoc={() => setShowNewDocModal(true)}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-        {activeTab === 'kb' && (
-          <KnowledgeBaseView
-            currentProject={projects.find((p) => p.id === selectedProjectId) || null}
-            initialEntityId={selectedEntityId}
-            onSelectEntity={(entityId) => {
-              setSelectedEntityId(entityId);
-              if (selectedProjectId) {
-                updateLocation(selectedProjectId, 'kb', null, entityId);
-              }
-            }}
-          />
-        )}
-
-
-        {activeTab === 'activity' && (
-          <TacticalTerminal
-            events={events}
-            agents={agents}
-            cards={cards}
-            documents={documents}
-            onRefresh={loadProjectData}
-          />
-        )}
-
-        {activeTab === 'tokens' && (
-          <div className="muster-panel p-6 max-w-4xl mx-auto my-8 space-y-4">
-            <h2 className="text-sm font-bold muster-text-primary">API Tokens Management</h2>
-            <TokensView />
-          </div>
-        )}
-
-        {activeTab === 'admin' && (
-          workspaceId
-            ? <WorkspaceAdmin workspaceId={workspaceId} currentUser={currentUser} authMode={authMode} />
-            : <div className="text-center py-16 muster-text-muted text-sm">No workspace found yet.</div>
-        )}
-      </main>
-
+      <WorkspaceViewProviders controllers={workspaceControllers}>
+        <AppWorkspaceView />
+      </WorkspaceViewProviders>
       {/* Mobile Bottom Navigation Bar */}
       <MobileBottomNav activeTab={activeTab} onSelectTab={handleSelectTab} />
 
 
       {/* Modals */}
       {showNewProjectModal && (
-        <NewProjectModal
-          onClose={() => setShowNewProjectModal(false)}
-          onSuccess={(newId) => {
-            handleSelectProject(newId);
-            loadProjects(newId);
-          }}
-        />
+        <LazyBoundary label="New Project dialog" resetKey="new-project" variant="dialog" onCancel={() => setShowNewProjectModal(false)}>
+          <NewProjectModal
+            onClose={() => setShowNewProjectModal(false)}
+            onSuccess={(newId) => {
+              handleSelectProject(newId);
+              loadProjects(newId);
+            }}
+          />
+        </LazyBoundary>
       )}
 
       {showEditProjectModal && selectedProjectId && projects.some((p) => p.id === selectedProjectId) && (
-        <EditProjectModal
-          project={projects.find((p) => p.id === selectedProjectId)!}
-          onClose={() => setShowEditProjectModal(false)}
-          onSuccess={() => {
-            loadProjects(selectedProjectId);
-            loadProjectData();
-          }}
-          onDeleteProject={handleDeleteProject}
-        />
+        <LazyBoundary label="Edit Project dialog" resetKey={`edit-project:${selectedProjectId}`} variant="dialog" onCancel={() => setShowEditProjectModal(false)}>
+          <EditProjectModal
+            project={projects.find((p) => p.id === selectedProjectId)!}
+            onClose={() => setShowEditProjectModal(false)}
+            onSuccess={() => {
+              loadProjects(selectedProjectId);
+              loadProjectData();
+            }}
+            onDeleteProject={handleDeleteProject}
+          />
+        </LazyBoundary>
       )}
 
       {showNewBoardModal && selectedProjectId && (
-        <NewBoardModal
-          projectId={selectedProjectId}
-          onClose={() => setShowNewBoardModal(false)}
-          onSuccess={loadProjectData}
-        />
+        <LazyBoundary label="New Board dialog" resetKey={`new-board:${selectedProjectId}`} variant="dialog" onCancel={() => setShowNewBoardModal(false)}>
+          <NewBoardModal
+            projectId={selectedProjectId}
+            onClose={() => setShowNewBoardModal(false)}
+            onSuccess={loadProjectData}
+          />
+        </LazyBoundary>
       )}
 
       {showNewColumnModal && board && (
-        <NewColumnModal
-          boardId={board.id}
-          onClose={() => setShowNewColumnModal(false)}
-          onSuccess={loadProjectData}
-        />
+        <LazyBoundary label="New Column dialog" resetKey={`new-column:${board.id}`} variant="dialog" onCancel={() => setShowNewColumnModal(false)}>
+          <NewColumnModal
+            boardId={board.id}
+            onClose={() => setShowNewColumnModal(false)}
+            onSuccess={loadProjectData}
+          />
+        </LazyBoundary>
       )}
 
       {showRegisterAgentModal && (
-        <NewAgentModal
-          onClose={() => setShowRegisterAgentModal(false)}
-          onSuccess={loadProjectData}
-        />
+        <LazyBoundary label="Register Agent dialog" resetKey="register-agent" variant="dialog" onCancel={() => setShowRegisterAgentModal(false)}>
+          <NewAgentModal
+            onClose={() => setShowRegisterAgentModal(false)}
+            onSuccess={loadProjectData}
+          />
+        </LazyBoundary>
       )}
 
       {showNewDocModal && selectedProjectId && (
-        <NewDocModal
-          projectId={selectedProjectId}
-          onClose={() => setShowNewDocModal(false)}
-          onSuccess={(newDoc) => {
-            if (newDoc && newDoc.id) {
-              handleSelectDoc(newDoc.id);
-            }
-            loadProjectData();
-          }}
-        />
+        <LazyBoundary label="New Document dialog" resetKey={`new-document:${selectedProjectId}`} variant="dialog" onCancel={() => setShowNewDocModal(false)}>
+          <NewDocModal
+            projectId={selectedProjectId}
+            onClose={() => setShowNewDocModal(false)}
+            onSuccess={(newDoc) => {
+              if (newDoc && newDoc.id) {
+                handleSelectDoc(newDoc.id);
+              }
+              loadProjectData();
+            }}
+          />
+        </LazyBoundary>
       )}
 
       {showUserAccountModal && (
-        <UserAccountModal
-          currentUser={currentUser}
-          workspaceId={workspaceId}
-          authMode={authMode}
-          onSetLocalIdentity={handleSetLocalIdentity}
-          initialTab={userAccountInitialTab}
-          onClose={() => setShowUserAccountModal(false)}
-        />
+        <LazyBoundary label="User Account dialog" resetKey={`account:${userAccountInitialTab}`} variant="dialog" onCancel={() => setShowUserAccountModal(false)}>
+          <UserAccountModal
+            currentUser={currentUser}
+            workspaceId={workspaceId}
+            authMode={authMode}
+            onSetLocalIdentity={handleSetLocalIdentity}
+            initialTab={userAccountInitialTab}
+            onClose={() => setShowUserAccountModal(false)}
+          />
+        </LazyBoundary>
       )}
 
       {showShortcutsHelpModal && (
-        <ShortcutsHelpModal onClose={() => setShowShortcutsHelpModal(false)} />
+        <LazyBoundary
+          label="Keyboard Shortcuts dialog"
+          resetKey="shortcuts"
+          variant="dialog"
+          onCancel={() => setShowShortcutsHelpModal(false)}
+          cancelOnShortcutToggle
+        >
+          <ShortcutsHelpModal onClose={() => setShowShortcutsHelpModal(false)} />
+        </LazyBoundary>
       )}
     </div>
     </ThemeProvider>

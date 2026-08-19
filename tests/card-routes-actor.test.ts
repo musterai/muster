@@ -41,7 +41,7 @@ describe('MUS-17: card routes thread the authenticated actor through to events',
     );
 
     eventService = new EventService(db);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     const commentService = new CommentService(db, eventService);
 
     // Seed a project/board/column/card directly via SQL — only the card
@@ -54,8 +54,14 @@ describe('MUS-17: card routes thread the authenticated actor through to events',
     await db.execute(`INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, ['ws-1', 'WS', 'ws', now, now]);
     await db.execute(`INSERT INTO project (id, workspace_id, name, key_prefix, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, [projectId, 'ws-1', 'P', 'PRJ', now, now]);
     await db.execute(`INSERT INTO board (id, project_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, [boardId, projectId, 'Board', now, now]);
-    await db.execute(`INSERT INTO "column" (id, board_id, name, position) VALUES (?, ?, ?, ?)`, [columnId, boardId, 'To Do', 'a']);
-    await db.execute(`INSERT INTO "column" (id, board_id, name, position) VALUES (?, ?, ?, ?)`, [targetColumnId, boardId, 'Done', 'b']);
+    await db.execute(
+      `INSERT INTO "column" (id, board_id, name, position, workflow_role, is_terminal) VALUES (?, ?, ?, ?, ?, ?)`,
+      [columnId, boardId, 'To Do', 'a', 'active', 0],
+    );
+    await db.execute(
+      `INSERT INTO "column" (id, board_id, name, position, workflow_role, is_terminal) VALUES (?, ?, ?, ?, ?, ?)`,
+      [targetColumnId, boardId, 'Done', 'b', 'terminal', 1],
+    );
     await db.execute(
       `INSERT INTO card (id, key, column_id, title, position, priority, created_at, updated_at, archived, is_epic)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
@@ -118,4 +124,22 @@ describe('MUS-17: card routes thread the authenticated actor through to events',
     const moveEvt = events.find(e => e.entity_type === 'card' && e.action === 'moved');
     expect(moveEvt?.actor_id).toBe(actingUserId);
   });
+
+  it('PATCH /cards/:id/move rejects an empty intent without changing the card or events', async () => {
+    const before = await db.query<{ column_id: string; position: string; updated_at: string }>(
+      'SELECT column_id, position, updated_at FROM card WHERE id = ?', [cardId],
+    );
+    const res = await fetch(`${baseUrl}/cards/${cardId}/move`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const after = await db.query<{ column_id: string; position: string; updated_at: string }>(
+      'SELECT column_id, position, updated_at FROM card WHERE id = ?', [cardId],
+    );
+    expect(after).toEqual(before);
+    expect(await eventService.list('proj-1')).toEqual([]);
+  });
 });
+import { createCardServiceForTest } from './support/card-service.js';

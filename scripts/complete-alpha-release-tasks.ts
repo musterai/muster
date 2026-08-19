@@ -1,26 +1,18 @@
 // File: scripts/complete-alpha-release-tasks.ts
 import { createDatabaseAdapter } from '../src/db/factory.js';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  CommentService,
-  DocumentService,
-  AgentService,
-  EventService,
-} from '../src/services/index.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 async function main() {
   const db = createDatabaseAdapter();
-  const eventService = new EventService(db);
-  const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
-  const projectService = new ProjectService(db, eventService, boardService, documentService);
-  const columnService = new ColumnService(db, eventService);
-  const cardService = new CardService(db, eventService);
-  const commentService = new CommentService(db, eventService);
-  const agentService = new AgentService(db, eventService);
+  const {
+    projectService,
+    boardService,
+    documentService,
+    columnService,
+    cardService,
+    commentService,
+    agentService,
+  } = createApplicationServices(db);
 
   const project = (await projectService.list()).find(p => p.name.includes('v2.0-alpha'));
   if (!project) {
@@ -53,7 +45,14 @@ async function main() {
   // Update design document status to Approved
   const docs = await documentService.list(project.id);
   if (docs[0]) {
-    await documentService.setStatus(docs[0].id, 'approved');
+    await documentService.setStatus(docs[0].id, {
+      status: 'in_review',
+      expected_version: docs[0].version,
+    });
+    await documentService.setStatus(docs[0].id, {
+      status: 'approved',
+      expected_version: docs[0].version,
+    });
     console.log(`✓ Design document "${docs[0].title}" approved!`);
   }
 

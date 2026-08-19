@@ -10,57 +10,80 @@ import { UserService } from '../../services/user.service.js';
 import { RoleService } from '../../services/role.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
-import { assertPermissionsGrantable } from '../../shared/permission-enforcer.js';
+import { assertPermissionsGrantable, PermissionDeniedError } from '../../shared/permission-enforcer.js';
+import { validateRequest } from '../middleware/validate.js';
+import { collectionQuerySchema, memberRoleSchema, workspaceMemberParamsSchema } from '../schemas.js';
+import { config } from '../../config/index.js';
+
+function requireWorkspacePathScope(req: Request): void {
+  if (config.auth.mode === 'open') return;
+  const auth = req.authContext;
+  if (!auth?.principal || !auth.is_workspace_member || auth.workspace_id !== req.params.workspaceId) {
+    throw new PermissionDeniedError('workspace.read', auth?.role_name || null);
+  }
+}
 
 export function createUserRouter(db: DatabaseAdapter, userService: UserService, roleService: RoleService, auditService: AuditService): Router {
   const router = Router();
 
-  router.get('/users', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/users', ...validateRequest({ query: collectionQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
-      const workspaceId = wsRows[0]?.id;
+      const authWorkspaceId = req.authContext?.workspace_id;
+      const wsRows = authWorkspaceId
+        ? []
+        : await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
+      const workspaceId = authWorkspaceId || wsRows[0]?.id;
       if (!workspaceId) {
-        res.json([]);
+        res.json({ items: [], page: { limit: req.query.limit || 50, has_more: false, next_cursor: null } });
         return;
       }
-      const members = await userService.listMembers(workspaceId);
+      const members = await userService.listMembersPage(workspaceId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(members);
     } catch (err) {
       next(err);
     }
   });
 
-  router.put('/workspaces/:workspaceId/members/:userId', async (req: Request, res: Response, next: NextFunction) => {
+  router.put('/workspaces/:workspaceId/members/:userId', ...validateRequest({ body: memberRoleSchema, params: workspaceMemberParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const targetRole = await roleService.getById(req.body.role_id);
+      requireWorkspacePathScope(req);
+      const targetRole = await roleService.getById(req.body.role_id, req.authContext);
       if (targetRole) {
         assertPermissionsGrantable(req.authContext || OPEN_AUTH_CONTEXT, targetRole.permissions);
       }
-      await userService.changeMemberRole(req.params.workspaceId, req.params.userId, req.body.role_id);
-      await auditService.logAs(req.authContext, {
-        workspace_id: req.params.workspaceId,
-        action: 'member.role_change',
-        target_type: 'app_user',
-        target_id: req.params.userId,
-        payload: { role_id: req.body.role_id, role_name: targetRole?.name },
-        ip: req.ip,
+      await db.transaction(async tx => {
+        await userService.changeMemberRole(req.params.workspaceId, req.params.userId, req.body.role_id, tx, req.authContext);
+        await auditService.logAs(req.authContext, {
+          workspace_id: req.params.workspaceId,
+          action: 'member.role_change',
+          target_type: 'app_user',
+          target_id: req.params.userId,
+          payload: { role_id: req.body.role_id, role_name: targetRole?.name },
+          ip: req.ip,
+        }, tx);
       });
-      const members = await userService.listMembers(req.params.workspaceId);
+      const members = await userService.listMembers(req.params.workspaceId, req.authContext);
       res.json(members.find(m => m.id === req.params.userId) || null);
     } catch (err) {
       next(err);
     }
   });
 
-  router.delete('/workspaces/:workspaceId/members/:userId', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/workspaces/:workspaceId/members/:userId', ...validateRequest({ params: workspaceMemberParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await userService.removeMember(req.params.workspaceId, req.params.userId);
-      await auditService.logAs(req.authContext, {
-        workspace_id: req.params.workspaceId,
-        action: 'member.remove',
-        target_type: 'app_user',
-        target_id: req.params.userId,
-        ip: req.ip,
+      requireWorkspacePathScope(req);
+      await db.transaction(async tx => {
+        await userService.removeMember(req.params.workspaceId, req.params.userId, tx, req.authContext);
+        await auditService.logAs(req.authContext, {
+          workspace_id: req.params.workspaceId,
+          action: 'member.remove',
+          target_type: 'app_user',
+          target_id: req.params.userId,
+          ip: req.ip,
+        }, tx);
       });
       res.status(204).send();
     } catch (err) {

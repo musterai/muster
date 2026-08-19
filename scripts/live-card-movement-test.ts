@@ -1,14 +1,6 @@
 // File: scripts/live-card-movement-test.ts
 import { createDatabaseAdapter } from '../src/db/factory.js';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  CommentService,
-  AgentService,
-  EventService,
-} from '../src/services/index.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,13 +12,14 @@ async function main() {
   console.log('===========================================================\n');
 
   const db = createDatabaseAdapter();
-  const eventService = new EventService(db);
-  const boardService = new BoardService(db, eventService);
-  const projectService = new ProjectService(db, eventService, boardService);
-  const columnService = new ColumnService(db, eventService);
-  const cardService = new CardService(db, eventService);
-  const commentService = new CommentService(db, eventService);
-  const agentService = new AgentService(db, eventService);
+  const {
+    projectService,
+    boardService,
+    columnService,
+    cardService,
+    commentService,
+    agentService,
+  } = createApplicationServices(db);
 
   // 1. Get Active Project
   const projects = await projectService.list();

@@ -57,6 +57,17 @@ describe('MUS-27: remote-client (muster login/logout helpers)', () => {
     await expect(whoAmI('http://127.0.0.1:1', 'x')).rejects.toBeInstanceOf(RemoteError);
   });
 
+  it('does not include bearer token material in a connection error', async () => {
+    const bearer = 'muster_pat_redaction_secret';
+    try {
+      await whoAmI('http://127.0.0.1:1', bearer);
+      throw new Error('expected whoAmI to reject');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RemoteError);
+      expect((err as Error).message).not.toContain(bearer);
+    }
+  });
+
   it('listMyTokens finds the just-pasted token by its prefix, not its secret', async () => {
     const app = express();
     app.get('/api/v1/tokens', (_req, res) => {
@@ -75,7 +86,7 @@ describe('MUS-27: remote-client (muster login/logout helpers)', () => {
     expect(match?.id).toBe('tok-new');
   });
 
-  it('revokeToken calls DELETE on the token id and never throws on network failure', async () => {
+  it('revokeToken confirms success/already-revoked and surfaces network or server failures', async () => {
     let deletedId: string | null = null;
     const app = express();
     app.delete('/api/v1/tokens/:id', (req, res) => {
@@ -85,10 +96,24 @@ describe('MUS-27: remote-client (muster login/logout helpers)', () => {
     const { server: s, baseUrl } = await listen(app);
     server = s;
 
-    await revokeToken(baseUrl, 'muster_pat_bb112233_secret', 'tok-new');
+    await expect(revokeToken(baseUrl, 'muster_pat_bb112233_secret', 'tok-new')).resolves.toBe('revoked');
     expect(deletedId).toBe('tok-new');
 
-    // Best-effort — logout must still proceed locally even if the network call fails.
-    await expect(revokeToken('http://127.0.0.1:1', 'x', 'tok-new')).resolves.toBeUndefined();
+    await expect(revokeToken('http://127.0.0.1:1', 'x', 'tok-new')).rejects.toThrow(/Cannot confirm remote token revocation/);
+  });
+
+  it('treats 404/410 as already revoked but refuses other non-success responses', async () => {
+    const app = express();
+    app.delete('/api/v1/tokens/:id', (req, res) => {
+      if (req.params.id === 'missing') res.status(404).json({ error: 'not_found' });
+      else if (req.params.id === 'gone') res.status(410).json({ error: 'gone' });
+      else res.status(403).json({ error: 'forbidden' });
+    });
+    const { server: s, baseUrl } = await listen(app);
+    server = s;
+
+    await expect(revokeToken(baseUrl, 'token', 'missing')).resolves.toBe('already_revoked');
+    await expect(revokeToken(baseUrl, 'token', 'gone')).resolves.toBe('already_revoked');
+    await expect(revokeToken(baseUrl, 'token', 'refused')).rejects.toMatchObject({ status: 403 });
   });
 });

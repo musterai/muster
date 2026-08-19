@@ -45,7 +45,7 @@ describe('card completion event (MUS-45)', () => {
     boardService = new BoardService(db, eventService);
     projectService = new ProjectService(db, eventService, boardService);
     columnService = new ColumnService(db, eventService);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
   });
 
@@ -118,7 +118,7 @@ describe('card completion event (MUS-45)', () => {
 
     const received: Event[] = [];
     const service = new EventService(db, (evt) => { received.push(evt); });
-    const cards = new CardService(db, service);
+    const cards = createCardServiceForTest(db, service);
 
     const card = await cards.create({ column_id: todo.id, title: 'Fan out' });
     await cards.move(card.id, { target_column_id: done.id });
@@ -129,3 +129,4 @@ describe('card completion event (MUS-45)', () => {
     expect(completed!.payload).toMatchObject({ card_key: card.key });
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

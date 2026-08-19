@@ -6,16 +6,20 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { AuditService } from '../../services/audit.service.js';
+import { validateRequest } from '../middleware/validate.js';
+import { auditQuerySchema, workspaceIdParamsSchema } from '../schemas.js';
 
 export function createAuditRouter(auditService: AuditService): Router {
   const router = Router();
 
-  router.get('/workspaces/:workspaceId/audit-log', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/workspaces/:workspaceId/audit-log', ...validateRequest({ query: auditQuerySchema, params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const records = await auditService.list(req.params.workspaceId, {
+      const records = await auditService.listPage(req.params.workspaceId, {
         actor_id: req.query.actor_id as string | undefined,
         action: req.query.action as string | undefined,
-        limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 100,
+      }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
       });
       res.json(records);
     } catch (err) {

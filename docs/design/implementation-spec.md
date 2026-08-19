@@ -44,7 +44,7 @@ mkdir -p src/config src/shared src/db/migrations data/attachments
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/express": "^4.17.21",
-    "@types/node": "^20.14.0",
+    "@types/node": "^22.13.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

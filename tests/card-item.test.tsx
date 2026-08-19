@@ -88,7 +88,8 @@ describe('Kanban card context metadata', () => {
 
     expect(html).toContain('justify-between gap-2 mb-2');
     expect(html).toContain('flex items-center gap-1.5 shrink-0');
-    expect(html).toContain('aria-label="Edit MUS-79"');
-    expect(html).toContain('aria-label="Delete MUS-79"');
+    expect(html).toContain('aria-label="Drag MUS-79: Clarify card metadata hierarchy. Press Space to lift');
+    expect(html).toContain('aria-label="Edit MUS-79: Clarify card metadata hierarchy"');
+    expect(html).toContain('aria-label="Delete MUS-79: Clarify card metadata hierarchy"');
   });
 });

@@ -1,21 +1,252 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '../../');
 
-function detectAuthMode(): 'open' | 'enforced' {
-  const envMode = process.env.MUSTER_AUTH_MODE;
-  if (envMode === 'open' || envMode === 'enforced') return envMode;
+export type AuthMode = 'open' | 'enforced';
 
-  // Default: enforced when binding to anything other than 127.0.0.1 / localhost
-  const host = process.env.MUSTER_HOST || 'localhost';
-  if (host === 'localhost' || host === '127.0.0.1') return 'open';
-  return 'enforced';
+export interface ListenerConfig {
+  /** The validated address passed to `app.listen()`. */
+  host: string;
+  /** Whether the address is a loopback address. */
+  isLoopback: boolean;
+  /** The effective request-authentication posture. */
+  authMode: AuthMode;
+  /** The explicitly requested mode, if one was supplied. */
+  requestedAuthMode: AuthMode | null;
 }
+
+export interface DeploymentConfig {
+  publicUrl: string;
+  oidcIssuer: string | null;
+  oidcClientId: string | null;
+  oidcClientSecret: string | null;
+  bootstrapOwnerSubject: string | null;
+  trustedProxies: string[];
+}
+
+function validateHost(host: string): string {
+  if (!host || /\s|\0/.test(host)) {
+    throw new Error('MUSTER_HOST must be a non-empty hostname or IP address without whitespace');
+  }
+
+  // An IPv6 address is sometimes supplied in URL-style brackets. Node's
+  // `listen()` API expects the bare address, so remove them before binding.
+  if (host.startsWith('[') || host.endsWith(']')) {
+    if (!(host.startsWith('[') && host.endsWith(']'))) {
+      throw new Error(`Invalid MUSTER_HOST "${host}"`);
+    }
+    host = host.slice(1, -1);
+  }
+
+  if (!host || host.length > 253) {
+    throw new Error(`Invalid MUSTER_HOST "${host}"`);
+  }
+
+  return host.toLowerCase();
+}
+
+/**
+ * Normalize the supported loopback spellings to deterministic listen values.
+ * In particular, `localhost` is mapped to IPv4 loopback so a default launch
+ * cannot depend on the machine's hostname/DNS preference for IPv4 vs IPv6.
+ */
+export function normalizeListenHost(value?: string): string {
+  // Preserve the documented zero-config default when an environment file
+  // contains an explicitly empty MUSTER_HOST, while still rejecting a value
+  // made only of whitespace as a likely configuration mistake.
+  const raw = value === undefined || value === '' ? 'localhost' : value.trim();
+  const candidate = validateHost(raw);
+
+  if (candidate === 'localhost' || candidate === '127.0.0.1') {
+    return '127.0.0.1';
+  }
+  if (candidate === '::1') {
+    return '::1';
+  }
+
+  // IPv4-mapped IPv6 loopback is still loopback, but normalizing it avoids
+  // platform-dependent dual-stack behaviour when it is supplied explicitly.
+  if (candidate === '::ffff:127.0.0.1') {
+    return '127.0.0.1';
+  }
+
+  return candidate;
+}
+
+export function isLoopbackHost(value?: string): boolean {
+  const host = normalizeListenHost(value);
+  return host === '127.0.0.1' || host === '::1';
+}
+
+/**
+ * Resolve the listener address and authentication posture together. Keeping
+ * this decision in one pure function prevents the socket and auth middleware
+ * from drifting apart.
+ *
+ * A public/non-loopback address defaults to enforced auth. An explicit
+ * `MUSTER_AUTH_MODE=open` with such an address is rejected before the server
+ * opens its database or socket: silently starting in an unsafe posture is not
+ * an acceptable recovery path.
+ */
+export function resolveListenerConfig(env: NodeJS.ProcessEnv = process.env): ListenerConfig {
+  const host = normalizeListenHost(env.MUSTER_HOST);
+  const isLoopback = isLoopbackHost(host);
+  const rawMode = env.MUSTER_AUTH_MODE?.trim().toLowerCase();
+  let requestedAuthMode: AuthMode | null = null;
+
+  if (rawMode) {
+    if (rawMode !== 'open' && rawMode !== 'enforced') {
+      throw new Error(`MUSTER_AUTH_MODE must be "open" or "enforced", received "${env.MUSTER_AUTH_MODE}"`);
+    }
+    requestedAuthMode = rawMode;
+  }
+
+  if (!isLoopback && requestedAuthMode === 'open') {
+    throw new Error(
+      `Unsafe listener configuration: MUSTER_AUTH_MODE=open cannot bind non-loopback host "${host}". ` +
+      'Set MUSTER_AUTH_MODE=enforced or bind to loopback.'
+    );
+  }
+
+  return {
+    host,
+    isLoopback,
+    requestedAuthMode,
+    authMode: requestedAuthMode ?? (isLoopback ? 'open' : 'enforced'),
+  };
+}
+
+function readSecret(env: NodeJS.ProcessEnv, name: string): string | null {
+  const direct = env[name]?.trim();
+  const fileName = env[`${name}_FILE`]?.trim();
+  // A direct secret and a mounted secret are two different sources of
+  // authority. Choosing one by precedence makes an accidental stale value
+  // silently win, so fail before opening a listener and never echo either
+  // the value or the filesystem path in the error.
+  if (direct && fileName) {
+    throw new Error(`Ambiguous ${name} configuration: set either ${name} or ${name}_FILE, not both`);
+  }
+  if (direct) return direct;
+  if (!fileName) return null;
+  try {
+    const value = fs.readFileSync(fileName, 'utf8').trim();
+    if (!value) throw new Error(`${name}_FILE is empty`);
+    return value;
+  } catch (error) {
+    if (error instanceof Error && error.message === `${name}_FILE is empty`) throw error;
+    throw new Error(`Unable to read ${name}_FILE`);
+  }
+}
+
+function validateProxyAddress(value: string): string {
+  const parts = value.split('/');
+  if (parts.length > 2) {
+    throw new Error(`MUSTER_TRUST_PROXY contains an invalid address "${value}"`);
+  }
+  const [address, prefix] = parts;
+  const ipVersion = net.isIP(address);
+  if (!ipVersion) throw new Error(`MUSTER_TRUST_PROXY contains an invalid address "${value}"`);
+  if (prefix !== undefined) {
+    const fullPrefix = ipVersion === 4 ? 32 : 128;
+    if (!/^\d+$/.test(prefix) || Number(prefix) > fullPrefix) {
+      throw new Error(`MUSTER_TRUST_PROXY contains an invalid CIDR "${value}"`);
+    }
+    if (Number(prefix) !== fullPrefix) {
+      throw new Error(`MUSTER_TRUST_PROXY must name a single IP address, not a CIDR range: "${value}"`);
+    }
+  }
+  return value;
+}
+
+/**
+ * Parse an explicit reverse-proxy allowlist; an empty list means trust none.
+ *
+ * A broad Docker/private subnet turns every container on that network into a
+ * trusted proxy. Service addresses can change, so Compose pins the one proxy
+ * peer it needs and this parser accepts only a single IP (/32 or /128 is the
+ * same single host), never an address range.
+ */
+export function resolveTrustedProxies(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env.MUSTER_TRUST_PROXY?.trim();
+  if (!raw) return [];
+  return raw.split(',').map((entry) => entry.trim()).filter(Boolean).map(validateProxyAddress);
+}
+
+/**
+ * Validate deployment-only requirements before opening the database or socket.
+ * Open loopback development remains zero-config; any enforced/public deployment
+ * must provide enough OIDC and origin information to fail closed.
+ */
+export function validateDeploymentConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  listener: ListenerConfig = resolveListenerConfig(env),
+): DeploymentConfig {
+  const port = Number.parseInt(env.MUSTER_PORT || '6878', 10);
+  const suppliedPublicUrl = env.MUSTER_PUBLIC_URL?.trim();
+  if (!listener.isLoopback && !suppliedPublicUrl) {
+    throw new Error('MUSTER_PUBLIC_URL is required when MUSTER_HOST is non-loopback');
+  }
+  const publicUrl = (suppliedPublicUrl || `http://localhost:${port}`).replace(/\/$/, '');
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(publicUrl);
+  } catch {
+    throw new Error('MUSTER_PUBLIC_URL must be an absolute http(s) URL');
+  }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash || !['', '/'].includes(parsedUrl.pathname)) {
+    throw new Error('MUSTER_PUBLIC_URL must be an origin URL without credentials, path, query, or fragment');
+  }
+  if (!listener.isLoopback && parsedUrl.protocol !== 'https:') {
+    throw new Error('MUSTER_PUBLIC_URL must use https when MUSTER_HOST is non-loopback');
+  }
+  const oidcIssuer = env.MUSTER_OIDC_ISSUER?.trim() || null;
+  const oidcClientId = env.MUSTER_OIDC_CLIENT_ID?.trim() || null;
+  const oidcClientSecret = readSecret(env, 'MUSTER_OIDC_CLIENT_SECRET');
+  const bootstrapOwnerSubject = env.MUSTER_BOOTSTRAP_OWNER_SUBJECT?.trim() || null;
+  if (bootstrapOwnerSubject && /[\r\n]/.test(bootstrapOwnerSubject)) {
+    throw new Error('MUSTER_BOOTSTRAP_OWNER_SUBJECT must not contain newlines');
+  }
+  if (listener.authMode === 'enforced') {
+    const missing = [
+      !oidcIssuer && 'MUSTER_OIDC_ISSUER',
+      !oidcClientId && 'MUSTER_OIDC_CLIENT_ID',
+      !oidcClientSecret && 'MUSTER_OIDC_CLIENT_SECRET',
+      !bootstrapOwnerSubject && 'MUSTER_BOOTSTRAP_OWNER_SUBJECT',
+    ].filter(Boolean);
+    if (missing.length > 0) {
+      throw new Error(`Enforced authentication requires ${missing.join(', ')}`);
+    }
+    try {
+      const issuerUrl = new URL(oidcIssuer!);
+      if (issuerUrl.protocol !== 'https:' && !listener.isLoopback) throw new Error('issuer must use https');
+    } catch {
+      throw new Error('MUSTER_OIDC_ISSUER must be an absolute URL (https for non-loopback deployments)');
+    }
+  }
+
+  return {
+    publicUrl,
+    oidcIssuer,
+    oidcClientId,
+    oidcClientSecret,
+    bootstrapOwnerSubject,
+    trustedProxies: resolveTrustedProxies(env),
+  };
+}
+
+/** Render an address safely inside an HTTP URL for startup guidance. */
+export function formatHostForUrl(host: string): string {
+  return net.isIP(host) === 6 && !host.startsWith('[') ? `[${host}]` : host;
+}
+
+const listener = resolveListenerConfig();
+const deployment = validateDeploymentConfig(process.env, listener);
 
 function getDefaultDbDir(): string {
   if (process.env.MUSTER_DB_DIR) {
@@ -90,10 +321,11 @@ const initialDb = resolveDbPath();
 
 export const config = {
   port,
-  host: process.env.MUSTER_HOST || 'localhost',
+  host: listener.host,
   auth: {
-    mode: detectAuthMode() as 'open' | 'enforced',
+    mode: listener.authMode,
   },
+  trustedProxies: deployment.trustedProxies,
   db: {
     /** 'sqlite' (default, zero-config) or 'postgres' — see docs/deployment.md. */
     type: (process.env.MUSTER_DB_TYPE || 'sqlite') as 'sqlite' | 'postgres',
@@ -106,10 +338,10 @@ export const config = {
   oidc: {
     issuer: process.env.MUSTER_OIDC_ISSUER || null,
     clientId: process.env.MUSTER_OIDC_CLIENT_ID || null,
-    clientSecret: process.env.MUSTER_OIDC_CLIENT_SECRET || null,
-    publicUrl: process.env.MUSTER_PUBLIC_URL || `http://localhost:${port}`,
+    clientSecret: deployment.oidcClientSecret,
+    publicUrl: deployment.publicUrl,
     /** OIDC `sub` claim pinned in advance as the workspace owner, bypassing invitation admission. */
-    bootstrapOwnerSubject: process.env.MUSTER_BOOTSTRAP_OWNER_SUBJECT || null,
+    bootstrapOwnerSubject: deployment.bootstrapOwnerSubject,
   },
 };
 

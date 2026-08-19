@@ -66,6 +66,30 @@ async function callMCPTool(toolName: string, args: Record<string, any> = {}) {
   return JSON.parse(content);
 }
 
+async function callMCPToolExpectValidationError(toolName: string, args: Record<string, any>) {
+  const payload = {
+    jsonrpc: '2.0',
+    id: requestId++,
+    method: 'tools/call',
+    params: { name: toolName, arguments: args },
+  };
+  const res = await fetch(MCP_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`MCP HTTP validation probe failed (${res.status}): ${await res.text()}`);
+
+  const responseText = await res.text();
+  const dataLine = responseText.split('\n').find((line) => line.startsWith('data: '));
+  const jsonResponse = JSON.parse(dataLine ? dataLine.replace(/^data:\s*/, '') : responseText);
+  const message = jsonResponse.error?.message || jsonResponse.result?.content?.[0]?.text;
+  if (!message || !/input validation error|invalid arguments/i.test(message)) {
+    throw new Error(`Expected MCP validation refusal, got: ${JSON.stringify(jsonResponse)}`);
+  }
+  return message;
+}
+
 
 async function runMcpAgentTestSuite() {
   console.log('===========================================================');
@@ -134,8 +158,6 @@ async function runMcpAgentTestSuite() {
     console.log('\n[2/12] Registering AI Agent via MCP (register_agent)...');
     const agent = await callMCPTool('register_agent', {
       name: 'External-Test-Agent-01',
-      type: 'ai_agent',
-      role: 'contributor',
       capabilities: ['code', 'test', 'mcp'],
       status: 'active',
     });
@@ -148,7 +170,8 @@ async function runMcpAgentTestSuite() {
 
     // Step 4: List Boards & Default Columns
     console.log('\n[4/12] Listing Project Boards & Columns via MCP (list_boards & get_board)...');
-    const boards = await callMCPTool('list_boards', { project_id: project.id });
+    const boardPage = await callMCPTool('list_boards', { project_id: project.id });
+    const boards = boardPage.items;
     console.log(`  ✓ Found ${boards.length} board(s). Board Name: "${boards[0].name}"`);
 
     const boardDetails = await callMCPTool('get_board', { board_id: boards[0].id });
@@ -161,7 +184,7 @@ async function runMcpAgentTestSuite() {
       name: 'Release Board',
       template: 'simple',
     });
-    const boardsAfterCreate = await callMCPTool('list_boards', { project_id: project.id });
+    const boardsAfterCreate = (await callMCPTool('list_boards', { project_id: project.id })).items;
     if (!boardsAfterCreate.some((candidate: any) => candidate.id === releaseBoard.id)) {
       throw new Error('MCP list_boards did not return the newly created board');
     }
@@ -198,6 +221,22 @@ async function runMcpAgentTestSuite() {
       assignees: [agent.id],
     });
     console.log(`  ✓ Card Created! ID: ${card.id}, Title: "${card.title}"`);
+    await callMCPToolExpectValidationError('create_card', {
+      column_id: 'bad!',
+      title: 'x'.repeat(201),
+      due_date: 'not-an-iso-date',
+      unexpected_attacker_key: true,
+    });
+    const unknownKeyCanary = 'unknown_mcp_canary_opaque';
+    const unknownKeyError = await callMCPToolExpectValidationError('create_card', {
+      column_id: boardDetails.columns[0].id,
+      title: 'MCP unknown-key redaction probe',
+      [unknownKeyCanary]: true,
+    });
+    if (unknownKeyError.includes(unknownKeyCanary)) {
+      throw new Error('MCP validation error reflected an attacker-controlled unknown key name');
+    }
+    console.log('  ✓ Invalid MCP card input rejected before mutation.');
 
     // Step 7: Update & Move Card
     console.log('\n[7/12] Updating & Moving Card via MCP (update_card & move_card)...');
@@ -228,7 +267,6 @@ async function runMcpAgentTestSuite() {
       project_id: project.id,
       title: 'MCP Streamable HTTP Transport Specification',
       content: '# MCP Specification\n\nThis document describes the Streamable HTTP transport implementation for Muster.',
-      author_id: agent.id,
     });
     console.log(`  ✓ Document Created! ID: ${doc.id}, Title: "${doc.title}", Version: ${doc.version}`);
 
@@ -239,24 +277,25 @@ async function runMcpAgentTestSuite() {
       title: 'MCP Streamable HTTP Transport Specification v2',
       content: '# MCP Specification v2\n\nUpdated with complete 33-tool schema definitions.',
       change_summary: 'Added detailed tool schema parameters',
-      author_id: agent.id,
     });
     console.log(`  ✓ Document Updated! New Version: ${updatedDoc.version}, Title: "${updatedDoc.title}"`);
 
     const history = await callMCPTool('get_document_history', { document_id: doc.id });
-    console.log(`  ✓ Version History Retreived: ${history.length} historical version(s) archived.`);
+    console.log(`  ✓ Version History Retreived: ${history.items.length} historical version(s) archived.`);
 
     // Step 11: Transition Document Status
     console.log('\n[11/12] Transitioning Document Status via MCP (set_document_status)...');
     const inReviewDoc = await callMCPTool('set_document_status', {
       document_id: doc.id,
       status: 'in_review',
+      expected_version: updatedDoc.version,
     });
     console.log(`  ✓ Status set to: ${inReviewDoc.status}`);
 
     const approvedDoc = await callMCPTool('set_document_status', {
       document_id: doc.id,
       status: 'approved',
+      expected_version: inReviewDoc.version,
     });
     console.log(`  ✓ Status set to: ${approvedDoc.status}`);
 
@@ -286,6 +325,8 @@ async function runMcpAgentTestSuite() {
       category: 'constraint',
     });
     console.log(`  ✓ Gained Knowledge Fact Added! ID: ${fact.id}, Title: "${fact.title}"`);
+    const factDetail = await callMCPTool('get_gained_knowledge', { fact_id: fact.id });
+    if (factDetail.content !== fact.content) throw new Error('Knowledge fact detail did not preserve its content body.');
 
     const entityKnowledge = await callMCPTool('get_entity_knowledge', {
       query: '192.168.1.99',

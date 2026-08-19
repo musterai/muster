@@ -17,135 +17,157 @@ from conflating these. They are independent:
 
 | | What it is | What it does *not* do |
 | :--- | :--- | :--- |
-| **`MUSTER_HOST`** | Advisory only. Picks the `MUSTER_AUTH_MODE` default and labels the startup banner. | Does **not** change what the server binds to. |
-| **The listen socket** | Always `0.0.0.0:MUSTER_PORT`. Not configurable. | Does **not** follow `MUSTER_HOST`. |
+| **`MUSTER_HOST`** | The validated address the Muster process binds to. Defaults to IPv4 loopback (`127.0.0.1`; `localhost` is accepted). | Does **not** make an explicit `MUSTER_AUTH_MODE=open` safe on a public address. |
+| **The listen socket** | Binds to `MUSTER_HOST:MUSTER_PORT`. Loopback spellings (`localhost`, `127.0.0.1`, `::1`) are normalized before binding. | Does **not** bypass authentication policy. |
 | **Docker's `ports:` mapping** | The *host-side* address the container's port is published on. This is what actually controls reachability. | Does **not** touch `MUSTER_HOST`, and so does **not** change the auth mode. |
 
 The rule for auth mode itself ([src/config/index.ts](../src/config/index.ts)):
 
-1. If `MUSTER_AUTH_MODE` is set to `open` or `enforced`, that wins, always.
-2. Otherwise it is `open` when `MUSTER_HOST` is unset, `localhost`, or
-   `127.0.0.1` — and `enforced` for any other value.
+1. If `MUSTER_AUTH_MODE=enforced` is set, it is honored for any bind address.
+2. If `MUSTER_AUTH_MODE=open` is set for a non-loopback address, startup fails
+   closed with an actionable error. Muster never opens a public socket in
+   open mode.
+3. When `MUSTER_AUTH_MODE` is omitted, it is `open` for loopback and `enforced`
+   for every other address, including `0.0.0.0` and `::`.
 
 **The Docker image always starts in `enforced` mode.** The Dockerfile hardcodes
-`ENV MUSTER_HOST=0.0.0.0` and `docker-compose.yml` sets it again, so rule 2
+`ENV MUSTER_HOST=0.0.0.0` and `docker-compose.yml` sets it again, so rule 3
 lands on `enforced` for every container. Nothing in the reverse-proxy setup
-below changes that. The only way a container runs in `open` mode is if someone
-explicitly sets `MUSTER_AUTH_MODE=open` — don't.
+below changes that. An explicit `MUSTER_AUTH_MODE=open` would contradict the
+public container bind and is rejected at startup.
 
 You therefore do not need to set `MUSTER_AUTH_MODE` by hand for a public
 deployment; the default is already correct. Setting it explicitly to `enforced`
 in your deployment config is still reasonable as documentation-in-place, and
-costs nothing. What matters is that you do everything *else* below — security
-that requires a deliberate action to turn on does not get turned on.
+costs nothing. Never set it to `open` while `MUSTER_HOST` is public: Muster will
+refuse to start rather than silently weaken the boundary.
 
-Confirm the result rather than trusting it: the startup banner prints
-`• Auth:     enforced`. If it says `open`, stop and fix that before exposing
-the port. Muster also logs a loud warning at boot if it finds itself in `open`
-mode with a non-loopback `MUSTER_HOST`.
+Confirm the result rather than trusting it: the startup banner prints the
+effective `• Bind:` address and `• Auth:` mode. If it reports a public address,
+make sure the mode is `enforced` before exposing the port.
 
-## Do not publish port 6878 directly
+## Compose topology: Caddy is the only edge
 
-`docker-compose.yml`'s default `ports: ["6878:6878"]` is a getting-started
-convenience, not a deployment topology. Muster's own HTTP server has no TLS
-support and no public-facing hardening beyond what's described in this
-document — it is designed to sit behind a reverse proxy that terminates TLS,
-not to be the public-facing edge itself.
-
-**Correct topology:**
+Do not publish Muster's port `6878` directly. The checked-in Compose file has
+no `ports:` entry for `muster-server`; Caddy is the TLS-terminating edge and
+the only service with host publications:
 
 ```
-Internet → reverse proxy (TLS termination, port 443) → Muster (port 6878, reachable only from the proxy)
+Browser ──HTTPS──> Caddy (Compose edge) ──HTTP, fixed 172.30.0.2──> Muster (172.30.0.3:6878)
 ```
 
-Change `docker-compose.yml` to publish the port on the host's loopback
-interface only:
+`muster-internal` is a dedicated `internal: true` `/29` network. The Compose
+file assigns Caddy `172.30.0.2` and Muster `172.30.0.3`; therefore
+`MUSTER_TRUST_PROXY=172.30.0.2` names the actual immediate peer that Express
+will see. This is deliberately an exact address, not Docker's changing host
+bridge/gateway address and not a private CIDR. If either service address is
+changed, update both Compose and `MUSTER_TRUST_PROXY` in the same reviewed
+change. Security takes precedence over a topology that silently follows a
+changing container IP.
 
-```yaml
-ports:
-  - "127.0.0.1:6878:6878"
-```
+Both services have a second egress-only network so Caddy can complete ACME and
+Muster can reach the OIDC issuer/JWKS. That network is never trusted by
+Express. The Caddyfile connects to the internal-only `muster-backend` alias,
+not to the egress service name, so its backend connection always originates at
+the pinned `172.30.0.2` address.
 
-or drop the `ports:` mapping entirely and put the reverse proxy in the same
-Docker network, reaching Muster by its service name.
+Copy `.env.example` to `.env`, create `secrets/oidc_client_secret` with mode
+`0600`, then set `MUSTER_PUBLIC_HOST`, `ACME_EMAIL`, the OIDC values, and the
+pinned owner subject. Both `.env`/`.env.*` and `secrets/` are excluded from the
+Docker build context by `.dockerignore`: Compose reads them on the host and
+mounts the client secret only at runtime, so it cannot be copied by the
+Dockerfile or retained in a builder cache layer. Keep the secret outside source
+files and never pass it as a Docker build argument. Compose derives `MUSTER_PUBLIC_URL` as
+`https://${MUSTER_PUBLIC_HOST}`, so OIDC redirects, cookie policy, CORS, and
+the Caddy certificate hostname cannot drift apart. `MUSTER_PROXY_BIND_ADDRESS`
+defaults to `127.0.0.1`, so the example is not exposed on all host interfaces.
+Change it only to one deliberate public interface when this Caddy container
+itself is the Internet-facing TLS edge and its DNS name resolves there.
 
-Either way, **this is a reachability change, not an auth change.** Inside the
-container Muster still binds `0.0.0.0:6878` and `MUSTER_HOST` is still
-`0.0.0.0`, so the container stays in `enforced` mode exactly as before. The
-`127.0.0.1` here is an address on the *host*, not a value Muster ever reads.
+The static `172.30.0.0/29` pool is intentional. If it overlaps an existing
+Docker network, Compose/Docker must fail while creating the network rather
+than assigning a surprise source address. Select an unused `/29`, then update
+the IPAM subnet, Caddy's `.2` address, Muster's `.3` address, and
+`MUSTER_TRUST_PROXY` together before retrying. Never solve an overlap by
+removing the static address or trusting the whole replacement subnet.
 
-## Reverse proxy
+Do **not** place a host Caddy/nginx in front of this Compose Caddy service as a
+drop-in substitution: it reintroduces a host-to-Docker NAT hop and changes the
+client-IP trust chain. A multi-proxy design needs its own reviewed edge
+configuration that authenticates or otherwise identifies every hop; it is not
+the checked-in deployment path.
 
-### Caddy (recommended — automatic TLS via Let's Encrypt)
+### Forwarded headers
 
-```caddyfile
-muster.example.com {
-    reverse_proxy 127.0.0.1:6878
-}
-```
+Muster ignores `X-Forwarded-*` by default. Its proxy allowlist accepts only
+exact IPv4/IPv6 addresses (or their single-address `/32`/`/128` spellings),
+never broad private ranges or hop counts. Caddy clears and rebuilds
+`X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` from the direct
+browser connection before proxying. A direct request to Muster therefore
+cannot spoof HTTPS or its client address; a request through the configured
+Caddy gets the correct public origin, secure cookie behavior, and client IP.
 
-That's the whole config. Caddy obtains and renews the certificate itself.
-Restart Caddy after changes; no separate certbot step.
+### SSE connection and queue policy
 
-`127.0.0.1:6878` assumes Caddy runs on the host and Muster publishes to
-loopback. If Caddy is a container on the same Docker network instead, use the
-service name — `reverse_proxy muster-server:6878` — and drop the `ports:`
-mapping entirely. The same substitution applies to the nginx `proxy_pass`
-below.
+The server bounds each process to 100 live SSE clients, with per-principal,
+per-IP, and per-workspace limits of 4, 20, and 50 respectively. A client that
+does not drain writes is allowed at most 100 queued events or 256 KiB and is
+disconnected after 30 seconds without a `drain` notification. Capacity
+refusals return HTTP 429 with `error: "sse_capacity_exceeded"` and a
+`Retry-After` header. The broadcaster's counters (`activeClients`, sent and
+dropped events, dropped clients, backpressure drops, and capacity rejections)
+are available through its process-local `getStats()` observability hook; event
+bodies are never included in logs or those counters.
 
-### nginx
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name muster.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/muster.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/muster.example.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:6878;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # SSE (the live board updates) and MCP Streamable HTTP both need a
-        # long-lived, unbuffered connection — the two settings below are not
-        # optional for either to work.
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
-    }
-}
-
-server {
-    listen 80;
-    server_name muster.example.com;
-    return 301 https://$host$request_uri;
-}
-```
-
-Obtain the certificate with `certbot --nginx -d muster.example.com` (or your
-existing ACME tooling) before starting nginx with this config.
+Each activity frame carries its persisted event ID. On reconnect, a bounded
+`Last-Event-ID` cursor is accepted only for the requested project and replays
+up to the first 100 successors oldest-first while live frames are held in the
+same bounded queue. Missing, foreign, malformed, or overlong cursors reset to
+the live tail without disclosing whether an event exists; a replay never scans
+or buffers an unbounded history. The per-IP cap uses Express's resolved client
+IP. A direct request therefore uses its socket peer, while the checked-in
+Caddy topology uses the sanitized forwarded address only because the immediate
+fixed Caddy address is explicitly trusted.
 
 ## Environment variables
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `MUSTER_PORT` | `6878` | The port the server listens on, inside the container. Restricting *who can reach* it is the reverse proxy's and Docker's job, not this variable's. |
-| `MUSTER_HOST` | `localhost` (`0.0.0.0` in Docker) | Advisory only — picks the `open`/`enforced` default and labels the startup banner. The server always binds `0.0.0.0`; use your firewall or Docker's port mapping to actually restrict reachability. |
-| `MUSTER_AUTH_MODE` | derived from `MUSTER_HOST` | `open` or `enforced`; an explicit value always overrides the derived one. Already `enforced` in Docker — see [Three knobs that are easy to confuse](#three-knobs-that-are-easy-to-confuse). Never set this to `open` on a public host. |
+| `MUSTER_HOST` | `localhost` (normalized to `127.0.0.1`; `0.0.0.0` in Docker) | Validated listener address. `localhost`, `127.0.0.1`, and `::1` are loopback; `0.0.0.0`, `::`, and other addresses are non-loopback. |
+| `MUSTER_AUTH_MODE` | derived from `MUSTER_HOST` | `open` or `enforced`. Omitted means open on loopback and enforced elsewhere. Explicit `open` + non-loopback is rejected; explicit `enforced` always works. |
 | `MUSTER_DB_PATH` | `data/muster.db` | SQLite database file path. |
 | `MUSTER_DB_TYPE` | `sqlite` | Database backend — `sqlite` or `postgres` (see [PostgreSQL, and migrating an existing SQLite install to it](#postgresql-and-migrating-an-existing-sqlite-install-to-it)). |
 | `MUSTER_DATABASE_URL` | — | PostgreSQL connection string, e.g. `postgres://user:pass@host:5432/muster`. Required when `MUSTER_DB_TYPE=postgres`; ignored otherwise. |
 | `MUSTER_ATTACHMENTS_DIR` | `data/attachments` | Local storage for uploaded attachments. |
-| `MUSTER_PUBLIC_URL` | `http://localhost:<port>` | **Required for a public deployment.** The externally-reachable HTTPS origin — OIDC redirect URIs, CORS's allowed origin, the MCP protected-resource metadata's `resource`, and the Device Authorization Grant's `verification_uri` are all derived from this. It must exactly match what's in the browser's address bar, including scheme. |
+| `MUSTER_PUBLIC_URL` | `http://localhost:<port>` | **Required for a public deployment.** The externally-reachable HTTPS origin — OIDC redirect URIs, CORS's allowed origin, the MCP protected-resource metadata's `resource`, and the Device Authorization Grant's `verification_uri` are all derived from this. It must exactly match what's in the browser's address bar, including scheme. Compose derives it from `MUSTER_PUBLIC_HOST` as `https://…`. |
 | `MUSTER_OIDC_ISSUER` | — | The OIDC provider's issuer URL (Authentik, Keycloak, Okta, Auth0, Google, GitHub via an OIDC-compatible proxy, etc). Discovery is fetched from `${issuer}/.well-known/openid-configuration`. |
 | `MUSTER_OIDC_CLIENT_ID` | — | OAuth client ID registered with the provider. |
-| `MUSTER_OIDC_CLIENT_SECRET` | — | OAuth client secret. Keep this out of version control and shell history — pass it via your deployment platform's secret store. |
-| `MUSTER_BOOTSTRAP_OWNER_SUBJECT` | — | The OIDC `sub` claim to pin as workspace owner in advance, bypassing invitation admission. Optional — the first person to sign in becomes owner automatically if this is unset. |
+| `MUSTER_OIDC_CLIENT_SECRET` | — | OAuth client secret. Keep this out of version control and shell history — pass it via your deployment platform's secret store. It is mutually exclusive with `MUSTER_OIDC_CLIENT_SECRET_FILE`. |
+| `MUSTER_OIDC_CLIENT_SECRET_FILE` | — | Read the client secret from a mounted secret file (preferred for Compose/Kubernetes); the value is trimmed and never logged. It is mutually exclusive with `MUSTER_OIDC_CLIENT_SECRET`. |
+| `MUSTER_BOOTSTRAP_OWNER_SUBJECT` | — | The OIDC `sub` claim pinned as workspace owner before first login. **Required whenever authentication is enforced** (including every non-loopback deployment); no first-login owner race/policy exists in production. |
+| `MUSTER_TRUST_PROXY` | empty (trust none) | Comma-separated exact immediate proxy IPs (single-address `/32`/`/128` is accepted). CIDR ranges and broad private networks are rejected. The Compose topology pins this to `172.30.0.2`. |
+| `MUSTER_PROXY_BIND_ADDRESS` | `127.0.0.1` in Compose | Host-side address for Compose Caddy ports 80/443. Change it only to an intentional public interface when Caddy is the TLS edge. |
+| `MUSTER_PUBLIC_HOST` | — | DNS hostname only for Compose Caddy's automatic TLS site; it must agree with `MUSTER_PUBLIC_URL`. |
+| `ACME_EMAIL` | — | ACME contact email for Compose Caddy. |
 
 OIDC is required for a public deployment: without it, `/auth/login` returns
 `503 oidc_not_configured` and nobody can sign in at all.
+
+OIDC authentication and workspace admission remain separate. A local account
+must be active and either be a member, match a pending invitation, or match the
+configured bootstrap owner. Enforced deployments require the pin before the
+database or listener opens, so the old first-successful-login ownership policy
+is limited to zero-config loopback open development. Anonymous `/auth/me`
+responses retain the login-state shape but do not disclose workspace metadata.
+
+The liveness probe is `GET /api/v1/health/live` and returns only
+`{"status":"alive"}`. Readiness is `GET /api/v1/health/ready`; it performs a
+`SELECT 1` and returns `503 {"status":"not_ready"}` on failure without
+leaking database details. The legacy `/api/v1/health` URL remains only as an
+unauthenticated compatibility alias for that same metadata-free readiness
+contract; it no longer reveals version, uptime, database driver/mode, or
+latency.
 
 ## Backing up and restoring the SQLite database
 
@@ -307,14 +329,12 @@ environment variables above:
 
 ## Checklist before going live
 
-- [ ] Startup banner reads `Auth:     enforced`. (Don't infer this from the
-      `ports:` mapping — they're unrelated.)
+- [ ] Startup banner reads the expected `Bind:` address and `Auth:     enforced`.
+      (Don't infer either value from the `ports:` mapping — they're unrelated.)
 - [ ] `MUSTER_PUBLIC_URL` set to the exact HTTPS origin end users will use.
 - [ ] `MUSTER_OIDC_*` configured and a test login completes end-to-end.
-- [ ] Reverse proxy terminates TLS, and Muster is not reachable except through
-      it — `docker-compose.yml`'s `ports:` mapping publishes to `127.0.0.1`
-      only, or there is no `ports:` mapping and the proxy shares the Docker
-      network.
+- [ ] Compose Caddy is the only TLS edge. `muster-server` has no host port,
+      `MUSTER_TRUST_PROXY` remains the fixed `172.30.0.2` peer, and any public
+      `MUSTER_PROXY_BIND_ADDRESS` was chosen intentionally.
 - [ ] A backup of `data/` (or the `muster-data` volume) is scheduled.
-- [ ] `MUSTER_BOOTSTRAP_OWNER_SUBJECT` set, or you're prepared to be the very
-      first person to sign in.
+- [ ] `MUSTER_BOOTSTRAP_OWNER_SUBJECT` is set to the intended OIDC `sub`.

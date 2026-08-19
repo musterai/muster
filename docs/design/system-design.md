@@ -631,7 +631,7 @@ To prevent two agents from working on the same card:
 
 | Layer              | Technology                  | Rationale                                                                    |
 | ------------------ | --------------------------- | ---------------------------------------------------------------------------- |
-| **Runtime**        | Node.js 20+                 | Async I/O, excellent MCP SDK support                                         |
+| **Runtime**        | Node.js 22+                 | Async I/O, excellent MCP SDK support                                         |
 | **Language**       | TypeScript                  | Type safety across the full stack                                            |
 | **HTTP Framework** | Express.js                  | Mature, simple, wide ecosystem                                               |
 | **MCP SDK**        | `@modelcontextprotocol/sdk` | Official SDK with stdio + Streamable HTTP                                    |

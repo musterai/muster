@@ -7,6 +7,7 @@
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { AuthContext } from '../shared/auth-context.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 export interface AuditRecord {
   id: string;
@@ -35,7 +36,7 @@ export interface LogAuditEntry {
 export class AuditService {
   constructor(private db: DatabaseAdapter) {}
 
-  async log(entry: LogAuditEntry): Promise<void> {
+  async log(entry: LogAuditEntry, adapter: DatabaseAdapter = this.db): Promise<void> {
     // audit_log.workspace_id is NOT NULL (001-initial.sql) — deliberately:
     // an audit trail with a dangling unscoped row is worse than one entry
     // short. Open mode has no session-derived workspace, so fall back to
@@ -43,14 +44,14 @@ export class AuditService {
     // privileged action the audit call is a side effect of.
     let workspaceId = entry.workspace_id;
     if (!workspaceId) {
-      const rows = await this.db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
+      const rows = await adapter.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
       workspaceId = rows[0]?.id || null;
     }
     if (!workspaceId) return; // no workspace exists yet (first boot) — nothing to scope this to
 
     const id = ulid();
     const now = new Date().toISOString();
-    await this.db.execute(
+    await adapter.execute(
       `INSERT INTO audit_log (id, workspace_id, actor_id, actor_kind, action, target_type, target_id, payload, ip, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -69,12 +70,16 @@ export class AuditService {
   }
 
   /** Convenience — most call sites have an AuthContext, not a bare {id, kind}. */
-  logAs(auth: AuthContext | undefined, entry: Omit<LogAuditEntry, 'actor' | 'workspace_id'> & { workspace_id?: string | null }): Promise<void> {
+  logAs(
+    auth: AuthContext | undefined,
+    entry: Omit<LogAuditEntry, 'actor' | 'workspace_id'> & { workspace_id?: string | null },
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<void> {
     return this.log({
       ...entry,
       workspace_id: entry.workspace_id ?? auth?.workspace_id ?? null,
       actor: auth?.principal ? { id: auth.principal.id, kind: auth.principal.kind } : null,
-    });
+    }, adapter);
   }
 
   async list(workspaceId: string, filters: { actor_id?: string; action?: string; limit?: number } = {}): Promise<AuditRecord[]> {
@@ -97,5 +102,27 @@ export class AuditService {
 
     const rows = await this.db.query<any>(sql, params);
     return rows.map(r => ({ ...r, payload: r.payload ? JSON.parse(r.payload) : null }));
+  }
+
+  async listPage(
+    workspaceId: string,
+    filters: { actor_id?: string; action?: string } = {},
+    options: PageOptions = {},
+  ): Promise<Page<AuditRecord>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `audit:${JSON.stringify({ workspaceId, actor_id: filters.actor_id || null, action: filters.action || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    let sql = 'SELECT * FROM audit_log WHERE workspace_id = ?';
+    const params: unknown[] = [workspaceId];
+    if (filters.actor_id) { sql += ' AND actor_id = ?'; params.push(filters.actor_id); }
+    if (filters.action) { sql += ' AND action = ?'; params.push(filters.action); }
+    if (cursor) {
+      sql += ' AND (created_at < ? OR (created_at = ? AND id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT ?';
+    params.push(limit + 1);
+    const rows = (await this.db.query<any>(sql, params)).map(row => ({ ...row, payload: row.payload ? JSON.parse(row.payload) : null }));
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 }

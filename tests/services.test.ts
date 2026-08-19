@@ -13,7 +13,8 @@ import {
   CommentService,
   DocumentService,
   AgentService,
-  EventService
+  EventService,
+  KBService,
 } from '../src/services/index.js';
 import { rankBetween } from '../src/shared/lexorank.js';
 
@@ -29,6 +30,7 @@ describe('Domain Services Integration Tests', () => {
   let documentService: DocumentService;
   let agentService: AgentService;
   let eventService: EventService;
+  let kbService: KBService;
 
   beforeEach(async () => {
     if (fs.existsSync(TEST_DB)) {
@@ -51,10 +53,11 @@ describe('Domain Services Integration Tests', () => {
     boardService = new BoardService(db, eventService);
     projectService = new ProjectService(db, eventService, boardService);
     columnService = new ColumnService(db, eventService);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     commentService = new CommentService(db, eventService);
-    documentService = new DocumentService(db, eventService);
+    documentService = createDocumentServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
+    kbService = new KBService(db, eventService);
   });
 
   afterEach(async () => {
@@ -231,7 +234,7 @@ describe('Domain Services Integration Tests', () => {
     await expect(commentService.delete('nonexistent')).rejects.toThrow('not found');
   });
 
-  it('registers and unregisters an agent cleanly', async () => {
+  it('unregistering an agent preserves an inert attribution tombstone', async () => {
     const project = await projectService.create({ name: 'P' });
     const agent = await agentService.register({
       name: 'Agent To Remove',
@@ -244,7 +247,13 @@ describe('Domain Services Integration Tests', () => {
     await agentService.unregister(agent.id);
 
     agents = await agentService.list();
-    expect(agents.some(a => a.id === agent.id)).toBe(false);
+    const tombstone = agents.find(a => a.id === agent.id);
+    expect(tombstone).toMatchObject({
+      status: 'offline',
+      operator_user_id: null,
+      role_id: null,
+      capabilities: [],
+    });
   });
 
   it('Bug 1.4: document creation and update succeed without version title error', async () => {
@@ -317,6 +326,36 @@ describe('Domain Services Integration Tests', () => {
     expect(deleted).toBeNull();
     const deletedHistory = await documentService.getHistory(doc.id);
     expect(deletedHistory).toEqual([]);
+  });
+
+  it('MUS-59: credential-derived document and KB actors override legacy payload attribution', async () => {
+    const project = await projectService.create({ name: 'Attribution precedence project' });
+    const realActor = await agentService.register({ name: 'Credential actor' });
+    const spoofedActor = await agentService.register({ name: 'Payload spoof target' });
+
+    const doc = await documentService.create({
+      project_id: project.id,
+      title: 'Credential-derived author',
+      content: 'v1',
+      author_id: spoofedActor.id,
+    }, realActor.id);
+    expect(doc.author_id).toBe(realActor.id);
+
+    await documentService.update(doc.id, {
+      content: 'v2',
+      author_id: spoofedActor.id,
+    }, realActor.id);
+    const history = await documentService.getHistory(doc.id);
+    expect(history[0].author_id).toBe(realActor.id);
+
+    const kb = await kbService.create({ name: 'Attribution precedence KB', project_ids: [project.id] }, realActor.id);
+    const fact = await kbService.addFact({
+      kb_id: kb.id,
+      title: 'Credential-derived source',
+      content: 'fact',
+      source_principal_id: spoofedActor.id,
+    }, realActor.id);
+    expect(fact.source_principal_id).toBe(realActor.id);
   });
 
   it('Feature: agent registration and session re-binding', async () => {
@@ -631,3 +670,5 @@ describe('Domain Services Integration Tests', () => {
     await expect(cardService.getById(card.id)).rejects.toThrow();
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';
+import { createDocumentServiceForTest } from './support/document-service.js';

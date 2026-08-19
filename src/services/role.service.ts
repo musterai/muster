@@ -1,9 +1,14 @@
 // File: src/services/role.service.ts
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 import { Role, CreateRole, UpdateRole } from '../shared/types.js';
 import { PRESET_ROLES, validatePermissions } from '../shared/permissions.js';
 import { EventService } from './event.service.js';
+import { ValidationError } from '../shared/errors.js';
+import type { AuthContext } from '../shared/auth-context.js';
+import { OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace, assertWorkspace } from './helpers/workspace-scope.helper.js';
 
 export class RoleService {
   constructor(
@@ -12,10 +17,12 @@ export class RoleService {
   ) {}
 
   /** Seed preset roles into a workspace. Idempotent — safe to call on every startup. */
-  async seedPreset(workspaceId: string): Promise<Role[]> {
+  async seedPreset(workspaceId: string, adapter?: DatabaseAdapter): Promise<Role[]> {
+    if (!adapter) return this.db.transaction(tx => this.seedPreset(workspaceId, tx));
+    const db = adapter;
     const seeded: Role[] = [];
     for (const preset of PRESET_ROLES) {
-      const existing = await this.db.query<Role>(
+      const existing = await db.query<Role>(
         'SELECT * FROM role WHERE workspace_id = ? AND key = ?',
         [workspaceId, preset.key],
       );
@@ -25,7 +32,7 @@ export class RoleService {
       }
       const id = ulid();
       const created_at = new Date().toISOString();
-      await this.db.execute(
+      await db.execute(
         `INSERT INTO role (id, workspace_id, key, name, description, permissions_json, is_system, rank)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, workspaceId, preset.key, preset.name, preset.description,
@@ -52,27 +59,19 @@ export class RoleService {
     return result.changes;
   }
 
-  async create(data: CreateRole): Promise<Role> {
+  async create(data: CreateRole, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, tx, auth));
+    const db = adapter;
+    assertWorkspace(auth, data.workspace_id);
     validatePermissions(data.permissions);
     const id = ulid();
     const created_at = new Date().toISOString();
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO role (id, workspace_id, key, name, description, permissions_json, is_system, rank)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.workspace_id, data.key, data.name, data.description || null,
        JSON.stringify(data.permissions), data.is_system ? 1 : 0, data.rank || 0],
     );
-
-    if (this.eventService) {
-      await this.eventService.create({
-        project_id: '',
-        entity_type: 'board',
-        entity_id: id,
-        action: 'role_created',
-        actor_id: undefined,
-        payload: { key: data.key, name: data.name, permissions: data.permissions },
-      });
-    }
 
     const role: Role = {
       id,
@@ -88,7 +87,8 @@ export class RoleService {
     return role;
   }
 
-  async list(workspaceId: string): Promise<Role[]> {
+  async list(workspaceId: string, auth?: AuthContext): Promise<Role[]> {
+    if (auth) assertWorkspace(auth, workspaceId);
     const rows = await this.db.query<any>(
       'SELECT * FROM role WHERE workspace_id = ? ORDER BY rank DESC',
       [workspaceId],
@@ -96,21 +96,52 @@ export class RoleService {
     return rows.map(r => this.mapRow(r));
   }
 
-  async getById(id: string): Promise<Role | null> {
+  async listPage(workspaceId: string, options: PageOptions = {}, auth?: AuthContext): Promise<Page<Role>> {
+    if (auth) assertWorkspace(auth, workspaceId);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `roles:${workspaceId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [workspaceId];
+    let cursorSql = '';
+    if (cursor) {
+      const cursorRank = Number(cursor[0]);
+      if (!Number.isSafeInteger(cursorRank)) {
+        throw new ValidationError('cursor is invalid, stale, or belongs to a different collection', {
+          field: 'cursor',
+          code: 'INVALID_CURSOR',
+        });
+      }
+      cursorSql = ' AND (rank < ? OR (rank = ? AND id < ?))';
+      params.push(cursorRank, cursorRank, cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<any>(
+      `SELECT * FROM role WHERE workspace_id = ?${cursorSql} ORDER BY rank DESC, id DESC LIMIT ?`, params,
+    );
+    return toPage(rows.map(row => this.mapRow(row)), limit, row => encodeCursor(scope, [row.rank, row.id]));
+  }
+
+  async getById(id: string, auth?: AuthContext): Promise<Role | null> {
+    if (auth) await assertResourceWorkspace(this.db, auth, 'role', id);
     const rows = await this.db.query<any>('SELECT * FROM role WHERE id = ?', [id]);
     return rows[0] ? this.mapRow(rows[0]) : null;
   }
 
-  async getByKey(workspaceId: string, key: string): Promise<Role | null> {
-    const rows = await this.db.query<any>(
+  async getByKey(workspaceId: string, key: string, adapter: DatabaseAdapter = this.db, auth?: AuthContext): Promise<Role | null> {
+    if (auth) assertWorkspace(auth, workspaceId);
+    const rows = await adapter.query<any>(
       'SELECT * FROM role WHERE workspace_id = ? AND key = ?',
       [workspaceId, key],
     );
     return rows[0] ? this.mapRow(rows[0]) : null;
   }
 
-  async update(id: string, data: UpdateRole): Promise<Role> {
-    const existing = await this.getById(id);
+  async update(id: string, data: UpdateRole, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, tx, auth));
+    const db = adapter;
+    await assertResourceWorkspace(db, auth, 'role', id);
+    const rows = await db.query<any>('SELECT * FROM role WHERE id = ?', [id]);
+    const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
 
     const name = data.name ?? existing.name;
@@ -120,27 +151,33 @@ export class RoleService {
 
     if (data.permissions) validatePermissions(data.permissions);
 
-    await this.db.execute(
+    await db.execute(
       `UPDATE role SET name = ?, description = ?, permissions_json = ?, rank = ? WHERE id = ?`,
       [name, description, JSON.stringify(permissions), rank, id],
     );
     return { ...existing, name, description, permissions, rank };
   }
 
-  async delete(id: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, tx, auth));
+    await assertResourceWorkspace(adapter, auth, 'role', id);
+    const rows = await adapter.query<any>('SELECT * FROM role WHERE id = ?', [id]);
+    const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
     if (existing.is_system) throw new Error(`System role "${existing.key}" cannot be deleted — clone it instead`);
 
-    await this.db.execute('DELETE FROM role WHERE id = ?', [id]);
+    await adapter.execute('DELETE FROM role WHERE id = ?', [id]);
   }
 
   /**
    * Clone a role (including system roles) into a new editable role.
    * The clone is never is_system.
    */
-  async clone(id: string, newKey: string, newName?: string): Promise<Role> {
-    const existing = await this.getById(id);
+  async clone(id: string, newKey: string, newName?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.clone(id, newKey, newName, tx, auth));
+    await assertResourceWorkspace(adapter, auth, 'role', id);
+    const rows = await adapter.query<any>('SELECT * FROM role WHERE id = ?', [id]);
+    const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
 
     return this.create({
@@ -151,16 +188,16 @@ export class RoleService {
       permissions: existing.permissions,
       is_system: false,
       rank: existing.rank - 1,
-    });
+    }, adapter, auth);
   }
 
   /**
    * Get effective permissions for an agent.
    * effective = agent.role.permissions ∩ operator.role.permissions
    */
-  async getEffectivePermissions(agentId: string): Promise<string[]> {
+  async getEffectivePermissions(agentId: string, workspaceId?: string): Promise<string[]> {
     const agentRows = await this.db.query<any>(
-      `SELECT a.role_id, a.operator_user_id FROM agent a WHERE a.id = ?`,
+      `SELECT a.role_id, a.operator_user_id, a.workspace_id FROM agent a WHERE a.id = ?`,
       [agentId],
     );
     if (agentRows.length === 0) return [];
@@ -168,21 +205,26 @@ export class RoleService {
     const agent = agentRows[0];
     if (!agent.role_id) return [];
 
-    const agentRole = await this.getById(agent.role_id);
-    if (!agentRole) return [];
+    if (!agent.workspace_id || (workspaceId && agent.workspace_id !== workspaceId)) return [];
 
-    // No operator means the agent is unbound — return its role's permissions as-is
-    if (!agent.operator_user_id) return agentRole.permissions;
+    const agentRole = await this.getById(agent.role_id);
+    if (!agentRole || agentRole.workspace_id !== agent.workspace_id) return [];
+
+    // An unbound agent has no human authority to inherit. Returning the
+    // nominal role here would make offboarding a privilege escalation.
+    if (!agent.operator_user_id) return [];
 
     // Look up the operator's role
     const opRows = await this.db.query<any>(
-      `SELECT wm.role_id FROM workspace_member wm WHERE wm.user_id = ?`,
-      [agent.operator_user_id],
+      `SELECT wm.role_id
+       FROM workspace_member wm
+       WHERE wm.workspace_id = ? AND wm.user_id = ?`,
+      [agent.workspace_id, agent.operator_user_id],
     );
-    if (opRows.length === 0 || !opRows[0].role_id) return agentRole.permissions;
+    if (opRows.length === 0 || !opRows[0].role_id) return [];
 
     const opRole = await this.getById(opRows[0].role_id);
-    if (!opRole) return agentRole.permissions;
+    if (!opRole || opRole.workspace_id !== agent.workspace_id) return [];
 
     // Intersection
     const opSet = new Set(opRole.permissions);

@@ -1,24 +1,17 @@
 // File: scripts/setup-alpha-release-tasks.ts
 import { createDatabaseAdapter } from '../src/db/factory.js';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  DocumentService,
-  AgentService,
-  EventService,
-} from '../src/services/index.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 async function main() {
   const db = createDatabaseAdapter();
-  const eventService = new EventService(db);
-  const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
-  const projectService = new ProjectService(db, eventService, boardService, documentService);
-  const columnService = new ColumnService(db, eventService);
-  const cardService = new CardService(db, eventService);
-  const agentService = new AgentService(db, eventService);
+  const {
+    projectService,
+    boardService,
+    documentService,
+    columnService,
+    cardService,
+    agentService,
+  } = createApplicationServices(db);
 
   // 1. Create or Find Release Project
   let project = (await projectService.list()).find(p => p.name.includes('v2.0-alpha'));
@@ -56,7 +49,7 @@ This specification details the required components and polish steps for releasin
 
 ## Release Tasks
 1. **Health Telemetry Endpoint (\`/api/v1/health\`)**: Expose system uptime, DB connection state, and active project/agent counts.
-2. **Containerization (\`Dockerfile\` & \`docker-compose.yml\`)**: Multi-stage build for Node 20+, SQLite WAL data volume persistence, and environment variable configuration.
+2. **Containerization (\`Dockerfile\` & \`docker-compose.yml\`)**: Multi-stage build for Node 22+, SQLite WAL data volume persistence, and environment variable configuration.
 3. **Open-Source Documentation (\`README.md\`, \`LICENSE\`, \`CONTRIBUTING.md\`)**: Clear quickstart guide for MCP configuration (Cursor, AGY, Claude Desktop).
 4. **Seed Utility (\`npm run seed\`)**: Single-command data populator for instant user evaluation.
 5. **GitHub Actions CI/CD (\`.github/workflows/ci.yml\`)**: Automated testing, linting, and build verification on push.`,

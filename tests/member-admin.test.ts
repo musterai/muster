@@ -80,7 +80,7 @@ describe('MUS-26: member/role guard rails', () => {
     await expect(userService.removeMember(wsId, 'owner-1')).rejects.toThrow('last owner');
   });
 
-  it('removing a member unassigns, never orphans, the agents they operate', async () => {
+  it('removing a member disables operated agents without deleting attribution rows', async () => {
     await addMember('owner-1', 'Owner One', 'owner');
     const member = await addMember('member-1', 'Member One', 'senior_engineer');
 
@@ -93,8 +93,13 @@ describe('MUS-26: member/role guard rails', () => {
 
     await userService.removeMember(wsId, 'member-1');
 
-    const agentRows = await db.query<{ operator_user_id: string | null }>('SELECT operator_user_id FROM agent WHERE id = ?', ['agent-1']);
-    expect(agentRows[0].operator_user_id).toBeNull();
+    const agentRows = await db.query<{ operator_user_id: string | null; role_id: string | null; status: string }>(
+      'SELECT operator_user_id, role_id, status FROM agent WHERE id = ?',
+      ['agent-1'],
+    );
+    expect(agentRows[0]).toEqual({ operator_user_id: null, role_id: null, status: 'offline' });
+    expect(await db.query('SELECT id FROM principal WHERE id = ?', ['member-1'])).toHaveLength(1);
+    expect(await db.query('SELECT id FROM app_user WHERE id = ?', ['member-1'])).toHaveLength(1);
 
     const members = await userService.listMembers(wsId);
     expect(members.find(m => m.id === 'member-1')).toBeUndefined();

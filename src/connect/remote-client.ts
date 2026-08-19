@@ -17,7 +17,11 @@ export interface RemoteTokenSummary {
   revoked_at: string | null;
 }
 
-export class RemoteError extends Error {}
+export class RemoteError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+  }
+}
 
 async function get(server: string, path: string, token: string): Promise<any> {
   let res: Response;
@@ -46,15 +50,22 @@ export function tokenPrefix(token: string): string | null {
   return parts[2];
 }
 
-export async function revokeToken(server: string, token: string, tokenId: string): Promise<void> {
+export type RevokeResult = 'revoked' | 'already_revoked';
+
+export async function revokeToken(server: string, token: string, tokenId: string): Promise<RevokeResult> {
+  let response: Response;
   try {
-    await fetch(`${server}/api/v1/tokens/${tokenId}`, {
+    response = await fetch(`${server}/api/v1/tokens/${tokenId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
-  } catch {
-    // Best-effort — the local credential is removed regardless; see cli.ts.
+  } catch (error: any) {
+    throw new RemoteError(`Cannot confirm remote token revocation at ${server}: ${error.message}`);
   }
+
+  if (response.ok) return 'revoked';
+  if (response.status === 404 || response.status === 410) return 'already_revoked';
+  throw new RemoteError(`Remote token revocation was refused by ${server} (${response.status}); local credentials were retained.`, response.status);
 }
 
 // ─── Device Authorization Grant (RFC 8628, MUS-28) ─────────────────────────

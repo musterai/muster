@@ -45,9 +45,16 @@ describe('MUS-28: DeviceGrantService', () => {
     userId = 'user-device-1';
     await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [userId, 'user', now]);
     await db.execute('INSERT INTO app_user (id, display_name, status, created_at) VALUES (?, ?, ?, ?)', [userId, 'Ada', 'active', now]);
+    const roleService = new RoleService(db);
+    const roles = await roleService.seedPreset(wsId);
+    const ownerRole = roles.find(r => r.key === 'owner')!;
+    await db.execute(
+      'INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at) VALUES (?, ?, ?, ?)',
+      [wsId, userId, ownerRole.id, now],
+    );
 
     tokenService = new TokenService(db);
-    deviceGrantService = new DeviceGrantService(db, tokenService);
+    deviceGrantService = createDeviceGrantServiceForTest(db, tokenService);
   });
 
   afterEach(async () => {
@@ -173,9 +180,13 @@ describe('MUS-28: device routes — user_code brute-force rate limiting', () => 
     const roleService = new RoleService(db);
     const roles = await roleService.seedPreset(wsId2);
     const ownerRole = roles.find(r => r.key === 'owner')!;
+    await db.execute(
+      'INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at) VALUES (?, ?, ?, ?)',
+      [wsId2, 'approver-1', ownerRole.id, now],
+    );
 
     const tokenService = new TokenService(db);
-    deviceGrantService = new DeviceGrantService(db, tokenService);
+    deviceGrantService = createDeviceGrantServiceForTest(db, tokenService);
 
     const app = express();
     app.use(express.json());
@@ -240,3 +251,4 @@ describe('MUS-28: device routes — user_code brute-force rate limiting', () => 
     expect(result.ok).toBe(true);
   });
 });
+import { createDeviceGrantServiceForTest } from './support/transaction-services.js';

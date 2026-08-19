@@ -108,13 +108,13 @@ export const WorkLinkSection: React.FC<WorkLinkSectionProps> = ({
 
       <form onSubmit={handleSubmit} className="space-y-1.5 min-w-0">
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-          <select value={kind} onChange={(e) => setKind(e.target.value as CardWorkLinkKind)} className="muster-input text-xs py-1 w-full">
+          <select aria-label="Work link kind" value={kind} onChange={(e) => setKind(e.target.value as CardWorkLinkKind)} className="muster-input text-xs py-1 w-full">
             <option value="branch">Branch</option>
             <option value="pull_request">Pull Request</option>
             <option value="commit">Commit</option>
             <option value="pipeline">Pipeline</option>
           </select>
-          <select value={provider} onChange={(e) => setProvider(e.target.value as CardWorkLinkProvider)} className="muster-input text-xs py-1 w-full">
+          <select aria-label="Work link provider" value={provider} onChange={(e) => setProvider(e.target.value as CardWorkLinkProvider)} className="muster-input text-xs py-1 w-full">
             <option value="forgejo">Forgejo</option>
             <option value="github">GitHub</option>
             <option value="gitlab">GitLab</option>

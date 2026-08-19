@@ -6,10 +6,6 @@ import { CardItem } from './CardItem.js';
 
 const DONE_LANE_PAGE_SIZE = 10;
 
-function isDoneLane(columnName: string): boolean {
-  return columnName.trim().toLowerCase() === 'done';
-}
-
 interface KanbanColumnProps {
   column: Column;
   columnIndex: number;
@@ -68,8 +64,9 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
   const hiddenCount = columnCards.length - visibleColumnCards.length;
 
   return (
-    <div
+    <section
       id={`kanban-column-${column.id}`}
+      aria-labelledby={`kanban-column-heading-${column.id}`}
       ref={columnDragProvided?.innerRef}
       {...columnDragProvided?.draggableProps}
       className={`w-72 sm:w-80 flex-shrink-0 flex flex-col ${maxHeightClass || 'max-h-full'} rounded-xl border font-sans ${
@@ -103,7 +100,7 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
               <GripVertical className="w-3.5 h-3.5" />
             </span>
           )}
-          <h3 className="font-sans text-xs font-bold tracking-wide uppercase">{column.name}</h3>
+          <h3 id={`kanban-column-heading-${column.id}`} className="font-sans text-xs font-bold tracking-wide uppercase">{column.name}</h3>
           <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-muster-surface-hover muster-text-secondary border border-muster-border">
             {columnCards.length}
           </span>
@@ -124,8 +121,9 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
           {onOpenNewCardForm && (
             <button
               onClick={() => onOpenNewCardForm(column.id)}
-              className="p-1 hover:bg-neutral-800 muster-text-muted hover:text-brand-400 rounded transition-colors cursor-pointer"
+              className="muster-touch-target p-1 hover:bg-neutral-800 muster-text-muted hover:text-brand-400 rounded transition-colors cursor-pointer"
               title="Add card to column"
+              aria-label={`Add card to ${column.name}`}
             >
               <Plus className="w-4 h-4" />
             </button>
@@ -134,8 +132,9 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
           {onEditColumnSettings && (
             <button
               onClick={() => onEditColumnSettings(column)}
-              className="p-1 hover:bg-neutral-800 muster-text-muted hover:text-brand-400 rounded transition-colors cursor-pointer"
+              className="muster-touch-target p-1 hover:bg-neutral-800 muster-text-muted hover:text-brand-400 rounded transition-colors cursor-pointer"
               title="Edit column settings"
+              aria-label={`Edit ${column.name} column settings`}
             >
               <Edit2 className="w-3.5 h-3.5" />
             </button>
@@ -149,6 +148,8 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
           <div
             ref={provided.innerRef}
             {...provided.droppableProps}
+            role="list"
+            aria-label={`${column.name} cards`}
             className={`p-3 flex-1 overflow-y-auto space-y-3 transition-colors ${snapshot.isDraggingOver ? 'bg-brand-950/20' : ''}`}
           >
             {visibleColumnCards.map((card, index) => (
@@ -173,7 +174,7 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
             ))}
             {provided.placeholder}
 
-            {isDoneLane(column.name) && columnCards.length > DONE_LANE_PAGE_SIZE && (
+            {column.workflow_role === 'terminal' && columnCards.length > DONE_LANE_PAGE_SIZE && (
               <div className="muster-panel p-3 space-y-2 text-center">
                 <p className="text-[10px] font-sans muster-text-muted">
                   Showing {visibleColumnCards.length} of {columnCards.length} cards
@@ -203,6 +204,6 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
           </div>
         )}
       </Droppable>
-    </div>
+    </section>
   );
 };

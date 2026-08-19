@@ -8,7 +8,7 @@
 // 5. Refusal payloads name the missing permission.
 // 6. With MUSTER_AUTH_MODE=open, the existing test suite passes unchanged.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createDatabaseAdapter } from '../src/db/factory.js';
@@ -28,29 +28,63 @@ import {
 } from '../src/services/index.js';
 import {
   TOOL_PERMISSIONS,
+  OPERATION_PERMISSIONS,
   PermissionDeniedError,
   requirePermission,
   requireRestPermission,
   REST_ROUTE_PERMISSIONS,
+  WORKSPACE_READ,
   resolvePermission,
   withPermission,
 } from '../src/shared/permission-enforcer.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../src/shared/auth-context.js';
 import { ALL_PERMISSIONS, PRESET_ROLES } from '../src/shared/permissions.js';
 import { config } from '../src/config/index.js';
-import { createMcpServer, Services } from '../src/mcp/server.js';
+import {
+  assertMcpToolPermissionInventory,
+  createMcpServer,
+  getRegisteredMcpToolNames,
+  installMcpPermissionBoundary,
+  Services,
+} from '../src/mcp/server.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { z } from 'zod';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-permission-enforcement.db');
 
 // Create a mock AuthContext with specific permissions and role
-function makeAuth(permissions: string[], roleName: string | null = null, principalId?: string): AuthContext {
+function makeAuth(
+  permissions: string[],
+  roleName: string | null = null,
+  principalId?: string,
+  isWorkspaceMember = true,
+): AuthContext {
   return {
     principal: principalId ? { kind: 'user', id: principalId } : null,
-    workspace_id: 'test-ws',
+    workspace_id: 'test-ws-perm-01',
+    is_workspace_member: isWorkspaceMember,
     permissions,
     is_operator_override: false,
     role_name: roleName,
   };
+}
+
+async function withInMemoryMcpClient<T>(
+  server: McpServer,
+  action: (client: Client) => Promise<T>,
+): Promise<T> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'muster-boundary-test-client', version: '1.0.0' });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    return await action(client);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 }
 
 describe('MUS-22: Permission enforcement', () => {
@@ -86,9 +120,9 @@ describe('MUS-22: Permission enforcement', () => {
     boardService = new BoardService(db, eventService);
     projectService = new ProjectService(db, eventService, boardService);
     columnService = new ColumnService(db, eventService);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     commentService = new CommentService(db, eventService);
-    documentService = new DocumentService(db, eventService);
+    documentService = createDocumentServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
     kbService = new KBService(db, eventService);
 
@@ -105,7 +139,7 @@ describe('MUS-22: Permission enforcement', () => {
   // ================================================================
   // Acceptance criterion 1: every registered MCP tool is mapped
   // ================================================================
-  it('AC1: every registered MCP tool name appears in TOOL_PERMISSIONS', async () => {
+  it('AC1: the complete MCP permission inventory also rejects an empty move before service execution', async () => {
     const services: Services = {
       projectService,
       boardService,
@@ -120,45 +154,352 @@ describe('MUS-22: Permission enforcement', () => {
     };
     const server = createMcpServer(services, undefined, OPEN_AUTH_CONTEXT);
 
-    // The MCP SDK doesn't expose tool registration directly, so we enumerate
-    // the known tool names from server.ts by matching against the TOOL_PERMISSIONS
-    // map. Every tool in the codebase must be defined there.
-    // We also verify no TOOL_PERMISSIONS entry lacks a corresponding registration.
-    // The known MCP tools (from server.ts):
-    const registeredTools = [
-      'list_projects', 'create_project', 'get_project_summary', 'update_project', 'delete_project',
-      'list_boards', 'get_board', 'create_board', 'update_board', 'delete_board',
-      'create_column', 'update_column', 'move_column', 'delete_column',
-      'list_cards', 'search_cards', 'create_card', 'get_card', 'update_card', 'move_card',
-      'claim_card', 'assign_card', 'unassign_card',
-      'add_comment', 'update_comment', 'delete_comment', 'add_label', 'remove_label',
-      'archive_card', 'delete_card',
-      'link_document_to_card', 'unlink_document_from_card',
-      'link_card', 'unlink_card',
-      'add_work_link', 'remove_work_link', 'list_work_links',
-      'create_label', 'list_labels',
-      'list_documents', 'create_document', 'get_document', 'update_document',
-      'delete_document', 'set_document_status', 'get_document_history',
-      'register_agent', 'update_agent', 'unregister_agent', 'heartbeat', 'list_agents',
-      'get_activity',
-      'list_knowledge_bases', 'create_knowledge_base', 'link_knowledge_base',
-      'search_knowledge', 'get_entity_knowledge',
-      'add_gained_knowledge', 'upsert_kb_entity', 'update_gained_knowledge', 'update_kb_entity', 'add_kb_relation',
-      'list_roles', 'get_role', 'create_role', 'update_role', 'delete_role', 'clone_role',
-    ];
+    // This reads the SDK's actual registry. There is intentionally no copied
+    // expected-name array that can drift alongside a newly added tool.
+    expect(() => assertMcpToolPermissionInventory(server)).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual(Object.keys(TOOL_PERMISSIONS).sort());
 
-    const unmapped: string[] = [];
-    for (const toolName of registeredTools) {
-      if (!(toolName in TOOL_PERMISSIONS)) {
-        unmapped.push(toolName);
-      }
+    // MUS-76's cross-field move intent must survive MUS-59's modern
+    // registerTool boundary normalization. A card selector alone is not a
+    // move and must fail before CardService can rebalance or emit an event.
+    const moveSpy = vi.spyOn(cardService, 'move');
+    await expect((server as any)._registeredTools.move_card.handler({
+      card_id: 'MUS-59',
+    }, {})).rejects.toThrow(/target_column_id or position is required/);
+    expect(moveSpy).not.toHaveBeenCalled();
+    expect(() => assertMcpToolPermissionInventory(server)).not.toThrow();
+  });
+
+  it('MUS-59: the central MCP boundary rejects unmapped registration and wraps an otherwise unguarded handler', async () => {
+    (config.auth as any).mode = 'enforced';
+    const server = new McpServer({ name: 'boundary-test', version: '1.0.0' });
+    const auth = makeAuth([], 'observer', 'observer-01');
+    installMcpPermissionBoundary(server, auth);
+
+    let mappedHandlerRan = false;
+    server.tool('create_project', {}, async () => {
+      mappedHandlerRan = true;
+      return { content: [{ type: 'text', text: 'should not run' }] };
+    });
+
+    await expect((server as any)._registeredTools.create_project.handler({}, {}))
+      .rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(mappedHandlerRan).toBe(false);
+
+    let replacementHandlerRan = false;
+    (server as any)._registeredTools.create_project.update({
+      callback: async () => {
+        replacementHandlerRan = true;
+        return { content: [{ type: 'text', text: 'should not run' }] };
+      },
+    });
+    await expect((server as any)._registeredTools.create_project.handler({}, {}))
+      .rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(replacementHandlerRan).toBe(false);
+
+    let unmappedHandlerRan = false;
+    expect(() => server.tool('frontier_unmapped_tool', {}, async () => {
+      unmappedHandlerRan = true;
+      return { content: [{ type: 'text', text: 'should not run' }] };
+    })).toThrow(/missing a permission mapping/);
+    expect(unmappedHandlerRan).toBe(false);
+
+    const modernServer = new McpServer({ name: 'modern-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(modernServer, auth);
+    let modernHandlerRan = false;
+    modernServer.registerTool('create_project', { inputSchema: {} }, async () => {
+      modernHandlerRan = true;
+      return { content: [{ type: 'text', text: 'should not run' }] };
+    });
+    await expect((modernServer as any)._registeredTools.create_project.handler({}, {}))
+      .rejects.toBeInstanceOf(PermissionDeniedError);
+    expect(modernHandlerRan).toBe(false);
+
+    // A registered tool's update path is an SDK-supported second registration
+    // surface. It must not be able to retain `list_projects` read permission
+    // after changing the live registry name to an unmapped or privileged tool.
+    const updateServer = new McpServer({ name: 'update-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(updateServer, auth);
+    let originalListHandlerRan = false;
+    let unmappedReplacementRan = false;
+    let privilegedReplacementRan = false;
+    updateServer.tool('list_projects', {}, async () => {
+      originalListHandlerRan = true;
+      return { content: [{ type: 'text', text: 'safe read' }] };
+    });
+    const registeredListTool = (updateServer as any)._registeredTools.list_projects;
+
+    expect(() => registeredListTool.update({
+      name: 'frontier_unmapped',
+      callback: async () => {
+        unmappedReplacementRan = true;
+        return { content: [{ type: 'text', text: 'must not run' }] };
+      },
+    })).toThrow(/cannot be renamed after registration/);
+    expect((updateServer as any)._registeredTools.frontier_unmapped).toBeUndefined();
+    expect(getRegisteredMcpToolNames(updateServer)).toEqual(['list_projects']);
+
+    expect(() => registeredListTool.update({
+      name: 'delete_project',
+      callback: async () => {
+        privilegedReplacementRan = true;
+        return { content: [{ type: 'text', text: 'must not run' }] };
+      },
+    })).toThrow(/cannot be renamed after registration/);
+    expect((updateServer as any)._registeredTools.delete_project).toBeUndefined();
+    expect(getRegisteredMcpToolNames(updateServer)).toEqual(['list_projects']);
+
+    await (updateServer as any)._registeredTools.list_projects.handler({}, {});
+    expect(originalListHandlerRan).toBe(true);
+    expect(unmappedReplacementRan).toBe(false);
+    expect(privilegedReplacementRan).toBe(false);
+  });
+
+  it('MUS-59: installing the MCP boundary after a privileged tool was registered fails closed', () => {
+    (config.auth as any).mode = 'enforced';
+    const observerAuth = makeAuth([], 'observer', 'observer-01');
+    const server = new McpServer({ name: 'late-boundary-test', version: '1.0.0' });
+    let privilegedHandlerRan = false;
+
+    server.tool('delete_project', {}, async () => {
+      privilegedHandlerRan = true;
+      return { content: [{ type: 'text', text: 'must not run' }] };
+    });
+
+    expect(() => installMcpPermissionBoundary(server, observerAuth))
+      .toThrow(/must be installed before tool registration.*delete_project/);
+    // A repeated attempt remains fail-closed: the rejected installation did
+    // not mark itself installed or silently adopt the unguarded SDK handler.
+    expect(() => installMcpPermissionBoundary(server, observerAuth))
+      .toThrow(/must be installed before tool registration.*delete_project/);
+    expect(privilegedHandlerRan).toBe(false);
+  });
+
+  it('MUS-59: guarded tool removal is idempotent and keeps the runtime inventory synchronized', async () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth([WORKSPACE_READ], 'observer', 'observer-01');
+    const server = new McpServer({ name: 'remove-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(server, auth);
+    let originalHandlerRan = false;
+    const registeredTool = server.tool('list_projects', {}, async () => {
+      originalHandlerRan = true;
+      return { content: [{ type: 'text', text: 'safe read' }] };
+    });
+
+    expect(getRegisteredMcpToolNames(server)).toEqual(['list_projects']);
+    expect(() => registeredTool.remove()).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual([]);
+    expect(() => registeredTool.remove()).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual([]);
+
+    const removedCall = await withInMemoryMcpClient(server, (client) => client.callTool({
+      name: 'list_projects',
+      arguments: {},
+    }));
+    expect(removedCall.isError).toBe(true);
+    expect(originalHandlerRan).toBe(false);
+  });
+
+  it('MUS-59: update with a null name and replacement callback leaves no callable tool', async () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth([WORKSPACE_READ], 'observer', 'observer-01');
+    const server = new McpServer({ name: 'remove-update-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(server, auth);
+    let originalHandlerRan = false;
+    let replacementHandlerRan = false;
+    const registeredTool = server.tool('list_projects', {}, async () => {
+      originalHandlerRan = true;
+      return { content: [{ type: 'text', text: 'safe read' }] };
+    });
+
+    expect(() => registeredTool.update({
+      name: null,
+      callback: async () => {
+        replacementHandlerRan = true;
+        return { content: [{ type: 'text', text: 'must not run' }] };
+      },
+    })).not.toThrow();
+    expect(getRegisteredMcpToolNames(server)).toEqual([]);
+    expect((server as any)._registeredTools.list_projects).toBeUndefined();
+
+    const removedCall = await withInMemoryMcpClient(server, (client) => client.callTool({
+      name: 'list_projects',
+      arguments: {},
+    }));
+    expect(removedCall.isError).toBe(true);
+    expect(originalHandlerRan).toBe(false);
+    expect(replacementHandlerRan).toBe(false);
+  });
+
+  it('MUS-59: legacy and modern MCP schemas redact unknown keys and run transforms exactly once over the wire', async () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth([], 'observer', 'observer-01');
+    const unknownKeyCanary = 'mcp_modern_unknown_key_canary';
+
+    const legacyServer = new McpServer({ name: 'legacy-zod-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(legacyServer, auth);
+    const legacyInputs: unknown[] = [];
+    legacyServer.tool('list_projects', {
+      value: z.string().transform((value) => `${value}!`),
+    }, async (args) => {
+      legacyInputs.push(args);
+      return { content: [{ type: 'text', text: 'ok' }] };
+    });
+    const legacyTool = (legacyServer as any)._registeredTools.list_projects;
+    const legacyResults = await withInMemoryMcpClient(legacyServer, async (client) => ({
+      initial: await client.callTool({ name: 'list_projects', arguments: { value: 'legacy' } }),
+      updated: await (async () => {
+        legacyTool.update({
+          paramsSchema: { value: z.string().transform((value: string) => `${value}?`) },
+        });
+        return client.callTool({ name: 'list_projects', arguments: { value: 'updated' } });
+      })(),
+      invalid: await client.callTool({
+        name: 'list_projects',
+        arguments: { value: 'updated', [unknownKeyCanary]: true },
+      }),
+    }));
+    expect(legacyResults.initial.isError).not.toBe(true);
+    expect(legacyResults.updated.isError).not.toBe(true);
+    expect(legacyInputs).toEqual([{ value: 'legacy!' }, { value: 'updated?' }]);
+    expect(legacyResults.invalid.isError).toBe(true);
+    expect(JSON.stringify(legacyResults.invalid)).not.toContain(unknownKeyCanary);
+
+    const modernServer = new McpServer({ name: 'modern-zod-boundary-test', version: '1.0.0' });
+    installMcpPermissionBoundary(modernServer, auth);
+    const modernInputs: unknown[] = [];
+    modernServer.registerTool('list_projects', {
+      inputSchema: z.object({ value: z.string() }).strict().transform(({ value }) => ({ value: `${value}!` })),
+    }, async (args) => {
+      modernInputs.push(args);
+      return { content: [{ type: 'text', text: 'ok' }] };
+    });
+    const modernResults = await withInMemoryMcpClient(modernServer, async (client) => ({
+      valid: await client.callTool({ name: 'list_projects', arguments: { value: 'modern' } }),
+      invalid: await client.callTool({
+        name: 'list_projects',
+        arguments: { value: 'modern', [unknownKeyCanary]: true },
+      }),
+    }));
+    expect(modernResults.valid.isError).not.toBe(true);
+    expect(modernInputs).toEqual([{ value: 'modern!' }]);
+    expect(modernResults.invalid.isError).toBe(true);
+    expect(JSON.stringify(modernResults.invalid)).not.toContain(unknownKeyCanary);
+  });
+
+  it('MUS-59: MCP create_card enforces the shared strict REST constraints before CardService', async () => {
+    const services: Services = {
+      projectService,
+      boardService,
+      columnService,
+      cardService,
+      commentService,
+      documentService,
+      agentService,
+      eventService,
+      kbService,
+      roleService,
+    };
+    const server = createMcpServer(services, undefined, OPEN_AUTH_CONTEXT) as any;
+    const tool = server._registeredTools.create_card;
+    const createSpy = vi.spyOn(cardService, 'create');
+    const invalidInput = {
+      column_id: 'bad!',
+      title: 'x'.repeat(201),
+      due_date: 'not-a-date',
+      unexpected_attacker_key: true,
+    };
+
+    const parsed = tool.inputSchema.safeParse(invalidInput);
+    expect(parsed.success).toBe(false);
+    await expect(tool.handler(invalidInput, {})).rejects.toThrow();
+    expect(createSpy).not.toHaveBeenCalled();
+
+    const unknownKeyCanary = 'unknown_mcp_canary_opaque';
+    const unknownOnly = tool.inputSchema.safeParse({
+      column_id: 'column-01',
+      title: 'Safe validation probe',
+      [unknownKeyCanary]: true,
+    });
+    expect(unknownOnly.success).toBe(false);
+    if (!unknownOnly.success) {
+      expect(unknownOnly.error.message).not.toContain(unknownKeyCanary);
+      expect(unknownOnly.error.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'custom', path: [] }),
+      ]));
     }
-    expect(unmapped, `Unmapped tools: ${unmapped.join(', ')}`).toEqual([]);
+  });
 
-    // Verify reverse: every TOOL_PERMISSIONS entry is an actual tool
-    const mappedNames = Object.keys(TOOL_PERMISSIONS);
-    const unknownMappings = mappedNames.filter(n => !registeredTools.includes(n));
-    expect(unknownMappings, `TOOL_PERMISSIONS has stale entries: ${unknownMappings.join(', ')}`).toEqual([]);
+  it('MUS-59: documented register_agent compatibility fields are accepted but never select authority', async () => {
+    const services: Services = {
+      projectService,
+      boardService,
+      columnService,
+      cardService,
+      commentService,
+      documentService,
+      agentService,
+      eventService,
+      kbService,
+      roleService,
+    };
+    const server = createMcpServer(services, undefined, OPEN_AUTH_CONTEXT) as any;
+    const registerSpy = vi.spyOn(agentService, 'register');
+    const result = await server._registeredTools.register_agent.handler({
+      name: 'AOP-compatible agent',
+      type: 'ai_agent',
+      role: 'contributor',
+      secret_token: 'legacy-secret-must-not-reach-service',
+      capabilities: ['code', 'testing'],
+    }, {});
+
+    expect(result.content[0].text).not.toContain('legacy-secret-must-not-reach-service');
+    const delegatedPayload = registerSpy.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(delegatedPayload).toMatchObject({
+      name: 'AOP-compatible agent',
+      capabilities: ['code', 'testing'],
+    });
+    expect(delegatedPayload).not.toHaveProperty('type');
+    expect(delegatedPayload).not.toHaveProperty('role');
+    expect(delegatedPayload).not.toHaveProperty('secret_token');
+
+    await expect(server._registeredTools.register_agent.handler({
+      name: 'Attempted human identity',
+      type: 'human',
+      role: 'owner',
+    }, {})).rejects.toThrow(/only creates AI agent identities/);
+  });
+
+  it('REST routes reference the canonical operation policy catalog', () => {
+    for (const route of REST_ROUTE_PERMISSIONS) {
+      expect(
+        route.operation in OPERATION_PERMISSIONS,
+        `${route.method} ${String(route.pattern)} references unknown operation ${route.operation}`,
+      ).toBe(true);
+    }
+  });
+
+  it('equivalent MCP and REST operations resolve through the same policy decisions', () => {
+    const equivalentOperations = [
+      'list_projects',
+      'create_project',
+      'update_project',
+      'delete_project',
+      'get_board',
+      'create_card',
+      'move_card',
+      'add_comment',
+      'list_documents',
+      'set_document_status',
+      'list_agents',
+      'get_activity',
+    ] as const;
+
+    for (const operation of equivalentOperations) {
+      expect(TOOL_PERMISSIONS[operation]).toBe(OPERATION_PERMISSIONS[operation]);
+    }
+    expect(resolvePermission(OPERATION_PERMISSIONS.set_document_status, { status: 'approved' })).toBe('doc.approve');
+    expect(resolvePermission(OPERATION_PERMISSIONS.set_document_status, { status: 'in_review' })).toBe('doc.submit_review');
   });
 
   it('search_cards exposes validated project-scoped title search through MCP', async () => {
@@ -195,7 +536,8 @@ describe('MUS-22: Permission enforcement', () => {
     }, {});
     const cards = JSON.parse(result.content[0].text);
 
-    expect(cards.map((card: { id: string }) => card.id)).toEqual([second.id]);
+    expect(cards.items.map((card: { id: string }) => card.id)).toEqual([second.id]);
+    expect(cards.page).toMatchObject({ has_more: false, next_cursor: null });
   });
 
   // ================================================================
@@ -472,11 +814,41 @@ describe('MUS-22: Permission enforcement', () => {
   // ================================================================
   // REST route permission map tests
   // ================================================================
-  it('requireRestPermission passes on GET with readOnly routes in enforced mode', () => {
+  it('allows public health and implicit reads for admitted workspace members', () => {
     (config.auth as any).mode = 'enforced';
-    const auth = makeAuth(['project.create']);
-    expect(() => requireRestPermission('GET', '/api/v1/health', auth)).not.toThrow();
-    expect(() => requireRestPermission('GET', '/api/v1/projects', auth)).not.toThrow();
+    const unadmitted = makeAuth([], null, undefined, false);
+    const observer = makeAuth([], 'observer');
+    expect(() => requireRestPermission('GET', '/api/v1/health', unadmitted)).not.toThrow();
+    expect(() => requireRestPermission('GET', '/api/v1/projects', observer)).not.toThrow();
+  });
+
+  it('denies reads to unadmitted principals even when they hold a write verb', () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth(['project.create'], null, undefined, false);
+    expect(() => requireRestPermission('GET', '/api/v1/projects', auth))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+  });
+
+  it('denies writes to removed members even when stale role permissions remain', () => {
+    (config.auth as any).mode = 'enforced';
+    const auth = makeAuth(['project.create', 'workspace.admin'], 'owner', undefined, false);
+    expect(() => requireRestPermission('POST', '/api/v1/projects', auth))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+    expect(() => requirePermission('create_project', auth)).toThrowError(expect.objectContaining({
+      refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+    }));
+  });
+
+  it('default-denies unmapped GET routes for admitted members and admins', () => {
+    (config.auth as any).mode = 'enforced';
+    expect(() => requireRestPermission('GET', '/api/v1/new-unmapped-data', makeAuth([])))
+      .toThrow(PermissionDeniedError);
+    expect(() => requireRestPermission('GET', '/api/v1/new-unmapped-data', makeAuth(['workspace.admin'])))
+      .toThrow(PermissionDeniedError);
   });
 
   it('requireRestPermission refuses mutations without matching permission', () => {
@@ -491,11 +863,70 @@ describe('MUS-22: Permission enforcement', () => {
     expect(() => requireRestPermission('POST', '/api/v1/projects', auth)).not.toThrow();
   });
 
+  it('uses agent registration authority for MCP OAuth consent instead of project creation', () => {
+    (config.auth as any).mode = 'enforced';
+    expect(() => requireRestPermission(
+      'POST',
+      '/api/v1/oauth/authorize/consent',
+      makeAuth(['project.create']),
+    )).toThrowError(expect.objectContaining({
+      refusal: expect.objectContaining({ required_permission: 'agent.register' }),
+    }));
+    expect(() => requireRestPermission(
+      'POST',
+      '/api/v1/oauth/authorize/consent',
+      makeAuth(['agent.register']),
+    )).not.toThrow();
+  });
+
+  it('allows admitted observers to approve or deny only membership-scoped device login', () => {
+    (config.auth as any).mode = 'enforced';
+    const observer = makeAuth([], 'observer');
+    const unadmitted = makeAuth([], null, undefined, false);
+
+    expect(OPERATION_PERMISSIONS.approve_device_authorization).toBe(WORKSPACE_READ);
+    expect(OPERATION_PERMISSIONS.deny_device_authorization).toBe(WORKSPACE_READ);
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/approve', observer)).not.toThrow();
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/deny', observer)).not.toThrow();
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/approve', unadmitted))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+    expect(() => requireRestPermission('POST', '/api/v1/oauth/device/deny', unadmitted))
+      .toThrowError(expect.objectContaining({
+        refusal: expect.objectContaining({ required_permission: WORKSPACE_READ }),
+      }));
+  });
+
   it('requireRestPermission allows workspace.admin through everything', () => {
     (config.auth as any).mode = 'enforced';
     const auth = makeAuth(['workspace.admin']);
     expect(() => requireRestPermission('DELETE', '/api/v1/projects/some-id', auth)).not.toThrow();
     expect(() => requireRestPermission('POST', '/api/v1/boards/xyz/columns', auth)).not.toThrow();
+  });
+
+  it('resolves REST document transition permission from the requested status', () => {
+    (config.auth as any).mode = 'enforced';
+    const senior = makeAuth(['doc.submit_review'], 'senior_engineer');
+    const architect = makeAuth(['doc.submit_review', 'doc.approve'], 'architect');
+    expect(() => requireRestPermission(
+      'PATCH',
+      '/api/v1/documents/doc-1/status',
+      senior,
+      { status: 'in_review' },
+    )).not.toThrow();
+    expect(() => requireRestPermission(
+      'PATCH',
+      '/api/v1/documents/doc-1/status',
+      senior,
+      { status: 'approved' },
+    )).toThrow(PermissionDeniedError);
+    expect(() => requireRestPermission(
+      'PATCH',
+      '/api/v1/documents/doc-1/status',
+      architect,
+      { status: 'approved' },
+    )).not.toThrow();
   });
 
   // ================================================================
@@ -530,17 +961,26 @@ describe('MUS-22: Permission enforcement', () => {
     expect(TOOL_PERMISSIONS['create_role']).toBe('role.manage');
   });
 
-  it('TOOL_PERMISSIONS has read tools mapped to project.create (workspace membership)', () => {
-    expect(TOOL_PERMISSIONS['list_projects']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['get_board']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['list_cards']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['list_agents']).toBe('project.create');
-    expect(TOOL_PERMISSIONS['list_documents']).toBe('project.create');
+  it('maps implicit read tools to the explicit workspace membership requirement', () => {
+    expect(TOOL_PERMISSIONS['list_projects']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['get_board']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['list_cards']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['list_agents']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['list_documents']).toBe(WORKSPACE_READ);
   });
 
-  it('KB read tools are mapped to kb.read', () => {
-    expect(TOOL_PERMISSIONS['search_knowledge']).toBe('kb.read');
-    expect(TOOL_PERMISSIONS['get_entity_knowledge']).toBe('kb.read');
+  it('uses the same membership requirement for knowledge reads', () => {
+    expect(TOOL_PERMISSIONS['search_knowledge']).toBe(WORKSPACE_READ);
+    expect(TOOL_PERMISSIONS['get_entity_knowledge']).toBe(WORKSPACE_READ);
+  });
+
+  it('enforces implicit MCP reads from membership, not write permissions', () => {
+    (config.auth as any).mode = 'enforced';
+    expect(() => requirePermission('list_projects', makeAuth([], 'observer'))).not.toThrow();
+    expect(() => requirePermission(
+      'list_projects',
+      makeAuth(['project.create'], null, undefined, false),
+    )).toThrow(PermissionDeniedError);
   });
 });
 
@@ -550,3 +990,5 @@ describe('MUS-22: Permission enforcement', () => {
 function allPermissions(): string[] {
   return [...ALL_PERMISSIONS];
 }
+import { createCardServiceForTest } from './support/card-service.js';
+import { createDocumentServiceForTest } from './support/document-service.js';

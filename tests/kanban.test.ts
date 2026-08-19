@@ -3,7 +3,7 @@ import {
   DONE_LANE_PAGE_SIZE,
   computeReorderedPosition,
   getLaneCards,
-  isDoneLane,
+  isTerminalLane,
   sortCardsByUpdatedAt,
 } from '../src/web/kanban.js';
 import { Card } from '../src/web/types.js';
@@ -45,10 +45,10 @@ describe('kanban card arrangement', () => {
     ]);
   });
 
-  it('recognizes the Done lane without depending on capitalization or spacing', () => {
-    expect(isDoneLane('Done')).toBe(true);
-    expect(isDoneLane(' done ')).toBe(true);
-    expect(isDoneLane('Completed')).toBe(false);
+  it('uses the persisted terminal role rather than presentation names', () => {
+    expect(isTerminalLane('terminal')).toBe(true);
+    expect(isTerminalLane('active')).toBe(false);
+    expect(isTerminalLane(null)).toBe(false);
   });
 
   it('limits Done while leaving other lanes and archived cards out of the count', () => {
@@ -66,14 +66,16 @@ describe('kanban card arrangement', () => {
     const done = getLaneCards(
       [...doneCards, archived, anotherLane],
       'column-1',
-      'Done',
-      'newest'
+      'newest',
+      DONE_LANE_PAGE_SIZE,
+      'terminal',
     );
     const inProgress = getLaneCards(
       doneCards,
       'column-1',
-      'In Progress',
-      'newest'
+      'newest',
+      DONE_LANE_PAGE_SIZE,
+      'active',
     );
 
     expect(done.all).toHaveLength(DONE_LANE_PAGE_SIZE + 3);
@@ -96,9 +98,9 @@ describe('kanban card arrangement', () => {
     const result = getLaneCards(
       cards,
       'column-1',
-      'Done',
       'oldest',
-      DONE_LANE_PAGE_SIZE * 2
+      DONE_LANE_PAGE_SIZE * 2,
+      'terminal',
     );
 
     expect(result.visible).toHaveLength(DONE_LANE_PAGE_SIZE * 2);
@@ -128,5 +130,9 @@ describe('computeReorderedPosition (column drag-and-drop reordering)', () => {
     const position = computeReorderedPosition(columns, 0, 1);
     expect(position > columns[1].position).toBe(true);
     expect(position < columns[2].position).toBe(true);
+  });
+
+  it('returns a server repair hint when adjacent legacy ranks exhaust client space', () => {
+    expect(computeReorderedPosition([{ position: 'a' }, { position: 'aa' }, { position: 'z' }], 2, 1)).toBe('a');
   });
 });

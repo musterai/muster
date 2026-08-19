@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Project } from '../../types.js';
 import { X, FolderPlus, Edit2, AlertCircle, Trash2 } from 'lucide-react';
 import { api } from '../../api.js';
-import { useEscapeKey } from './useEscapeKey.js';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 interface NewProjectModalProps {
   onClose: () => void;
@@ -10,7 +10,6 @@ interface NewProjectModalProps {
 }
 
 export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onSuccess }) => {
-  useEscapeKey(onClose);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -35,19 +34,18 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onSuc
   };
 
   return (
-    <div className="muster-scrim">
-      <div className="muster-dialog w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
+    <AccessibleDialog onClose={onClose} titleId="new-project-title" className="w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="new-project-title" className="text-sm font-bold muster-text-primary flex items-center">
             <FolderPlus className="w-4 h-4 mr-2 muster-accent" /> Create New Project
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close create project dialog">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {error && (
-          <div className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
+          <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{error}</span>
           </div>
@@ -55,8 +53,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onSuc
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="muster-label">Project Name</label>
+            <label htmlFor="new-project-name" className="muster-label">Project Name</label>
             <input
+              id="new-project-name"
+              data-dialog-initial-focus
               type="text"
               required
               value={name}
@@ -67,8 +67,9 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onSuc
           </div>
 
           <div>
-            <label className="muster-label">Description</label>
+            <label htmlFor="new-project-description" className="muster-label">Description</label>
             <textarea
+              id="new-project-description"
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -94,8 +95,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ onClose, onSuc
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };
 
@@ -107,7 +107,6 @@ interface EditProjectModalProps {
 }
 
 export const EditProjectModal: React.FC<EditProjectModalProps> = ({ project, onClose, onSuccess, onDeleteProject }) => {
-  useEscapeKey(onClose);
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -132,19 +131,18 @@ export const EditProjectModal: React.FC<EditProjectModalProps> = ({ project, onC
   };
 
   return (
-    <div className="muster-scrim" onClick={onClose}>
-      <div className="muster-dialog w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans" onClick={(e) => e.stopPropagation()}>
+    <AccessibleDialog onClose={onClose} titleId="edit-project-title" className="w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="edit-project-title" className="text-sm font-bold muster-text-primary flex items-center">
             <Edit2 className="w-4 h-4 mr-2 muster-accent" /> Edit Project Details
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close edit project dialog">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {error && (
-          <div className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
+          <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{error}</span>
           </div>
@@ -152,8 +150,10 @@ export const EditProjectModal: React.FC<EditProjectModalProps> = ({ project, onC
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="muster-label">Project Name</label>
+            <label htmlFor="edit-project-name" className="muster-label">Project Name</label>
             <input
+              id="edit-project-name"
+              data-dialog-initial-focus
               type="text"
               required
               value={name}
@@ -164,8 +164,9 @@ export const EditProjectModal: React.FC<EditProjectModalProps> = ({ project, onC
           </div>
 
           <div>
-            <label className="muster-label">Description</label>
+            <label htmlFor="edit-project-description" className="muster-label">Description</label>
             <textarea
+              id="edit-project-description"
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -208,7 +209,6 @@ export const EditProjectModal: React.FC<EditProjectModalProps> = ({ project, onC
             </button>
           </div>
         )}
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };

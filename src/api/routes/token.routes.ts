@@ -10,19 +10,60 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { TokenService } from '../../services/token.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
+import { ValidationError } from '../../shared/errors.js';
+import { PermissionDeniedError } from '../../shared/permission-enforcer.js';
+import { validateRequest } from '../middleware/validate.js';
+import { collectionQuerySchema, idParamsSchema, tokenCreateSchema } from '../schemas.js';
+import { DatabaseAdapter } from '../../db/adapter.js';
 
-export function createTokenRouter(tokenService: TokenService, auditService: AuditService): Router {
+async function auditIssuanceRefusal(
+  auditService: AuditService,
+  auth: AuthContext | undefined,
+  error: unknown,
+  ip?: string,
+): Promise<void> {
+  if (!auth?.principal || !auth.workspace_id) return;
+  if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;
+  try {
+    await auditService.logAs(auth, {
+      action: 'token.create_refused',
+      target_type: 'api_token',
+      target_id: undefined,
+      // Never include request values here: a caller-controlled name could be
+      // a secret, and target IDs should not become an enumeration oracle.
+      payload: {
+        via: 'rest',
+        reason: error instanceof PermissionDeniedError ? 'forbidden' : 'invalid_request',
+      },
+      ip,
+    });
+  } catch {
+    // An audit failure must not turn a safe refusal into a 500 response.
+  }
+}
+
+export function createTokenRouter(
+  dbOrService: DatabaseAdapter | TokenService,
+  serviceOrAudit: TokenService | AuditService,
+  maybeAudit?: AuditService,
+): Router {
+  const db = (maybeAudit ? dbOrService : (dbOrService as any).db) as DatabaseAdapter;
+  const tokenService = (maybeAudit ? serviceOrAudit : dbOrService) as TokenService;
+  const auditService = (maybeAudit || serviceOrAudit) as AuditService;
   const router = Router();
 
   // List tokens for the authenticated principal
-  router.get('/tokens', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/tokens', ...validateRequest({ query: collectionQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const auth: AuthContext = (req as any).authContext;
+      const auth: AuthContext | undefined = (req as any).authContext;
       if (!auth?.principal?.id) {
         res.status(401).json({ error: 'unauthorized', message: 'Not authenticated' });
         return;
       }
-      const tokens = await tokenService.list(auth.principal.id);
+      const tokens = await tokenService.listPage(auth.principal.id, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       // Never expose token_hash — only list metadata
       res.json(tokens);
     } catch (err) {
@@ -31,7 +72,10 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
   });
 
   // Create a new token
-  router.post('/tokens', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/tokens', ...validateRequest(
+    { body: tokenCreateSchema },
+    async (req, error) => auditIssuanceRefusal(auditService, req.authContext, error, req.ip),
+  ), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {
@@ -39,44 +83,34 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
         return;
       }
 
-      const { name, expires_at, target_principal_id } = req.body;
-
-      if (!name || typeof name !== 'string' || name.trim().length === 0) {
-        res.status(400).json({ error: 'bad_request', message: 'Token name is required' });
-        return;
-      }
-
-      // Default to creating a token for the authenticated principal
-      const principalId = target_principal_id || auth.principal.id;
-      const workspaceId = auth.workspace_id;
-
-      if (!workspaceId) {
-        res.status(400).json({ error: 'bad_request', message: 'No workspace context available' });
-        return;
-      }
-
-      const created = await tokenService.create({
-        principal_id: principalId,
-        workspace_id: workspaceId,
-        name: name.trim(),
-        expires_at: expires_at || null,
-      });
-      await auditService.logAs(auth, {
-        action: 'token.create',
-        target_type: 'api_token',
-        target_id: created.id,
-        payload: { name: created.name, principal_id: principalId },
-        ip: req.ip,
+      const body = req.body || {};
+      let created;
+      await db.transaction(async tx => {
+        created = await tokenService.issue(auth, {
+          principal_id: body.target_principal_id,
+          workspace_id: auth.workspace_id,
+          name: body.name,
+          expires_at: body.expires_at,
+        }, tx);
+        await auditService.logAs(auth, {
+          action: 'token.create',
+          target_type: 'api_token',
+          target_id: created.id,
+          payload: { principal_id: created.principal_id, via: 'rest' },
+          ip: req.ip,
+        }, tx);
       });
 
       res.status(201).json(created);
     } catch (err) {
+      const auth: AuthContext = (req as any).authContext;
+      await auditIssuanceRefusal(auditService, auth, err, req.ip);
       next(err);
     }
   });
 
   // Revoke a token
-  router.delete('/tokens/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/tokens/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext = (req as any).authContext;
       if (!auth?.principal?.id) {
@@ -101,15 +135,20 @@ export function createTokenRouter(tokenService: TokenService, auditService: Audi
         return;
       }
 
-      await tokenService.revoke(req.params.id);
-      await auditService.logAs(auth, {
-        action: 'token.revoke',
-        target_type: 'api_token',
-        target_id: req.params.id,
-        payload: { name: token.name },
-        ip: req.ip,
+      let revoked = false;
+      await db.transaction(async tx => {
+        revoked = await tokenService.revoke(req.params.id, tx);
+        if (revoked) {
+          await auditService.logAs(auth, {
+            action: 'token.revoke',
+            target_type: 'api_token',
+            target_id: req.params.id,
+            payload: { name: token.name },
+            ip: req.ip,
+          }, tx);
+        }
       });
-      res.status(200).json({ message: 'Token revoked', id: req.params.id });
+      res.status(200).json({ message: revoked ? 'Token revoked' : 'Token already revoked', id: req.params.id });
     } catch (err) {
       next(err);
     }

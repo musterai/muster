@@ -3,6 +3,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { BoardService } from '../../services/board.service.js';
 import { ColumnService } from '../../services/column.service.js';
 import { CardService } from '../../services/card.service.js';
+import { validateRequest } from '../middleware/validate.js';
+import { allBoardsQuerySchema, boardCreateSchema, boardUpdateSchema, collectionQuerySchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
 
 export function createBoardRouter(
   boardService: BoardService,
@@ -11,20 +13,31 @@ export function createBoardRouter(
 ): Router {
   const router = Router();
 
-  router.get('/projects/:projectId/boards', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/boards', ...validateRequest({ query: collectionQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const boards = await boardService.list(req.params.projectId);
+      const boards = await boardService.listPage(req.params.projectId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(boards);
     } catch (err) {
       next(err);
     }
   });
 
-  router.get('/projects/:projectId/all-boards', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/all-boards', ...validateRequest({ query: allBoardsQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const boards = await boardService.list(req.params.projectId);
-      const cards = await cardService.list({ project_id: req.params.projectId });
-      const columnsList = await Promise.all(boards.map((b) => columnService.list(b.id)));
+      const boardPage = await boardService.listPage(req.params.projectId, {
+        cursor: req.query.board_cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
+      const boards = boardPage.items;
+      const includeCards = (req.query.include_cards as unknown as boolean | undefined) !== false;
+      const cards = includeCards ? await cardService.listPage({ project_id: req.params.projectId }, {
+        cursor: (req.query.card_cursor || req.query.cursor) as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext) : { items: [], page: { limit: (req.query.limit as unknown as number) || 50, has_more: false, next_cursor: null } };
+      const columnsList = await Promise.all(boards.map((b) => columnService.list(b.id, req.authContext)));
       const columns = columnsList.flat();
 
       res.json({
@@ -36,46 +49,62 @@ export function createBoardRouter(
         updated_at: new Date().toISOString(),
         boards,
         columns,
-        cards,
+        cards: cards.items,
+        card_page: cards.page,
+        board_page: boardPage.page,
       });
     } catch (err) {
       next(err);
     }
   });
 
-  router.post('/projects/:projectId/boards', async (req: Request, res: Response, next: NextFunction) => {
+  router.post('/projects/:projectId/boards', ...validateRequest({ body: boardCreateSchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const board = await boardService.create({ ...req.body, project_id: req.params.projectId });
+      const board = await boardService.create({ ...req.body, project_id: req.params.projectId }, undefined, undefined, req.authContext);
       res.status(201).json(board);
     } catch (err) {
       next(err);
     }
   });
 
-  router.get('/boards/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/boards/:id', ...validateRequest({ query: collectionQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const board = await boardService.getById(req.params.id);
+      const board = await boardService.getById(req.params.id, req.authContext);
       if (!board) return res.status(404).json({ error: 'Board not found' });
-      const columns = await columnService.list(board.id);
-      const cards = await cardService.list({ board_id: board.id });
-      res.json({ ...board, columns, cards });
+      const columns = await columnService.list(board.id, req.authContext);
+      const cards = await cardService.listPage({ board_id: board.id }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
+      res.json({ ...board, columns, cards: cards.items, card_page: cards.page });
     } catch (err) {
       next(err);
     }
   });
 
-  router.put('/boards/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/boards/:id/labels', ...validateRequest({ query: collectionQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const board = await boardService.update(req.params.id, req.body);
+      res.json(await boardService.listLabelsPage(req.params.id, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put('/boards/:id', ...validateRequest({ body: boardUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const board = await boardService.update(req.params.id, req.body, undefined, undefined, req.authContext);
       res.json(board);
     } catch (err) {
       next(err);
     }
   });
 
-  router.delete('/boards/:id', async (req: Request, res: Response, next: NextFunction) => {
+  router.delete('/boards/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await boardService.delete(req.params.id);
+      await boardService.delete(req.params.id, undefined, undefined, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);

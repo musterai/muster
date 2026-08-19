@@ -2,20 +2,22 @@
 import React, { useState, useEffect } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { Board, Column, Card, Agent, CardDetails, Document, CardLinkRelationType, CardWorkLinkKind, CardWorkLinkProvider, User, AuthMe } from '../types.js';
-import { Layout, Plus, Trash2, Edit2, CheckCircle2, ArrowRight, Settings, Layers, X, ChevronDown, ChevronRight, ArrowDownWideNarrow, ArrowUpNarrowWide } from 'lucide-react';
+import { Layers, ChevronDown, ChevronRight } from 'lucide-react';
 import { api, getLocalProxyToken } from '../api.js';
 import {
-  CardDateSortOrder,
   DONE_LANE_PAGE_SIZE,
   computeReorderedPosition,
   getLaneCards,
-  isDoneLane,
 } from '../kanban.js';
 import { EditColumnModal } from './Modals.js';
 import { DocumentReaderModal } from './DocumentReaderModal.js';
-import { CardSearch } from './CardSearch.js';
 import { KanbanColumn } from './kanban/KanbanColumn.js';
 import { CardDetailDrawer } from './kanban/CardDetailDrawer.js';
+import { BoardSettingsDialog } from './kanban/BoardSettingsDialog.js';
+import { KanbanToolbar } from './kanban/KanbanToolbar.js';
+import { MobileLaneSwitcher } from './kanban/MobileLaneSwitcher.js';
+import { buildDisplayColumns, cardMatchesDisplayColumn, resolveCardDrop, resolveTargetColumnId } from '../kanban-view.js';
+import { useKanbanChromeController } from '../hooks/useKanbanChromeController.js';
 
 interface KanbanBoardProps {
   boards: Board[];
@@ -71,11 +73,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   const [copiedKeyCardId, setCopiedKeyCardId] = useState<string | null>(null);
   const [readerDocument, setReaderDocument] = useState<Document | null>(null);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
-  const [showBoardSettingsModal, setShowBoardSettingsModal] = useState(false);
-  const [boardNameInput, setBoardNameInput] = useState('');
   const [editingColumn, setEditingColumn] = useState<Column | null>(null);
 
-  const [isEditingBoardName, setIsEditingBoardName] = useState(false);
   const [isEditingCard, setIsEditingCard] = useState(false);
   const [editCardTitle, setEditCardTitle] = useState('');
   const [editCardDescription, setEditCardDescription] = useState('');
@@ -85,71 +84,73 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
   const [isCreatingCard, setIsCreatingCard] = useState(false);
   const [newCardColumnId, setNewCardColumnId] = useState('');
-  const [cardDateSortOrder, setCardDateSortOrder] = useState<CardDateSortOrder>('newest');
   const [doneVisibleLimits, setDoneVisibleLimits] = useState<Record<string, number>>({});
   const [focusedCardId, setFocusedCardId] = useState<string | null>(null);
-  const [focusedColumnIdx, setFocusedColumnIdx] = useState<number>(0);
-  const [boardViewMode, setBoardViewModeState] = useState<'default' | 'swimlanes'>(() => {
-    try {
-      const saved = localStorage.getItem('muster_board_view_mode');
-      return saved === 'swimlanes' ? 'swimlanes' : 'default';
-    } catch {
-      return 'default';
-    }
-  });
-
-  const setBoardViewMode = (mode: 'default' | 'swimlanes') => {
-    setBoardViewModeState(mode);
-    try {
-      localStorage.setItem('muster_board_view_mode', mode);
-    } catch (err) {
-      console.error('Failed to save board view mode preference:', err);
-    }
-  };
+  const [boardAnnouncement, setBoardAnnouncement] = useState('');
 
   const [hoveredEpicId, setHoveredEpicId] = useState<string | null>(null);
   const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>({});
 
-  const { displayColumns, columnMap } = React.useMemo(() => {
-    const map: Record<string, string> = {};
-    columns.forEach((c) => {
-      map[c.id] = c.name;
+  const chrome = useKanbanChromeController({
+    boards,
+    board,
+    selectedBoardId,
+    columns,
+    cards,
+    onSelectBoard,
+    onOpenNewBoard,
+    onOpenNewColumn,
+    onEditColumn: setEditingColumn,
+    onDeleteBoard,
+    onRefresh,
+  });
+  const {
+    isBoardSettingsOpen: showBoardSettingsModal,
+    boardViewMode,
+    cardDateSortOrder,
+    focusedColumnIndex: focusedColumnIdx,
+  } = chrome.state;
+  const setFocusedColumnIdx = chrome.actions.setFocusedColumnIndex;
+
+  const { displayColumns, columnRoleMap } = React.useMemo(
+    () => buildDisplayColumns(columns, selectedBoardId, board),
+    [columns, selectedBoardId, board],
+  );
+
+  // Keep exactly one card opener in the tab order whenever the rendered board
+  // has cards. This also repairs focus state after filtering, pagination, or a
+  // move removes the previously focused card from the visible set.
+  useEffect(() => {
+    const visibleCards = displayColumns.flatMap((column, columnIndex) => {
+      const doneLimit = doneVisibleLimits[column.id] ?? DONE_LANE_PAGE_SIZE;
+      return getLaneCards(cards, column.id, cardDateSortOrder, doneLimit, column.workflow_role, columnRoleMap).visible.map((card) => ({
+        card,
+        columnIndex,
+      }));
     });
 
-    if (selectedBoardId !== 'all' && board?.id !== 'all') {
-      return { displayColumns: columns, columnMap: map };
+    if (visibleCards.length === 0) {
+      if (focusedCardId !== null) setFocusedCardId(null);
+      return;
     }
 
-    const uniqueMap = new Map<string, Column>();
-    columns.forEach((col) => {
-      const nameKey = col.name.trim().toLowerCase();
-      if (!uniqueMap.has(nameKey)) {
-        uniqueMap.set(nameKey, {
-          ...col,
-          id: `all-col-${nameKey.replace(/\s+/g, '-')}`,
-          board_id: 'all',
-        });
-      }
-    });
-    return { displayColumns: Array.from(uniqueMap.values()), columnMap: map };
-  }, [columns, selectedBoardId, board]);
+    const focusedCard = visibleCards.find(({ card }) => card.id === focusedCardId);
+    if (focusedCard) {
+      if (focusedColumnIdx !== focusedCard.columnIndex) setFocusedColumnIdx(focusedCard.columnIndex);
+      return;
+    }
+
+    setFocusedCardId(visibleCards[0].card.id);
+    setFocusedColumnIdx(visibleCards[0].columnIndex);
+  }, [displayColumns, cards, cardDateSortOrder, doneVisibleLimits, columnRoleMap, focusedCardId, focusedColumnIdx]);
 
   const handleMoveCardWithResolution = async (cardId: string, targetColId: string, position?: string) => {
-    let resolvedTargetColId = targetColId;
-    if (targetColId.startsWith('all-col-')) {
-      const targetCol = displayColumns.find((c) => c.id === targetColId);
-      const targetCard = cards.find((c) => c.id === cardId);
-      if (targetCol && targetCard) {
-        const targetName = targetCol.name.trim().toLowerCase();
-        const matchingRealCol = columns.find(
-          (col) => col.board_id === targetCard.board_id && col.name.trim().toLowerCase() === targetName
-        ) || columns.find((col) => col.name.trim().toLowerCase() === targetName);
-        if (matchingRealCol) {
-          resolvedTargetColId = matchingRealCol.id;
-        }
-      }
-    }
+    const resolvedTargetColId = resolveTargetColumnId(targetColId, cardId, displayColumns, columns, cards, columnRoleMap);
     await onMoveCard(cardId, resolvedTargetColId, position);
+    const movedCard = cards.find((card) => card.id === cardId);
+    const targetColumn = columns.find((column) => column.id === resolvedTargetColId)
+      || displayColumns.find((column) => column.id === targetColId);
+    setBoardAnnouncement(`${movedCard?.key || 'Card'} moved to ${targetColumn?.name || 'the selected lane'}.`);
   };
 
   const closeCardModal = () => {
@@ -165,7 +166,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (showBoardSettingsModal) {
-          setShowBoardSettingsModal(false);
+          chrome.actions.closeBoardSettings();
         } else if (editingColumn) {
           setEditingColumn(null);
         } else if (cardDetails || isCreatingCard) {
@@ -180,7 +181,12 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   // Keyboard navigation across columns and cards
   useEffect(() => {
     const handleBoardKeyDown = (e: KeyboardEvent) => {
+      // The drag sensor owns its keyboard sequence. Avoid letting board APG
+      // navigation steal focus after a lifted card handles an arrow/drop key.
+      if (e.defaultPrevented) return;
       const activeElement = document.activeElement;
+      const isInsideModal = activeElement instanceof HTMLElement
+        && Boolean(activeElement.closest('[role="dialog"][aria-modal="true"]'));
       const isTyping =
         activeElement &&
         (activeElement.tagName === 'INPUT' ||
@@ -188,7 +194,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           activeElement.tagName === 'SELECT' ||
           (activeElement as HTMLElement).isContentEditable);
 
-      if (isTyping || cardDetails || isCreatingCard || showBoardSettingsModal || editingColumn) {
+      if (isInsideModal || isTyping || cardDetails || isCreatingCard || showBoardSettingsModal || editingColumn) {
         return;
       }
 
@@ -205,7 +211,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       const colCardsMap: Record<string, Card[]> = {};
       displayColumns.forEach((col) => {
         const doneLimit = doneVisibleLimits[col.id] ?? DONE_LANE_PAGE_SIZE;
-        colCardsMap[col.id] = getLaneCards(cards, col.id, col.name, cardDateSortOrder, doneLimit, columnMap).visible;
+        colCardsMap[col.id] = getLaneCards(cards, col.id, cardDateSortOrder, doneLimit, col.workflow_role, columnRoleMap).visible;
       });
 
       // Determine current active column and card index
@@ -230,10 +236,10 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       const focusCard = (cardId: string) => {
         setFocusedCardId(cardId);
         requestAnimationFrame(() => {
-          const cardEl = document.getElementById(`kanban-card-${cardId}`);
-          if (cardEl) {
-            cardEl.focus();
-            cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+          const card = document.getElementById(`kanban-card-${cardId}`);
+          if (card) {
+            card.querySelector<HTMLElement>('[data-card-open]')?.focus();
+            card.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
           }
         });
       };
@@ -620,17 +626,6 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
     }
   };
 
-  const handleRenameBoard = async () => {
-    if (!board || !boardNameInput.trim()) return;
-    try {
-      await api.updateBoard(board.id, boardNameInput.trim());
-      setIsEditingBoardName(false);
-      onRefresh();
-    } catch (err) {
-      console.error('Failed to rename board:', err);
-    }
-  };
-
   const handleDeleteColumn = async (colId: string) => {
     try {
       await api.deleteColumn(colId);
@@ -656,34 +651,18 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       return;
     }
 
-    const targetColumnId = destination.droppableId.split(':::')[0];
-    const sourceColumnId = source.droppableId.split(':::')[0];
-
-    let targetColCards = cards.filter((c) => {
-      if (c.archived) return false;
-      if (targetColumnId.startsWith('all-col-')) {
-        const targetCol = displayColumns.find((col) => col.id === targetColumnId);
-        if (!targetCol) return false;
-        const targetName = targetCol.name.trim().toLowerCase();
-        const cColName = (columnMap[c.column_id] || '').trim().toLowerCase();
-        return cColName === targetName;
-      }
-      return c.column_id === targetColumnId;
+    const resolution = resolveCardDrop({
+      draggableId,
+      sourceDroppableId: source.droppableId,
+      sourceIndex: source.index,
+      destinationDroppableId: destination.droppableId,
+      destinationIndex: destination.index,
+      cards,
+      columns,
+      displayColumns,
+      columnRoleMap,
     });
-    const targetEpicId = destination.droppableId.includes(':::') ? destination.droppableId.split(':::')[1] : null;
-    if (targetEpicId && targetEpicId !== 'unparented') {
-      targetColCards = targetColCards.filter((c) => c.parent_epic_id === targetEpicId || c.id === targetEpicId);
-    } else if (targetEpicId === 'unparented') {
-      targetColCards = targetColCards.filter((c) => !c.is_epic && !c.parent_epic_id);
-    }
-
-    const newPos = computeReorderedPosition(
-      targetColCards,
-      source.droppableId === destination.droppableId ? source.index : targetColCards.length,
-      destination.index
-    );
-
-    handleMoveCardWithResolution(draggableId, targetColumnId, newPos);
+    handleMoveCardWithResolution(draggableId, resolution.targetColumnId, resolution.position);
   };
 
   if (!board) {
@@ -695,163 +674,16 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full min-h-0 font-sans space-y-4">
-      {/* Board Header Bar */}
-      <div className="flex-none flex items-center justify-between border-b border-muster-border pb-3 gap-2 sm:gap-3">
-        <div className="flex items-center space-x-2 sm:space-x-2.5 shrink-0 min-w-0">
-          <Layout className="w-5 h-5 muster-accent shrink-0" />
-          {isEditingBoardName ? (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleRenameBoard();
-              }}
-              className="flex items-center space-x-2"
-            >
-              <input
-                type="text"
-                value={boardNameInput}
-                onChange={(e) => setBoardNameInput(e.target.value)}
-                className="muster-input text-sm py-1 font-bold"
-                autoFocus
-              />
-              <button type="submit" className="muster-btn muster-btn-primary py-1 px-2.5 text-xs">
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsEditingBoardName(false)}
-                className="muster-btn muster-btn-secondary py-1 px-2.5 text-xs"
-              >
-                Cancel
-              </button>
-            </form>
-          ) : (
-            <div className="flex items-center space-x-1 shrink-0 min-w-0">
-              <div className="relative flex items-center shrink-0 min-w-0">
-                <select
-                  value={selectedBoardId || board.id}
-                  onChange={(e) => {
-                    if (e.target.value === '__NEW_BOARD__') {
-                      onOpenNewBoard?.();
-                    } else {
-                      onSelectBoard(e.target.value);
-                    }
-                  }}
-                  className="muster-input text-sm sm:text-base font-bold py-1 pl-2 pr-7 bg-transparent hover:bg-muster-surface-hover border-transparent hover:border-muster-border rounded-lg cursor-pointer font-sans muster-text-primary focus:ring-1 focus:ring-brand-500 appearance-none max-w-[160px] xs:max-w-[220px] sm:max-w-[340px] truncate"
-                  aria-label="Select board"
-                >
-                  <option value="all" className="bg-muster-surface text-xs font-bold py-1 muster-accent">
-                    🌐 All Boards (All Cards)
-                  </option>
-                  {boards.map((b) => (
-                    <option key={b.id} value={b.id} className="bg-muster-surface text-xs font-semibold py-1">
-                      {b.name}
-                    </option>
-                  ))}
-                  {onOpenNewBoard && (
-                    <option value="__NEW_BOARD__" className="bg-muster-surface text-xs font-semibold py-1 muster-accent font-bold">
-                      + Create New Board...
-                    </option>
-                  )}
-                </select>
-                <ChevronDown className="w-4 h-4 muster-text-muted absolute right-1.5 pointer-events-none" />
-              </div>
-
-              {board.id !== 'all' && (
-                <button
-                  onClick={() => {
-                    setBoardNameInput(board.name);
-                    setShowBoardSettingsModal(true);
-                  }}
-                  className="p-1 muster-text-muted hover:muster-text-primary rounded transition-colors shrink-0"
-                  title="Board Settings"
-                >
-                  <Settings className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center space-x-2 min-w-0">
-          <div className="flex items-center bg-muster-surface p-0.5 rounded-lg border border-muster-border shrink-0">
-            <button
-              onClick={() => setBoardViewMode('default')}
-              className={`px-2 py-1 text-xs font-sans rounded-md flex items-center space-x-1.5 transition-colors cursor-pointer ${
-                boardViewMode === 'default'
-                  ? 'bg-brand-950 text-brand-300 font-semibold border border-brand-500/40 shadow-sm'
-                  : 'muster-text-muted hover:muster-text-primary'
-              }`}
-              title="Standard Column View"
-            >
-              <Layout className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Columns</span>
-            </button>
-            <button
-              onClick={() => setBoardViewMode('swimlanes')}
-              className={`px-2 py-1 text-xs font-sans rounded-md flex items-center space-x-1.5 transition-colors cursor-pointer ${
-                boardViewMode === 'swimlanes'
-                  ? 'bg-brand-950 text-brand-300 font-semibold border border-brand-500/40 shadow-sm'
-                  : 'muster-text-muted hover:muster-text-primary'
-              }`}
-              title="Epic Swimlanes View"
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Epic Swimlanes</span>
-            </button>
-          </div>
-
-          <CardSearch
-            cards={cards}
-            placeholder="Search card..."
-            onSelectCard={(card) => handleOpenCard(card.id)}
-            className="w-36 sm:w-60 min-w-0"
-          />
-
-          <button
-            onClick={() => setCardDateSortOrder((prev) => (prev === 'newest' ? 'oldest' : 'newest'))}
-            className="muster-btn muster-btn-icon muster-btn-secondary p-1.5 shrink-0"
-            title={`Sort cards: ${cardDateSortOrder === 'newest' ? 'Newest updated first (click for oldest first)' : 'Oldest updated first (click for newest first)'}`}
-            aria-label="Toggle card sort order by date updated"
-          >
-            {cardDateSortOrder === 'newest' ? (
-              <ArrowDownWideNarrow className="w-4 h-4 muster-accent" />
-            ) : (
-              <ArrowUpNarrowWide className="w-4 h-4 muster-accent" />
-            )}
-          </button>
-        </div>
-      </div>
-
-      {/* Mobile Column Quick Switcher */}
-      {columns.length > 0 && (
-        <div className="flex md:hidden items-center space-x-1.5 overflow-x-auto no-scrollbar pb-2 shrink-0">
-          {columns.map((col) => {
-            const count = cards.filter((c) => c.column_id === col.id && !c.archived).length;
-            return (
-              <button
-                key={col.id}
-                onClick={() => {
-                  const el = document.getElementById(`kanban-column-${col.id}`);
-                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-                }}
-                className={`muster-chip shrink-0 text-xs font-sans py-1 px-2.5 flex items-center gap-1.5 cursor-pointer ${
-                  focusedColumnIdx === columns.findIndex((c) => c.id === col.id)
-                    ? 'border-brand-500 bg-brand-950/40 text-brand-300 font-semibold ring-1 ring-brand-500/50'
-                    : 'hover:border-brand-500/50'
-                }`}
-              >
-                <span>{col.name}</span>
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-neutral-900 muster-text-muted font-mono">
-                  {count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
+    <section className="flex-1 flex flex-col h-full min-h-0 font-sans space-y-4" aria-labelledby="kanban-board-heading">
+      <h2 id="kanban-board-heading" className="sr-only">{board.name} Kanban board</h2>
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{boardAnnouncement}</div>
+      <KanbanToolbar
+        controller={{
+          ...chrome.toolbar,
+          actions: { ...chrome.toolbar.actions, openCard: handleOpenCard },
+        }}
+      />
+      <MobileLaneSwitcher controller={chrome.mobile} />
       {/* Main Board Area */}
       {boardViewMode === 'default' ? (
         <DragDropContext onDragEnd={onDragEnd}>
@@ -867,10 +699,10 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                   const { all: colCards, visible: visibleCards } = getLaneCards(
                     cards,
                     column.id,
-                    column.name,
                     cardDateSortOrder,
                     doneLimit,
-                    columnMap
+                    column.workflow_role,
+                    columnRoleMap,
                   );
 
                   return (
@@ -917,7 +749,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             {(() => {
               const epics = cards.filter((c) => c.is_epic && !c.archived);
               const unparentedCards = cards.filter((c) => !c.is_epic && !c.parent_epic_id && !c.archived);
-              const terminalColIds = new Set(columns.filter((col) => col.is_terminal || isDoneLane(col.name)).map((col) => col.id));
+              const terminalColIds = new Set(columns.filter((col) => col.workflow_role === 'terminal').map((col) => col.id));
 
               if (epics.length === 0) {
                 return (
@@ -997,11 +829,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           <div className="p-3 flex space-x-4 overflow-x-auto">
                             {displayColumns.map((column, colIdx) => {
                               const laneCards = children.filter((c) => {
-                                if (column.id.startsWith('all-col-')) {
-                                  const cColName = (columnMap[c.column_id] || '').trim().toLowerCase();
-                                  return cColName === column.name.trim().toLowerCase();
-                                }
-                                return c.column_id === column.id;
+                                return cardMatchesDisplayColumn(c, column, columnRoleMap);
                               });
                               return (
                                 <KanbanColumn
@@ -1059,11 +887,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       <div className="p-3 flex space-x-4 overflow-x-auto">
                         {displayColumns.map((column, colIdx) => {
                           const laneCards = unparentedCards.filter((c) => {
-                            if (column.id.startsWith('all-col-')) {
-                              const cColName = (columnMap[c.column_id] || '').trim().toLowerCase();
-                              return cColName === column.name.trim().toLowerCase();
-                            }
-                            return c.column_id === column.id;
+                            return cardMatchesDisplayColumn(c, column, columnRoleMap);
                           });
                           return (
                             <KanbanColumn
@@ -1171,84 +995,14 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
         />
       )}
 
-      {/* Board Settings Modal */}
-      {showBoardSettingsModal && (
-        <div className="muster-scrim" onClick={() => setShowBoardSettingsModal(false)}>
-          <div className="muster-dialog w-full max-w-md p-5 space-y-4 font-sans" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between border-b border-muster-border pb-3">
-              <h3 className="text-sm font-bold muster-text-primary flex items-center">
-                <Settings className="w-4 h-4 mr-2 muster-accent" /> Board Settings
-              </h3>
-              <button onClick={() => setShowBoardSettingsModal(false)} className="muster-btn muster-btn-icon muster-btn-ghost">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleRenameBoard();
-                setShowBoardSettingsModal(false);
-              }}
-              className="space-y-2"
-            >
-              <label className="muster-label">Rename Board</label>
-              <div className="flex space-x-2">
-                <input
-                  type="text"
-                  value={boardNameInput}
-                  onChange={(e) => setBoardNameInput(e.target.value)}
-                  placeholder="Board name"
-                  className="muster-input flex-1"
-                />
-                <button
-                  type="submit"
-                  disabled={!boardNameInput.trim() || boardNameInput === board.name}
-                  className="muster-btn muster-btn-primary"
-                >
-                  Save
-                </button>
-              </div>
-            </form>
-
-            <div className="border-t border-muster-border/60 pt-3 space-y-2">
-              <label className="muster-label">Board Actions</label>
-              <div className="flex flex-col space-y-2">
-                <button
-                  onClick={() => {
-                    setShowBoardSettingsModal(false);
-                    onOpenNewColumn();
-                  }}
-                  className="muster-btn muster-btn-secondary justify-start text-xs py-2"
-                >
-                  <Plus className="w-4 h-4 mr-1.5 muster-accent" /> Add New Column
-                </button>
-
-                <button
-                  onClick={() => {
-                    setShowBoardSettingsModal(false);
-                    if (
-                      confirm(
-                        `Are you sure you want to delete board "${board.name}"?\n\nThis will permanently delete all columns and cards on this board.`
-                      )
-                    ) {
-                      onDeleteBoard(board.id);
-                    }
-                  }}
-                  className="muster-btn muster-btn-danger-soft justify-start text-xs py-2"
-                >
-                  <Trash2 className="w-4 h-4 mr-1.5" /> Delete Board
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {showBoardSettingsModal && chrome.settings && (
+        <BoardSettingsDialog controller={chrome.settings} />
       )}
-
       {/* Edit Column Modal */}
       {editingColumn && (
         <EditColumnModal
           column={editingColumn}
+          cardCount={cards.filter((card) => card.column_id === editingColumn.id).length}
           onClose={() => setEditingColumn(null)}
           onSuccess={() => {
             setEditingColumn(null);
@@ -1257,6 +1011,6 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           onDelete={(colId) => handleDeleteColumn(colId)}
         />
       )}
-    </div>
+    </section>
   );
 };

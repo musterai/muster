@@ -3,6 +3,7 @@ import { User, Role, Agent } from '../../types.js';
 import { api, ApiError } from '../../api.js';
 import { ALL_PERMISSIONS, Permission } from '../../../shared/permissions.js';
 import { Plus, X, Copy, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 function groupPermissions(perms: readonly Permission[]): [string, Permission[]][] {
   const groups = new Map<string, Permission[]>();
@@ -50,23 +51,22 @@ const NewRoleModal: React.FC<{
   };
 
   return (
-    <div className="muster-scrim">
-      <div className="muster-dialog w-full max-w-lg p-6 space-y-4">
+    <AccessibleDialog onClose={onClose} titleId="new-role-title" className="w-full max-w-lg p-6 space-y-4">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-base font-bold muster-text-primary uppercase tracking-wide">New Role</h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
-            <X className="w-4 h-4" />
+          <h2 id="new-role-title" className="text-base font-bold muster-text-primary uppercase tracking-wide">New Role</h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost" aria-label="Close new role dialog">
+            <X className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="muster-label uppercase">Key</label>
-              <input required value={key} onChange={(e) => setKey(e.target.value)} placeholder="e.g. sre" className="muster-input font-mono" />
+              <label htmlFor="new-role-key" className="muster-label uppercase">Key</label>
+              <input id="new-role-key" data-dialog-initial-focus required value={key} onChange={(e) => setKey(e.target.value)} placeholder="e.g. sre" className="muster-input font-mono" />
             </div>
             <div>
-              <label className="muster-label uppercase">Name</label>
-              <input required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. SRE" className="muster-input" />
+              <label htmlFor="new-role-name" className="muster-label uppercase">Name</label>
+              <input id="new-role-name" required value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. SRE" className="muster-input" />
             </div>
           </div>
           <div>
@@ -97,8 +97,7 @@ const NewRoleModal: React.FC<{
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };
 

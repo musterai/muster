@@ -76,10 +76,10 @@ export const DocumentVault: React.FC<DocumentVaultProps> = ({
     }
   };
 
-  const handleStatusChange = async (status: string) => {
+  const handleStatusChange = async (status: 'in_review' | 'approved') => {
     if (!selectedDoc) return;
     try {
-      await api.setDocumentStatus(selectedDoc.id, status);
+      await api.setDocumentStatus(selectedDoc.id, status, selectedDoc.version);
       onRefresh();
     } catch (err) {
       console.error('Failed to update document status:', err);
@@ -239,14 +239,10 @@ export const DocumentVault: React.FC<DocumentVaultProps> = ({
                     {!isEditing && (
                       <>
                         {selectedDoc.status === 'approved' && (
-                          <button
-                            onClick={() => handleStatusChange('in_review')}
-                            className="muster-badge muster-badge-success cursor-pointer hover:bg-success-900/60 transition-all flex items-center py-1 px-2.5 text-xs font-semibold"
-                            title="Approved — Click to un-approve and return to In Review"
-                          >
+                          <span className="muster-badge muster-badge-success flex items-center py-1 px-2.5 text-xs font-semibold">
                             <CheckCircle className="w-3.5 h-3.5 mr-1.5" />
                             Approved
-                          </button>
+                          </span>
                         )}
 
                         {selectedDoc.status === 'in_review' && (
@@ -316,13 +312,15 @@ export const DocumentVault: React.FC<DocumentVaultProps> = ({
 
                         <div className="h-4 w-px bg-muster-border mx-1" />
 
-                        <button
-                          onClick={handleStartEdit}
-                          className="muster-btn muster-btn-icon muster-btn-ghost"
-                          title="Edit Document"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
+                        {selectedDoc.status !== 'approved' && (
+                          <button
+                            onClick={handleStartEdit}
+                            className="muster-btn muster-btn-icon muster-btn-ghost"
+                            title="Edit Document"
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </button>
+                        )}
 
                         <button
                           onClick={handleDeleteDocument}

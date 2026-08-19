@@ -12,7 +12,10 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [22]
+        # Node 22 is the oldest supported maintained LTS line; Node 24 is
+        # the newer line used by the production image. Keep both in the
+        # release gate so the minimum does not silently drift.
+        node-version: [22, 24]
 
     container:
       image: node:${{ matrix.node-version }}
@@ -53,10 +56,21 @@ jobs:
           fi
 
       - name: Install Dependencies
-        run: npm ci
+        run: npm ci --engine-strict
+
+      - name: Reject High-Severity Dependency Advisories
+        run: |
+          npm run audit:runtime
+          npm run audit
 
       - name: Run Build (Vite SPA + TypeScript)
         run: npm run build
+
+      - name: Verify Frontend Bundle Budget
+        run: npm run bundle:check
+
+      - name: Verify Browser E2E Failure Cleanup
+        run: npm run test:browser-cleanup
 
       - name: Run Vitest Suite (SQLite + PostgreSQL)
         run: npm test

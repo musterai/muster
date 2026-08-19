@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 const DEFAULT_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -43,14 +44,15 @@ export class InvitationService {
     role_id: string;
     created_by?: string | null;
     ttlMs?: number;
-  }): Promise<CreatedInvitation> {
+  }, adapter?: DatabaseAdapter): Promise<CreatedInvitation> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, tx));
     const id = ulid();
     const token = crypto.randomBytes(24).toString('hex');
     const tokenHash = hashInvitationToken(token);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + (data.ttlMs ?? DEFAULT_INVITATION_TTL_MS));
 
-    await this.db.execute(
+    await adapter.execute(
       `INSERT INTO invitation (id, workspace_id, email, role_id, token_hash, expires_at, accepted_at, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
       [id, data.workspace_id, data.email.toLowerCase(), data.role_id, tokenHash, expiresAt.toISOString(), data.created_by || null, now.toISOString()],
@@ -78,6 +80,24 @@ export class InvitationService {
     return rows;
   }
 
+  async listPage(workspaceId: string, options: PageOptions = {}): Promise<Page<Invitation>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `invitations:${workspaceId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [workspaceId];
+    let cursorSql = '';
+    if (cursor) {
+      cursorSql = ' AND (created_at < ? OR (created_at = ? AND id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<Invitation>(
+      `SELECT id, workspace_id, email, role_id, expires_at, accepted_at, created_by, created_at
+       FROM invitation WHERE workspace_id = ?${cursorSql} ORDER BY created_at DESC, id DESC LIMIT ?`, params,
+    );
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
   async getById(id: string): Promise<Invitation | null> {
     const rows = await this.db.query<any>(
       `SELECT id, workspace_id, email, role_id, expires_at, accepted_at, created_by, created_at
@@ -88,8 +108,9 @@ export class InvitationService {
   }
 
   /** Revoking deletes the row outright — a revoked invitation can never be replayed or accepted. */
-  async revoke(id: string): Promise<void> {
-    await this.db.execute('DELETE FROM invitation WHERE id = ?', [id]);
+  async revoke(id: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.revoke(id, tx));
+    await adapter.execute('DELETE FROM invitation WHERE id = ?', [id]);
   }
 
   /** The most recent pending (unaccepted, unexpired) invitation for this email in this workspace, if any. */
@@ -109,16 +130,23 @@ export class InvitationService {
    * Accept an invitation and create the workspace_member row.
    * Refuses if already accepted or expired — an invitation is single-use.
    */
-  async accept(invitationId: string, userId: string): Promise<Invitation> {
-    const invitation = await this.getById(invitationId);
+  async accept(invitationId: string, userId: string, adapter?: DatabaseAdapter): Promise<Invitation> {
+    if (!adapter) return this.db.transaction(tx => this.accept(invitationId, userId, tx));
+    const lockClause = adapter.dialect === 'postgres' ? ' FOR UPDATE' : '';
+    const invitationRows = await adapter.query<any>(
+      `SELECT id, workspace_id, email, role_id, expires_at, accepted_at, created_by, created_at
+       FROM invitation WHERE id = ?${lockClause}`,
+      [invitationId],
+    );
+    const invitation = invitationRows[0] as Invitation | undefined;
     if (!invitation) throw new Error('Invitation not found');
     if (invitation.accepted_at) throw new Error('Invitation has already been accepted');
     if (new Date(invitation.expires_at).getTime() <= Date.now()) throw new Error('Invitation has expired');
 
     const now = new Date().toISOString();
 
-    await this.db.execute('UPDATE invitation SET accepted_at = ? WHERE id = ?', [now, invitationId]);
-    await this.db.execute(
+    await adapter.execute('UPDATE invitation SET accepted_at = ? WHERE id = ?', [now, invitationId]);
+    await adapter.execute(
       `INSERT INTO workspace_member (workspace_id, user_id, role_id, joined_at, invited_by)
        VALUES (?, ?, ?, ?, ?)`,
       [invitation.workspace_id, userId, invitation.role_id, now, invitation.created_by],
