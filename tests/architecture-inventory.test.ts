@@ -138,6 +138,59 @@ describe('resolved architecture and construction inventory', () => {
 
   it.each([
     [
+      'second-order identifier aliases',
+      [
+        'const Local = AuditService;',
+        'const Again = Local;',
+        'new Again();',
+      ].join('\n'),
+    ],
+    [
+      'multi-hop object-property aliases',
+      [
+        'const catalog = { Audit: AuditService };',
+        'const Local = catalog.Audit;',
+        'const Again = Local;',
+        'new Again();',
+      ].join('\n'),
+    ],
+  ])('recursively rejects dependency construction through %s', (_name, construction) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService } from "../services/audit.service.js";',
+        construction,
+      ].join('\n'),
+    });
+    const inventory = inspectArchitecture({ projectRoot: root });
+    expect(inventory.constructions.map(site => site.name)).toContain('AuditService');
+    expect(kinds(root)).toContain('construction-outside-root');
+  });
+
+  it('fails closed on cyclic and computed constructor aliases', () => {
+    const cycleRoot = fixture({
+      'src/api/probe.ts': [
+        'const FirstService = SecondService;',
+        'const SecondService = FirstService;',
+        'new FirstService();',
+      ].join('\n'),
+    });
+    expect(kinds(cycleRoot)).toContain('unknown-construction');
+
+    const computedRoot = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService } from "../services/audit.service.js";',
+        'declare const dependency: string;',
+        'const catalog = { AuditService };',
+        'new catalog[dependency]();',
+      ].join('\n'),
+    });
+    expect(kinds(computedRoot)).toContain('unknown-construction');
+  });
+
+  it.each([
+    [
       'namespace alias',
       'const Runtime = Reflect; Runtime.construct(LocalAudit, []);',
     ],
@@ -158,11 +211,93 @@ describe('resolved architecture and construction inventory', () => {
     expect(kinds(root)).toContain('construction-outside-root');
   });
 
+  it.each([
+    ['string-literal property', 'Reflect["construct"](AuditService, []);'],
+    ['no-substitution template property', 'Reflect[`construct`](AuditService, []);'],
+    [
+      'multi-hop function aliases',
+      [
+        'const construct = Reflect["construct"];',
+        'const again = construct;',
+        'again(AuditService, []);',
+      ].join('\n'),
+    ],
+  ])('rejects canonical computed Reflect.construct through %s', (_name, construction) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService } from "../services/audit.service.js";',
+        construction,
+      ].join('\n'),
+    });
+    expect(kinds(root)).toContain('construction-outside-root');
+  });
+
+  it('fails closed on computed Reflect selectors', () => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService } from "../services/audit.service.js";',
+        'declare const operation: string;',
+        'Reflect[operation](AuditService, []);',
+      ].join('\n'),
+    });
+    expect(kinds(root)).toContain('unknown-construction');
+  });
+
   it('fails closed when Reflect.construct receives an unknown target', () => {
     const root = fixture({
       'src/api/probe.ts': 'declare const target: any; Reflect.construct(target, []);',
     });
     expect(kinds(root)).toContain('unknown-construction');
+  });
+
+  it.each([
+    [
+      'direct destructuring',
+      'const { load } = { load: require }; load("../mcp/server.js");',
+    ],
+    [
+      'renamed and multi-hop destructuring',
+      [
+        'const loaders = { load: require };',
+        'const { load: localLoad } = loaders;',
+        'const again = localLoad;',
+        'again("../mcp/server.js");',
+      ].join('\n'),
+    ],
+    [
+      'nested object-property chain',
+      [
+        'const loaders = { load: require };',
+        'const aliases = { invoke: loaders.load };',
+        'const { invoke } = aliases;',
+        'invoke("../mcp/server.js");',
+      ].join('\n'),
+    ],
+  ])('resolves a require loader through %s', (_name, source) => {
+    const root = fixture({ 'src/api/probe.ts': source });
+    expect(kinds(root)).toContain('api-to-mcp');
+  });
+
+  it('fails closed on cyclic and computed destructured loader aliases', () => {
+    const cycleRoot = fixture({
+      'src/api/probe.ts': [
+        'const load = again;',
+        'const again = load;',
+        'load("../mcp/server.js");',
+      ].join('\n'),
+    });
+    expect(kinds(cycleRoot)).toContain('unknown-dependency');
+
+    const computedRoot = fixture({
+      'src/api/probe.ts': [
+        'declare const property: string;',
+        'const { [property]: load } = { load: require };',
+        'load("../mcp/server.js");',
+      ].join('\n'),
+    });
+    expect(kinds(computedRoot)).toContain('unknown-dependency');
   });
 
   it.each([
@@ -221,6 +356,24 @@ describe('resolved architecture and construction inventory', () => {
       ].join('\n'),
     });
     expect(kinds(root)).not.toContain('construction-outside-root');
+  });
+
+  it('does not flag legitimate multi-hop aliases or destructured non-loaders', () => {
+    const root = fixture({
+      'src/api/probe.ts': [
+        'const LocalDate = Date;',
+        'const Again = LocalDate;',
+        'new Again();',
+        'const parsers = { load: JSON.parse };',
+        'const { load } = parsers;',
+        'const parse = load;',
+        'parse("{}");',
+        'JSON["parse"]("{}");',
+      ].join('\n'),
+    });
+    expect(kinds(root)).not.toContain('construction-outside-root');
+    expect(kinds(root)).not.toContain('unknown-construction');
+    expect(kinds(root)).not.toContain('unknown-dependency');
   });
 
   it.each([

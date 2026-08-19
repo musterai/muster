@@ -82,51 +82,216 @@ function resolvedSymbol(node: ts.Node, checker: ts.TypeChecker): ts.Symbol | und
   return symbol;
 }
 
-function symbolInitializers(symbol: ts.Symbol | undefined): ts.Expression[] {
-  if (!symbol) return [];
-  return (symbol.declarations ?? []).flatMap(declaration => {
-    if (ts.isVariableDeclaration(declaration) && declaration.initializer) return [declaration.initializer];
-    if (ts.isPropertyAssignment(declaration)) return [declaration.initializer];
-    if (ts.isBindingElement(declaration) && declaration.initializer) return [declaration.initializer];
-    return [];
-  });
+type AliasMatch =
+  | { kind: 'match' }
+  | { kind: 'none' }
+  | { kind: 'unknown'; reason: string };
+
+interface InitializerLookup {
+  expressions: ts.Expression[];
+  unknown?: string;
 }
 
-function isAliasedIdentifier(
+function propertyNameText(name: ts.PropertyName | ts.Expression | undefined): InitializerLookup & { text?: string } {
+  if (!name) return { expressions: [], unknown: 'Property selector is missing' };
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)) {
+    return { expressions: [], text: name.text };
+  }
+  if (ts.isComputedPropertyName(name)) {
+    const text = moduleText(name.expression);
+    return text === undefined
+      ? { expressions: [], unknown: `Computed property selector "${name.expression.getText()}" is not literal` }
+      : { expressions: [], text };
+  }
+  return { expressions: [], unknown: `Cannot classify property selector "${name.getText()}"` };
+}
+
+function mergeLookups(lookups: InitializerLookup[]): InitializerLookup {
+  const unknown = lookups.map(lookup => lookup.unknown).find(Boolean);
+  return {
+    expressions: lookups.flatMap(lookup => lookup.expressions),
+    ...(unknown ? { unknown } : {}),
+  };
+}
+
+function propertyInitializers(
+  expression: ts.Expression,
+  property: string,
+  checker: ts.TypeChecker,
+  seen: Set<ts.Symbol>,
+): InitializerLookup {
+  const current = unwrappedExpression(expression);
+  if (ts.isObjectLiteralExpression(current)) {
+    const matches: ts.Expression[] = [];
+    for (const member of current.properties) {
+      if (ts.isSpreadAssignment(member)) {
+        return {
+          expressions: [],
+          unknown: `Cannot normalize property "${property}" through an object spread`,
+        };
+      }
+      if (!('name' in member) || !member.name) continue;
+      const key = propertyNameText(member.name);
+      if (key.unknown) return { expressions: [], unknown: key.unknown };
+      if (key.text !== property) continue;
+      if (ts.isPropertyAssignment(member)) matches.push(member.initializer);
+      else if (ts.isShorthandPropertyAssignment(member)) matches.push(member.name);
+      else {
+        return {
+          expressions: [],
+          unknown: `Property "${property}" is not a value assignment`,
+        };
+      }
+    }
+    if (matches.length === 1) return { expressions: matches };
+    if (matches.length === 0) return { expressions: [] };
+    return { expressions: [], unknown: `Property "${property}" has multiple assignments` };
+  }
+
+  const symbol = resolvedSymbol(current, checker);
+  if (!symbol) return { expressions: [] };
+  if (seen.has(symbol)) {
+    return {
+      expressions: [],
+      unknown: `Alias cycle reaches "${symbol.getName()}"`,
+    };
+  }
+  const nextSeen = new Set(seen).add(symbol);
+  const lookup = symbolInitializers(symbol, checker, nextSeen);
+  if (lookup.unknown) return lookup;
+  if (lookup.expressions.length === 0) return { expressions: [] };
+  return mergeLookups(lookup.expressions.map(initializer => (
+    propertyInitializers(initializer, property, checker, nextSeen)
+  )));
+}
+
+function bindingElementInitializers(
+  declaration: ts.BindingElement,
+  checker: ts.TypeChecker,
+  seen: Set<ts.Symbol>,
+): InitializerLookup {
+  const selectorName = declaration.propertyName
+    ?? (ts.isIdentifier(declaration.name) ? declaration.name : undefined);
+  const key = propertyNameText(selectorName);
+  if (key.unknown || key.text === undefined) return key;
+  const pattern = declaration.parent;
+  if (!ts.isObjectBindingPattern(pattern)) {
+    return { expressions: [] };
+  }
+
+  const owner = pattern.parent;
+  let sources: InitializerLookup;
+  if (ts.isVariableDeclaration(owner) || ts.isParameter(owner)) {
+    sources = owner.initializer
+      ? { expressions: [owner.initializer] }
+      : { expressions: [] };
+  } else if (ts.isBindingElement(owner)) {
+    sources = bindingElementInitializers(owner, checker, seen);
+  } else {
+    sources = { expressions: [] };
+  }
+  if (sources.unknown) return sources;
+
+  const selected = mergeLookups(sources.expressions.map(source => (
+    propertyInitializers(source, key.text!, checker, seen)
+  )));
+  if (declaration.initializer) selected.expressions.push(declaration.initializer);
+  return selected;
+}
+
+function symbolInitializers(
+  symbol: ts.Symbol | undefined,
+  checker: ts.TypeChecker,
+  seen = new Set<ts.Symbol>(),
+): InitializerLookup {
+  if (!symbol) return { expressions: [] };
+  const lookups = (symbol.declarations ?? []).map((declaration): InitializerLookup => {
+    if (ts.isVariableDeclaration(declaration)) {
+      return declaration.initializer ? { expressions: [declaration.initializer] } : { expressions: [] };
+    }
+    if (ts.isPropertyAssignment(declaration)) return { expressions: [declaration.initializer] };
+    if (ts.isBindingElement(declaration)) {
+      return bindingElementInitializers(declaration, checker, seen);
+    }
+    return { expressions: [] };
+  });
+  return mergeLookups(lookups);
+}
+
+function combineAliasMatches(matches: AliasMatch[], subject: string): AliasMatch {
+  const unknown = matches.find(match => match.kind === 'unknown');
+  if (unknown?.kind === 'unknown') return unknown;
+  const matched = matches.filter(match => match.kind === 'match').length;
+  if (matched === matches.length && matched > 0) return { kind: 'match' };
+  if (matched === 0) return { kind: 'none' };
+  return { kind: 'unknown', reason: `Alias "${subject}" has ambiguous initializers` };
+}
+
+function aliasedIdentifierMatch(
   expression: ts.Expression,
   expected: 'require' | 'Reflect',
   checker: ts.TypeChecker,
   seen = new Set<ts.Symbol>(),
-): boolean {
+): AliasMatch {
   const current = unwrappedExpression(expression);
-  if (ts.isIdentifier(current) && current.text === expected) return true;
+  if (ts.isIdentifier(current) && current.text === expected) return { kind: 'match' };
   const symbol = resolvedSymbol(current, checker);
-  if (!symbol || seen.has(symbol)) return false;
-  seen.add(symbol);
-  return symbolInitializers(symbol).some(initializer => (
-    isAliasedIdentifier(initializer, expected, checker, seen)
-  ));
+  if (!symbol) return { kind: 'none' };
+  if (seen.has(symbol)) {
+    return { kind: 'unknown', reason: `Alias cycle reaches "${symbol.getName()}"` };
+  }
+  const nextSeen = new Set(seen).add(symbol);
+  const lookup = symbolInitializers(symbol, checker, nextSeen);
+  if (lookup.unknown) return { kind: 'unknown', reason: lookup.unknown };
+  if (lookup.expressions.length === 0) return { kind: 'none' };
+  return combineAliasMatches(
+    lookup.expressions.map(initializer => aliasedIdentifierMatch(initializer, expected, checker, nextSeen)),
+    current.getText(),
+  );
 }
 
-function isRequireLoader(expression: ts.Expression, checker: ts.TypeChecker): boolean {
-  return isAliasedIdentifier(expression, 'require', checker);
+function isRequireLoader(expression: ts.Expression, checker: ts.TypeChecker): AliasMatch {
+  return aliasedIdentifierMatch(expression, 'require', checker);
+}
+
+function elementSelector(expression: ts.ElementAccessExpression): AliasMatch & { text?: string } {
+  const text = moduleText(expression.argumentExpression);
+  return text === undefined
+    ? { kind: 'unknown', reason: `Computed selector "${expression.argumentExpression.getText()}" is not literal` }
+    : { kind: 'match', text };
 }
 
 function isReflectConstruct(
   expression: ts.Expression,
   checker: ts.TypeChecker,
   seen = new Set<ts.Symbol>(),
-): boolean {
+): AliasMatch {
   const current = unwrappedExpression(expression);
-  if (
-    ts.isPropertyAccessExpression(current)
-    && current.name.text === 'construct'
-    && isAliasedIdentifier(current.expression, 'Reflect', checker)
-  ) return true;
+  if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+    const reflect = aliasedIdentifierMatch(current.expression, 'Reflect', checker, seen);
+    if (reflect.kind === 'unknown') return reflect;
+    if (reflect.kind === 'match') {
+      if (ts.isPropertyAccessExpression(current)) {
+        return current.name.text === 'construct' ? { kind: 'match' } : { kind: 'none' };
+      }
+      const selector = elementSelector(current);
+      if (selector.kind === 'unknown') return selector;
+      return selector.text === 'construct' ? { kind: 'match' } : { kind: 'none' };
+    }
+  }
   const symbol = resolvedSymbol(current, checker);
-  if (!symbol || seen.has(symbol)) return false;
-  seen.add(symbol);
-  return symbolInitializers(symbol).some(initializer => isReflectConstruct(initializer, checker, seen));
+  if (!symbol) return { kind: 'none' };
+  if (seen.has(symbol)) {
+    return { kind: 'unknown', reason: `Reflect.construct alias cycle reaches "${symbol.getName()}"` };
+  }
+  const nextSeen = new Set(seen).add(symbol);
+  const lookup = symbolInitializers(symbol, checker, nextSeen);
+  if (lookup.unknown) return { kind: 'unknown', reason: lookup.unknown };
+  if (lookup.expressions.length === 0) return { kind: 'none' };
+  return combineAliasMatches(
+    lookup.expressions.map(initializer => isReflectConstruct(initializer, checker, nextSeen)),
+    current.getText(),
+  );
 }
 
 function importedSelectors(
@@ -162,11 +327,16 @@ function importedSelectors(
       if (selector) selectors.push(selector);
     } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       recordCall(node, 'dynamic import');
-    } else if (
-      ts.isCallExpression(node)
-      && isRequireLoader(node.expression, checker)
-    ) {
-      recordCall(node, 'require');
+    } else if (ts.isCallExpression(node)) {
+      const loader = isRequireLoader(node.expression, checker);
+      if (loader.kind === 'match') recordCall(node, 'require');
+      else if (loader.kind === 'unknown') {
+        violations.push({
+          kind: 'unknown-dependency',
+          file: displayFile,
+          message: `Cannot classify loader alias "${node.expression.getText(sourceFile)}": ${loader.reason}`,
+        });
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -175,17 +345,67 @@ function importedSelectors(
   return selectors;
 }
 
-function constructionName(
+interface ConstructionTarget {
+  name?: string;
+  unknown?: string;
+}
+
+function constructionTarget(
   expression: ts.Expression,
   checker: ts.TypeChecker,
-): string {
+  seen = new Set<ts.Symbol>(),
+  strictAlias = false,
+): ConstructionTarget {
   const current = unwrappedExpression(expression);
+  if (ts.isElementAccessExpression(current)) {
+    const selector = elementSelector(current);
+    if (selector.kind === 'unknown') return { unknown: selector.reason };
+  }
   const symbol = resolvedSymbol(current, checker);
   const symbolName = symbol?.getName();
-  if (symbolName && symbolName !== '__type' && symbolName !== '__class') return symbolName;
-  if (ts.isIdentifier(current)) return current.text;
-  if (ts.isPropertyAccessExpression(current)) return current.name.text;
-  return current.getText();
+  const hasAliasDeclaration = symbol?.declarations?.some(declaration => (
+    ts.isVariableDeclaration(declaration)
+    || ts.isPropertyAssignment(declaration)
+    || ts.isBindingElement(declaration)
+  )) ?? false;
+  if (symbolName && DEPENDENCY_NAME.test(symbolName) && !hasAliasDeclaration) {
+    return { name: symbolName };
+  }
+  if (symbol) {
+    if (seen.has(symbol)) {
+      return { unknown: `Constructor alias cycle reaches "${symbolName ?? current.getText()}"` };
+    }
+    const nextSeen = new Set(seen).add(symbol);
+    const lookup = symbolInitializers(symbol, checker, nextSeen);
+    if (lookup.unknown) return { unknown: lookup.unknown };
+    if (lookup.expressions.length > 0) {
+      const targets = lookup.expressions.map(initializer => (
+        constructionTarget(initializer, checker, nextSeen, true)
+      ));
+      const unknown = targets.map(target => target.unknown).find(Boolean);
+      if (unknown) return { unknown };
+      const names = [...new Set(targets.map(target => target.name).filter(Boolean))] as string[];
+      if (names.length === 1) return { name: names[0] };
+      if (names.length > 1) {
+        return { unknown: `Constructor alias "${current.getText()}" has ambiguous initializers` };
+      }
+    }
+  }
+  if (symbolName && symbolName !== '__type' && symbolName !== '__class') return { name: symbolName };
+  if (ts.isIdentifier(current)) return { name: current.text };
+  if (ts.isPropertyAccessExpression(current)) return { name: current.name.text };
+  if (ts.isElementAccessExpression(current)) {
+    const selector = elementSelector(current);
+    if (selector.kind === 'match') return { name: selector.text };
+  }
+  return strictAlias
+    ? { unknown: `Cannot normalize constructor alias expression "${current.getText()}"` }
+    : { name: current.getText() };
+}
+
+function constructionName(expression: ts.Expression, checker: ts.TypeChecker): string {
+  const target = constructionTarget(expression, checker);
+  return target.name ?? unwrappedExpression(expression).getText();
 }
 
 const DEPENDENCY_NAME = /(?:Service|Policy|Operations|Queries|Factory)$/;
@@ -216,7 +436,10 @@ function parameterConstructionIndexes(
   const visit = (node: ts.Node): void => {
     let target: ts.Expression | undefined;
     if (ts.isNewExpression(node)) target = node.expression;
-    else if (ts.isCallExpression(node) && isReflectConstruct(node.expression, checker)) {
+    else if (
+      ts.isCallExpression(node)
+      && isReflectConstruct(node.expression, checker).kind === 'match'
+    ) {
       target = node.arguments[0];
     }
     if (target) {
@@ -338,32 +561,65 @@ export function inspectArchitecture({
 
     const visitConstructions = (node: ts.Node): void => {
       if (ts.isNewExpression(node)) {
-        const name = constructionName(node.expression, checker);
-        if (DEPENDENCY_NAME.test(name)) recordConstruction(name, node);
-      } else if (ts.isCallExpression(node) && isReflectConstruct(node.expression, checker)) {
-        const target = node.arguments[0];
-        if (!target) {
+        const target = constructionTarget(node.expression, checker);
+        if (target.name && DEPENDENCY_NAME.test(target.name)) recordConstruction(target.name, node);
+        else if (
+          target.unknown
+          && (
+            ts.isElementAccessExpression(unwrappedExpression(node.expression))
+            || DEPENDENCY_NAME.test(constructionName(node.expression, checker))
+          )
+        ) {
           violations.push({
             kind: 'unknown-construction',
             file: displayFile,
-            message: 'Reflect.construct must declare its constructor target',
+            message: `Cannot classify constructor target "${node.expression.getText(sourceFile)}": ${target.unknown}`,
           });
-        } else {
-          const name = constructionName(target, checker);
-          if (DEPENDENCY_NAME.test(name)) {
-            recordConstruction(name, node);
+        }
+      } else if (ts.isCallExpression(node)) {
+        const reflectConstruct = isReflectConstruct(node.expression, checker);
+        if (reflectConstruct.kind === 'unknown') {
+          violations.push({
+            kind: 'unknown-construction',
+            file: displayFile,
+            message: `Cannot classify reflective constructor call "${node.expression.getText(sourceFile)}": ${reflectConstruct.reason}`,
+          });
+          ts.forEachChild(node, visitConstructions);
+          return;
+        }
+        if (reflectConstruct.kind === 'match') {
+          const target = node.arguments[0];
+          if (!target) {
+            violations.push({
+              kind: 'unknown-construction',
+              file: displayFile,
+              message: 'Reflect.construct must declare its constructor target',
+            });
           } else {
-            const type = checker.getTypeAtLocation(target);
-            if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+            const resolved = constructionTarget(target, checker);
+            if (resolved.name && DEPENDENCY_NAME.test(resolved.name)) {
+              recordConstruction(resolved.name, node);
+            } else if (resolved.unknown) {
               violations.push({
                 kind: 'unknown-construction',
                 file: displayFile,
-                message: `Cannot classify Reflect.construct target "${target.getText(sourceFile)}"`,
+                message: `Cannot classify Reflect.construct target "${target.getText(sourceFile)}": ${resolved.unknown}`,
               });
+            } else {
+              const type = checker.getTypeAtLocation(target);
+              if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+                violations.push({
+                  kind: 'unknown-construction',
+                  file: displayFile,
+                  message: `Cannot classify Reflect.construct target "${target.getText(sourceFile)}"`,
+                });
+              }
             }
           }
+          ts.forEachChild(node, visitConstructions);
+          return;
         }
-      } else if (ts.isCallExpression(node)) {
+
         const signature = checker.getResolvedSignature(node);
         const declaration = signature?.getDeclaration();
         if (signature && declaration) {
@@ -381,13 +637,13 @@ export function inspectArchitecture({
               });
               continue;
             }
-            const name = constructionName(argument, checker);
-            if (DEPENDENCY_NAME.test(name)) recordConstruction(name, node);
+            const target = constructionTarget(argument, checker);
+            if (target.name && DEPENDENCY_NAME.test(target.name)) recordConstruction(target.name, node);
             else {
               violations.push({
                 kind: 'unknown-construction',
                 file: displayFile,
-                message: `Cannot classify factory constructor argument "${argument.getText(sourceFile)}"`,
+                message: `Cannot classify factory constructor argument "${argument.getText(sourceFile)}"${target.unknown ? `: ${target.unknown}` : ''}`,
               });
             }
           }
