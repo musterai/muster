@@ -227,6 +227,55 @@ describe('MUS-29: MCP OAuth over real HTTP', () => {
     expect(mcpBody.authenticated_as.kind).toBe('agent');
   });
 
+  it('walks 105 owned agents and 105 roles across mixed phase pages without duplicates or stale-cursor reuse', async () => {
+    const now = new Date().toISOString();
+    const ownerRole = (await db.query<{ id: string }>("SELECT id FROM role WHERE workspace_id=? AND key='owner'", ['ws-mcp-oauth-routes']))[0];
+    for (let index = 0; index < 105; index++) {
+      const id = `oauth-agent-${index.toString().padStart(3, '0')}`;
+      await db.execute('INSERT INTO principal (id,kind,created_at) VALUES (?,?,?)', [id, 'agent', now]);
+      await db.execute('INSERT INTO agent (id,name,capabilities,status,last_seen_at,operator_user_id,role_id,workspace_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        [id, `Agent ${index}`, '[]', 'idle', now, 'approver-http-1', ownerRole.id, 'ws-mcp-oauth-routes', now]);
+    }
+    const existingRoles = (await db.query<{ count: number }>('SELECT COUNT(*) count FROM role WHERE workspace_id=?', ['ws-mcp-oauth-routes']))[0].count;
+    for (let index = existingRoles; index < 105; index++) {
+      await db.execute('INSERT INTO role (id,workspace_id,key,name,permissions_json,is_system,rank) VALUES (?,?,?,?,?,?,?)',
+        [`oauth-role-${index.toString().padStart(3, '0')}`, 'ws-mcp-oauth-routes', `role-${index}`, `Role ${index}`, '[]', 0, index]);
+    }
+
+    const register = async (name: string) => (await fetch(`${baseUrl}/api/v1/oauth/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_name: name, redirect_uris: [REDIRECT_URI] }),
+    })).json();
+    const client = await register('Pagination client');
+    const otherClient = await register('Other pagination client');
+    const agents: string[] = [];
+    const roles: string[] = [];
+    let cursor: string | null = null;
+    let firstCursor: string | null = null;
+    do {
+      const response = await fetch(`${baseUrl}/api/v1/oauth/authorize/details?client_id=${client.client_id}&limit=37${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, {
+        headers: { Authorization: `Bearer ${approverToken}` },
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.agents.length + body.roles.length).toBeLessThanOrEqual(37);
+      agents.push(...body.agents.map((agent: { id: string }) => agent.id));
+      roles.push(...body.roles.map((role: { id: string }) => role.id));
+      cursor = body.page.has_more ? body.page.next_cursor : null;
+      firstCursor ||= cursor;
+    } while (cursor);
+    expect(agents).toHaveLength(105);
+    expect(roles).toHaveLength(105);
+    expect(new Set(agents).size).toBe(105);
+    expect(new Set(roles).size).toBe(105);
+
+    const stale = await fetch(`${baseUrl}/api/v1/oauth/authorize/details?client_id=${otherClient.client_id}&limit=37&cursor=${encodeURIComponent(firstCursor!)}`, {
+      headers: { Authorization: `Bearer ${approverToken}` },
+    });
+    expect(stale.status).toBe(400);
+    expect(await stale.text()).toContain('cursor is invalid');
+  });
+
   it('rejects an authorize request with an unregistered redirect_uri without redirecting anywhere', async () => {
     const resource = `${baseUrl}/mcp`;
     const registerRes = await fetch(`${baseUrl}/api/v1/oauth/register`, {

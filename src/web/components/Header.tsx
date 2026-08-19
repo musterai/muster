@@ -41,7 +41,7 @@ const IdentityPicker: React.FC<{ onSubmit: (displayName: string) => Promise<void
     return (
       <button
         onClick={() => setOpen(true)}
-        className="muster-btn muster-btn-ghost font-sans text-xs"
+        className="muster-btn muster-btn-ghost muster-touch-target font-sans text-xs"
         title="Set your name so comments and assignments show who you are"
       >
         <UserCircle className="w-3.5 h-3.5 muster-accent" /> Who are you?
@@ -166,7 +166,7 @@ export const Header: React.FC<HeaderProps> = ({
               <select
                 value={selectedProjectId || ''}
                 onChange={(e) => onSelectProject(e.target.value)}
-                className="muster-input max-w-[140px] sm:max-w-[220px] font-sans font-medium cursor-pointer truncate text-xs sm:text-sm py-1.5 px-2"
+                className="muster-input muster-touch-target max-w-[140px] sm:max-w-[220px] font-sans font-medium cursor-pointer truncate text-xs sm:text-sm py-1.5 px-2"
                 aria-label="Select active project"
               >
                 {projects.map((p) => (
@@ -214,7 +214,7 @@ export const Header: React.FC<HeaderProps> = ({
               return (
                 <button
                   onClick={onNotificationToggle}
-                  className="inline-flex items-center justify-center w-7 h-7 rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs cursor-pointer transition-colors muster-text-muted hover:muster-text-primary"
+                  className="muster-touch-target inline-flex items-center justify-center rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs cursor-pointer transition-colors muster-text-muted hover:muster-text-primary"
                   title={bell.title}
                   aria-label={bell.title}
                 >
@@ -226,7 +226,7 @@ export const Header: React.FC<HeaderProps> = ({
             {onOpenShortcutsHelp && (
               <button
                 onClick={onOpenShortcutsHelp}
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs font-mono font-bold cursor-pointer transition-colors muster-text-muted hover:muster-text-primary"
+                className="muster-touch-target inline-flex items-center justify-center rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs font-mono font-bold cursor-pointer transition-colors muster-text-muted hover:muster-text-primary"
                 title="Keyboard Shortcuts & Help (?)"
                 aria-label="Keyboard shortcuts"
               >
@@ -237,7 +237,7 @@ export const Header: React.FC<HeaderProps> = ({
             {currentUser ? (
               <button
                 onClick={() => onOpenUserAccount?.('appearance')}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs font-sans font-semibold cursor-pointer transition-colors"
+                className="muster-touch-target inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs font-sans font-semibold cursor-pointer transition-colors"
                 title="Account Settings & Appearance"
               >
                 <PrincipalChip name={currentUser.display_name} kind="user" />
@@ -245,7 +245,7 @@ export const Header: React.FC<HeaderProps> = ({
             ) : authMode === 'open' && onSetLocalIdentity ? (
               <button
                 onClick={() => onOpenUserAccount?.('profile')}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs font-sans font-semibold cursor-pointer transition-colors"
+                className="muster-touch-target inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md hover:bg-muster-surface-hover border border-muster-border/60 text-xs font-sans font-semibold cursor-pointer transition-colors"
                 title="Account & Identity Settings"
               >
                 <UserCircle className="w-4 h-4 muster-accent" />
@@ -254,7 +254,7 @@ export const Header: React.FC<HeaderProps> = ({
             ) : (
               <button
                 onClick={() => onOpenUserAccount?.('appearance')}
-                className="muster-btn muster-btn-secondary text-xs"
+                className="muster-btn muster-btn-secondary muster-touch-target text-xs"
                 title="Account & Appearance Settings"
               >
                 <UserCircle className="w-4 h-4 muster-accent" />
@@ -267,7 +267,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Sub-Navigation Bar — Shown on desktop (≥768px) where bottom bar is hidden */}
         <div className="hidden md:flex items-center border-t border-muster-border/60 py-1.5 w-full">
-          <nav className="flex flex-wrap items-center gap-1.5 py-0.5 w-full">
+          <nav aria-label="Primary workspace navigation" className="flex flex-wrap items-center gap-1.5 py-0.5 w-full">
             {tabs.map(({ id, icon: Icon, label }) => (
               <button
                 key={id}

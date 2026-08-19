@@ -43,7 +43,10 @@ export function createKBRouter(kbService: KBService): Router {
   router.get('/kbs', ...validateRequest({ query: kbListQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const projectId = req.query.project_id as string | undefined;
-      const kbs = await kbService.list(projectId, req.authContext);
+      const kbs = await kbService.listPage(projectId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(kbs);
     } catch (err) {
       next(err);
@@ -68,15 +71,10 @@ export function createKBRouter(kbService: KBService): Router {
       const kbId = req.query.kb_id as string | undefined;
       const projectId = req.query.project_id as string | undefined;
 
-      let kbIds: string[] | undefined;
-      if (kbId) {
-        kbIds = [kbId];
-      } else if (projectId) {
-        const kbs = await kbService.list(projectId, req.authContext);
-        kbIds = kbs.map(k => k.id);
-      }
-
-      const results = await kbService.searchKnowledge(query, kbIds, 20, req.authContext);
+      const results = await kbService.searchKnowledgePage(query, kbId ? [kbId] : undefined, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, projectId, req.authContext);
       res.json(results);
     } catch (err) {
       next(err);
@@ -88,7 +86,10 @@ export function createKBRouter(kbService: KBService): Router {
     try {
       const kbId = req.query.kb_id as string | undefined;
       const projectId = req.query.project_id as string | undefined;
-      const tree = await kbService.getGraphTree(kbId, projectId, req.authContext);
+      const tree = await kbService.getGraphTree(kbId, projectId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(tree);
     } catch (err) {
       next(err);
@@ -102,7 +103,10 @@ export function createKBRouter(kbService: KBService): Router {
       if (!q) return res.status(400).json({ error: 'Query parameter q or identifier is required' });
 
       const kbId = req.query.kb_id as string | undefined;
-      const result = await kbService.getEntityKnowledge(q, kbId ? [kbId] : undefined, req.authContext);
+      const result = await kbService.getEntityKnowledge(q, kbId ? [kbId] : undefined, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       if (!result) return res.status(404).json({ error: 'Entity knowledge not found' });
       res.json(result);
     } catch (err) {
@@ -159,7 +163,10 @@ export function createKBRouter(kbService: KBService): Router {
   router.get('/kbs/:id/entities', ...validateRequest({ query: kbEntityListQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const type = req.query.type as string | undefined;
-      const entities = await kbService.listEntities(req.params.id, type, req.authContext);
+      const entities = await kbService.listEntitiesPage(req.params.id, type, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(entities);
     } catch (err) {
       next(err);
@@ -203,8 +210,21 @@ export function createKBRouter(kbService: KBService): Router {
     try {
       const entityId = req.query.entity_id as string | undefined;
       const category = req.query.category as string | undefined;
-      const facts = await kbService.listFacts(req.params.id, entityId, category, req.authContext);
+      const facts = await kbService.listFactsPage(req.params.id, { entityId, category }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(facts);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/kbs/facts/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const fact = await kbService.getFactById(req.params.id, req.authContext);
+      if (!fact) return res.status(404).json({ error: 'Knowledge fact not found' });
+      res.json(fact);
     } catch (err) {
       next(err);
     }

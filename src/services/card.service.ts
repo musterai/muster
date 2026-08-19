@@ -1,6 +1,6 @@
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
-import { Card, CardAssignee, CardDetails, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
+import { Card, CardAssignee, CardDetails, CardSummary, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { formatCardKey } from '../shared/card-key.js';
@@ -14,6 +14,7 @@ import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { assertResourceWorkspace, assertResourcesShareWorkspace, assertResourcesWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
 import { PermissionDeniedError, WORKSPACE_READ } from '../shared/permission-enforcer.js';
 import { assertActiveWorkspacePrincipal, assertAgentSelectorScope } from './agent-scope.authorization.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
 const MAX_MOVE_RETRIES = 3;
@@ -694,6 +695,105 @@ export class CardService {
     });
   }
 
+  /**
+   * Bounded collection read used by REST/MCP. Card descriptions are never
+   * copied into a board/list response; callers fetch one card's detail when
+   * they open it. Ordering is a strict `(position, id)` keyset.
+   */
+  async listPage(
+    filters: { column_id?: string; board_id?: string; project_id?: string; assignee_id?: string; label?: string; archived?: boolean } = {},
+    options: PageOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<Page<CardSummary>> {
+    const scopedSelectors: Array<['project' | 'board' | 'column' | 'agent', string]> = [];
+    if (filters.project_id) scopedSelectors.push(['project', filters.project_id]);
+    if (filters.board_id) scopedSelectors.push(['board', filters.board_id]);
+    if (filters.column_id) scopedSelectors.push(['column', filters.column_id]);
+    if (filters.assignee_id) scopedSelectors.push(['agent', filters.assignee_id]);
+    await assertResourcesWorkspace(this.db, auth, scopedSelectors);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `cards:${JSON.stringify({
+      column_id: filters.column_id || null,
+      board_id: filters.board_id || null,
+      project_id: filters.project_id || null,
+      assignee_id: filters.assignee_id || null,
+      label: filters.label || null,
+      archived: filters.archived ?? false,
+    })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    let sql = `SELECT DISTINCT c.id, c.key, c.column_id, c.title, c.position,
+      c.priority, c.due_date, c.created_at, c.updated_at, c.archived,
+      c.claimed_by, c.claimed_at, c.claim_expires_at, c.is_epic,
+      col.board_id AS board_id, b.name AS board_name, b.slug AS board_slug
+      FROM card c JOIN "column" col ON c.column_id = col.id JOIN board b ON col.board_id = b.id JOIN project p ON p.id=b.project_id`;
+    const joins: string[] = [];
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    const workspaceId = workspaceIdFor(auth);
+    if (workspaceId) { conditions.push('p.workspace_id = ?'); params.push(workspaceId); }
+
+    if (filters.board_id) { conditions.push('col.board_id = ?'); params.push(filters.board_id); }
+    if (filters.project_id) { conditions.push('b.project_id = ?'); params.push(filters.project_id); }
+    if (filters.column_id) { conditions.push('c.column_id = ?'); params.push(filters.column_id); }
+    if (filters.assignee_id) {
+      joins.push('JOIN card_assignee ca ON c.id = ca.card_id');
+      conditions.push('ca.principal_id = ?');
+      params.push(filters.assignee_id);
+    }
+    if (filters.label) {
+      joins.push('JOIN card_label cl ON c.id = cl.card_id JOIN label l ON cl.label_id = l.id');
+      conditions.push('(l.id = ? OR l.name = ?)');
+      params.push(filters.label, filters.label);
+    }
+    conditions.push('c.archived = ?');
+    params.push(filters.archived ? 1 : 0);
+    if (cursor) {
+      conditions.push('(c.position > ? OR (c.position = ? AND c.id > ?))');
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    if (joins.length) sql += ` ${joins.join(' ')}`;
+    sql += ` WHERE ${conditions.join(' AND ')} ORDER BY c.position ASC, c.id ASC LIMIT ?`;
+    params.push(limit + 1);
+
+    const rows = await this.db.query<CardSummary>(sql, params);
+    const visibleRows = rows.slice(0, limit);
+    if (visibleRows.length > 0) await this.hydrateCardSummaries(visibleRows);
+    return toPage(rows.map((row, index) => index < visibleRows.length ? visibleRows[index] : row), limit,
+      row => encodeCursor(scope, [row.position, row.id]));
+  }
+
+  private async hydrateCardSummaries(cards: CardSummary[]): Promise<void> {
+    const placeholders = cards.map(() => '?').join(', ');
+    const ids = cards.map(card => card.id);
+    const assigneeRows = await this.db.query<CardAssignee & { card_id: string }>(
+      `SELECT ca.card_id, p.id, COALESCE(a.name, u.display_name) as name, p.kind, a.status
+       FROM card_assignee ca
+       JOIN principal p ON ca.principal_id = p.id
+       LEFT JOIN agent a ON a.id = p.id
+       LEFT JOIN app_user u ON u.id = p.id
+       WHERE ca.card_id IN (${placeholders}) ORDER BY name ASC`, ids,
+    );
+    const assigneesByCard = new Map<string, CardAssignee[]>();
+    for (const row of assigneeRows) {
+      const values = assigneesByCard.get(row.card_id) || [];
+      values.push({ id: row.id, name: row.name, kind: (row.kind || 'agent') as 'user' | 'agent', status: row.kind === 'agent' ? row.status : null });
+      assigneesByCard.set(row.card_id, values);
+    }
+    const parentRows = await this.db.query<{ child_id: string; parent_id: string; parent_key: string; parent_title: string }>(
+      `SELECT cl.target_card_id AS child_id, parent.id AS parent_id, parent.key AS parent_key, parent.title AS parent_title
+       FROM card_link cl JOIN card parent ON parent.id = cl.source_card_id
+       WHERE cl.relation_type = 'parent_of' AND cl.target_card_id IN (${placeholders})`, ids,
+    );
+    const parentByChild = new Map(parentRows.map(row => [row.child_id, row]));
+    for (const card of cards) {
+      card.assignees = assigneesByCard.get(card.id) || [];
+      const parent = parentByChild.get(card.id);
+      card.parent_epic_id = parent?.parent_id || null;
+      card.parent_epic_key = parent?.parent_key || null;
+      card.parent_epic_title = parent?.parent_title || null;
+    }
+  }
+
   async update(id: string, data: UpdateCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
     assertMaxLength(data.description, CARD_TEXT_MAX_CHARS, 'Card description');
     return this.db.transaction(async tx => {
@@ -1318,6 +1418,24 @@ export class CardService {
     );
   }
 
+  async listWorkLinksPage(idOrKey: string, options: PageOptions = {}, db: DatabaseAdapter = this.db, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<CardWorkLink>> {
+    const cardId = await resolveCardId(db, idOrKey);
+    await assertResourceWorkspace(db, auth, 'card', cardId);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `card-work-links:${cardId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [cardId];
+    let sql = 'SELECT * FROM card_work_link WHERE card_id = ?';
+    if (cursor) {
+      sql += ' AND (created_at > ? OR (created_at = ? AND id > ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY created_at ASC, id ASC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await db.query<CardWorkLink>(sql, params);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
   async searchByTitle(projectId: string, query: string, opts: { excludeCardId?: string; limit?: number } = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Card[]> {
     await assertResourceWorkspace(this.db, auth, 'project', projectId);
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
@@ -1346,6 +1464,44 @@ export class CardService {
     params.push(limit);
 
     return this.db.query<Card>(sql, params);
+  }
+
+  async searchByTitlePage(
+    projectId: string,
+    query: string,
+    opts: { excludeCardId?: string; cursor?: string; limit?: number } = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<Page<CardSummary>> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const limit = normalizePageLimit(opts.limit ?? 20);
+    const normalizedQuery = query.trim();
+    const excludeCardId = opts.excludeCardId ? await resolveCardId(this.db, opts.excludeCardId) : undefined;
+    const scope = `card-search:${JSON.stringify({ projectId, query: normalizedQuery.toLowerCase(), excludeCardId: excludeCardId || null })}`;
+    const cursor = decodeCursor(opts.cursor, scope, 2);
+    const params: unknown[] = [projectId];
+    let sql = `SELECT c.id, c.key, c.column_id, c.title, c.position, c.priority,
+      c.due_date, c.created_at, c.updated_at, c.archived, c.claimed_by,
+      c.claimed_at, c.claim_expires_at, c.is_epic, col.board_id AS board_id,
+      b.name AS board_name, b.slug AS board_slug
+      FROM card c JOIN "column" col ON c.column_id = col.id JOIN board b ON col.board_id = b.id
+      WHERE b.project_id = ? AND c.archived = 0`;
+    if (normalizedQuery) {
+      const literal = normalizedQuery.replace(/[\\%_]/g, '\\$&');
+      sql += " AND LOWER(c.title) LIKE LOWER(?) ESCAPE '\\'";
+      params.push(`%${literal}%`);
+    }
+    if (excludeCardId) { sql += ' AND c.id != ?'; params.push(excludeCardId); }
+    if (cursor) {
+      sql += ' AND (c.updated_at < ? OR (c.updated_at = ? AND c.id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY c.updated_at DESC, c.id DESC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<CardSummary>(sql, params);
+    const visible = rows.slice(0, limit);
+    if (visible.length) await this.hydrateCardSummaries(visible);
+    return toPage(rows.map((row, index) => index < visible.length ? visible[index] : row), limit,
+      row => encodeCursor(scope, [row.updated_at, row.id]));
   }
 
   async archive(idOrKey: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {

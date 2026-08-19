@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, FileText, AlertCircle } from 'lucide-react';
 import { api } from '../../api.js';
-import { useEscapeKey } from './useEscapeKey.js';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 interface NewDocModalProps {
   projectId: string;
@@ -10,7 +10,6 @@ interface NewDocModalProps {
 }
 
 export const NewDocModal: React.FC<NewDocModalProps> = ({ projectId, onClose, onSuccess }) => {
-  useEscapeKey(onClose);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('# Document Title\n\n## Overview\nDetails...');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -35,19 +34,18 @@ export const NewDocModal: React.FC<NewDocModalProps> = ({ projectId, onClose, on
   };
 
   return (
-    <div className="muster-scrim">
-      <div className="muster-dialog w-full max-w-lg max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
+    <AccessibleDialog onClose={onClose} titleId="new-document-title" className="w-full max-w-lg max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="new-document-title" className="text-sm font-bold muster-text-primary flex items-center">
             <FileText className="w-4 h-4 mr-2 muster-accent" /> Create Design Document
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close create document dialog">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {error && (
-          <div className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
+          <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{error}</span>
           </div>
@@ -55,8 +53,10 @@ export const NewDocModal: React.FC<NewDocModalProps> = ({ projectId, onClose, on
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="muster-label">Document Title</label>
+            <label htmlFor="new-document-name" className="muster-label">Document Title</label>
             <input
+              id="new-document-name"
+              data-dialog-initial-focus
               type="text"
               required
               value={title}
@@ -67,8 +67,9 @@ export const NewDocModal: React.FC<NewDocModalProps> = ({ projectId, onClose, on
           </div>
 
           <div>
-            <label className="muster-label">Markdown Content</label>
+            <label htmlFor="new-document-content" className="muster-label">Markdown Content</label>
             <textarea
+              id="new-document-content"
               rows={8}
               value={content}
               onChange={(e) => setContent(e.target.value)}
@@ -93,7 +94,6 @@ export const NewDocModal: React.FC<NewDocModalProps> = ({ projectId, onClose, on
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };

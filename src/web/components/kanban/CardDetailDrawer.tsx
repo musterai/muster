@@ -31,6 +31,7 @@ import { renderMarkdown } from '../../markdown.js';
 import { CardRelationSection } from './CardRelationSection.js';
 import { WorkLinkSection } from './WorkLinkSection.js';
 import { PRIORITY_BADGE_CLASSES } from '../../utils/card-helpers.js';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 interface CardDetailDrawerProps {
   cardDetails: CardDetails | null;
@@ -166,11 +167,18 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
   };
 
   return (
-    <div className="muster-scrim" onClick={onClose}>
-      <div
-        className="muster-dialog w-full max-w-4xl max-h-[90vh] flex flex-col mx-2 font-sans overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <AccessibleDialog
+      onClose={onClose}
+      titleId="card-detail-title"
+      descriptionId="card-detail-description"
+      className="w-full max-w-4xl max-h-[90vh] flex flex-col mx-2 font-sans overflow-hidden"
+    >
+        <h2 id="card-detail-title" className="sr-only">
+          {cardDetails ? `${cardDetails.key}: ${cardDetails.title}` : 'Create card'}
+        </h2>
+        <p id="card-detail-description" className="sr-only">
+          {cardDetails ? 'View and edit card details, assignments, links, and comments.' : 'Enter details for the new card.'}
+        </p>
         {/* Drawer Header */}
         <div className="p-4 border-b border-muster-border flex items-center justify-between bg-muster-surface flex-shrink-0">
           <div className="flex items-center space-x-3 min-w-0">
@@ -178,7 +186,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
               <>
                 <button
                   onClick={(e) => onCopyKey(cardDetails.key, cardDetails.id, e)}
-                  className="flex items-center space-x-1 font-mono text-xs muster-accent font-bold hover:opacity-75"
+                  className="muster-card-detail-target flex items-center space-x-1 font-mono text-xs muster-accent font-bold hover:opacity-75"
                   title="Copy card key"
                 >
                   <span>{cardDetails.key}</span>
@@ -188,13 +196,14 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <Layout className="w-3 h-3 text-neutral-400 shrink-0" aria-hidden="true" />
                   <select
                     value={cardDetails.column_id}
+                    aria-label="Card column"
                     onChange={async (e) => {
                       const targetColId = e.target.value;
                       if (targetColId && targetColId !== cardDetails.column_id) {
                         await onMoveCard(cardDetails.id, targetColId);
                       }
                     }}
-                    className="bg-transparent muster-text-primary text-xs focus:outline-none cursor-pointer font-sans"
+                    className="muster-card-detail-target bg-transparent muster-text-primary text-xs focus:outline-none cursor-pointer font-sans"
                     title="Change card column / lane"
                   >
                     {columns.map((col) => (
@@ -231,21 +240,26 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
               <>
                 <button
                   onClick={onStartEditingCard}
-                  className="inline-flex items-center px-2.5 py-1 bg-brand-950/80 hover:bg-brand-900 text-brand-300 border border-brand-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
+                  className="muster-card-detail-target inline-flex items-center px-2.5 py-1 bg-brand-950/80 hover:bg-brand-900 text-brand-300 border border-brand-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
                   title="Edit Task Text & Properties"
                 >
                   <Edit2 className="w-3.5 h-3.5 mr-1" /> Edit Task
                 </button>
                 <button
                   onClick={() => onDeleteCard(cardDetails.id, cardDetails.title)}
-                  className="inline-flex items-center px-2.5 py-1 bg-danger-950/80 hover:bg-danger-900 text-danger-300 border border-danger-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
+                  className="muster-card-detail-target inline-flex items-center px-2.5 py-1 bg-danger-950/80 hover:bg-danger-900 text-danger-300 border border-danger-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
                   title="Delete Task"
                 >
                   <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete Task
                 </button>
               </>
             )}
-            <button onClick={onClose} className="p-1 muster-text-muted hover:muster-text-primary rounded cursor-pointer" title="Close Task">
+            <button
+              onClick={onClose}
+              className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target"
+              title="Close Task"
+              aria-label="Close card details"
+            >
               <X className="w-5 h-5" />
             </button>
           </div>
@@ -349,7 +363,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <div className="flex items-center space-x-2">
                     <button
                       onClick={onStartEditingCard}
-                      className="p-1 text-neutral-500 hover:text-brand-400 transition-colors cursor-pointer"
+                      className="muster-card-detail-target p-1 text-neutral-500 hover:text-brand-400 transition-colors cursor-pointer"
                       title="Edit Title & Description"
                     >
                       <Edit2 className="w-4 h-4" />
@@ -394,6 +408,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <div className="flex space-x-1.5">
                     <select
                       value={assignAgentId}
+                      aria-label="Assignee"
                       onChange={(e) => setAssignAgentId(e.target.value)}
                       className="muster-input text-xs py-1 flex-1"
                     >
@@ -499,6 +514,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <div className="flex space-x-1.5">
                     <select
                       value={linkDocumentId}
+                      aria-label="Document to link"
                       onChange={(e) => setLinkDocumentId(e.target.value)}
                       className="muster-input text-xs py-1 flex-1"
                     >
@@ -669,7 +685,6 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
             </>
           )}
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };

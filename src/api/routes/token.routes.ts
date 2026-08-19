@@ -13,7 +13,7 @@ import { AuthContext } from '../../shared/auth-context.js';
 import { ValidationError } from '../../shared/errors.js';
 import { PermissionDeniedError } from '../../shared/permission-enforcer.js';
 import { validateRequest } from '../middleware/validate.js';
-import { idParamsSchema, tokenCreateSchema } from '../schemas.js';
+import { collectionQuerySchema, idParamsSchema, tokenCreateSchema } from '../schemas.js';
 import { DatabaseAdapter } from '../../db/adapter.js';
 
 async function auditIssuanceRefusal(
@@ -53,14 +53,17 @@ export function createTokenRouter(
   const router = Router();
 
   // List tokens for the authenticated principal
-  router.get('/tokens', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/tokens', ...validateRequest({ query: collectionQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth: AuthContext | undefined = (req as any).authContext;
       if (!auth?.principal?.id) {
         res.status(401).json({ error: 'unauthorized', message: 'Not authenticated' });
         return;
       }
-      const tokens = await tokenService.list(auth.principal.id);
+      const tokens = await tokenService.listPage(auth.principal.id, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       // Never expose token_hash — only list metadata
       res.json(tokens);
     } catch (err) {

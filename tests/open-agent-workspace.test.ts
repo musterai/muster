@@ -155,7 +155,7 @@ describe('MUS-66 open-mode agent bootstrap workspace binding', () => {
     expect(heartbeat.body).toMatchObject({ id: registration.body.id, workspace_id: bootstrapWorkspace, status: 'active' });
 
     const listed = await invoke(handler(agentRouter, '/agents', 'get'), { authContext: OPEN_AUTH_CONTEXT });
-    expect(listed.body).toEqual(expect.arrayContaining([
+    expect(listed.body.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: registration.body.id, workspace_id: bootstrapWorkspace }),
     ]));
 
@@ -185,7 +185,7 @@ describe('MUS-66 open-mode agent bootstrap workspace binding', () => {
     });
 
     const listResult = await server._registeredTools.list_agents.handler({}, {});
-    expect(JSON.parse(listResult.content[0].text)).toEqual(expect.arrayContaining([
+    expect(JSON.parse(listResult.content[0].text).items).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: registration.id, workspace_id: bootstrapWorkspace }),
     ]));
 

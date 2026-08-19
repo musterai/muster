@@ -1,4 +1,11 @@
-import React, { Component, Suspense, useEffect, useRef } from 'react';
+import React, { Component, createContext, Suspense, useEffect, useRef } from 'react';
+
+export interface LazyDialogFocusHandoff {
+  opener: HTMLElement | null;
+  claimed: boolean;
+}
+
+export const LazyDialogFocusHandoffContext = createContext<LazyDialogFocusHandoff | null>(null);
 
 interface LazyBoundaryProps {
   label: string;
@@ -53,37 +60,54 @@ class LazyLoadErrorBoundary extends Component<LazyBoundaryProps, LazyBoundarySta
   }
 }
 
-export const LazyBoundary: React.FC<LazyBoundaryProps> = ({ label, resetKey, variant = 'view', children }) => (
-  <LazyLoadErrorBoundary label={label} resetKey={resetKey} variant={variant}>
-    <Suspense
-      fallback={variant === 'dialog' ? (
-        <div className="muster-scrim">
-          <div
-            role="status"
-            tabIndex={-1}
-            autoFocus
-            aria-live="polite"
-            aria-busy="true"
-            className="muster-dialog max-w-lg p-6 text-center text-sm muster-text-secondary"
-          >
-            Loading {label}…
-          </div>
-        </div>
-      ) : (
-        <div
-          role="status"
-          aria-live="polite"
-          aria-busy="true"
-          className="muster-panel m-auto max-w-lg p-6 text-center text-sm muster-text-secondary"
+export const LazyBoundary: React.FC<LazyBoundaryProps> = ({ label, resetKey, variant = 'view', children }) => {
+  const focusHandoffRef = useRef<LazyDialogFocusHandoff>({ opener: null, claimed: false });
+  if (
+    variant === 'dialog'
+    && focusHandoffRef.current.opener === null
+    && typeof document !== 'undefined'
+    && document.activeElement instanceof HTMLElement
+  ) {
+    // Capture before Suspense mounts and focuses its loading fallback. The
+    // first AccessibleDialog claims this opener; nested dialogs then capture
+    // their own trigger normally.
+    focusHandoffRef.current.opener = document.activeElement;
+  }
+
+  return (
+    <LazyLoadErrorBoundary label={label} resetKey={resetKey} variant={variant}>
+      <LazyDialogFocusHandoffContext.Provider value={variant === 'dialog' ? focusHandoffRef.current : null}>
+        <Suspense
+          fallback={variant === 'dialog' ? (
+            <div className="muster-scrim">
+              <div
+                role="status"
+                tabIndex={-1}
+                autoFocus
+                aria-live="polite"
+                aria-busy="true"
+                className="muster-dialog max-w-lg p-6 text-center text-sm muster-text-secondary"
+              >
+                Loading {label}…
+              </div>
+            </div>
+          ) : (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-busy="true"
+              className="muster-panel m-auto max-w-lg p-6 text-center text-sm muster-text-secondary"
+            >
+              Loading {label}…
+            </div>
+          )}
         >
-          Loading {label}…
-        </div>
-      )}
-    >
-      {children}
-    </Suspense>
-  </LazyLoadErrorBoundary>
-);
+          {children}
+        </Suspense>
+      </LazyDialogFocusHandoffContext.Provider>
+    </LazyLoadErrorBoundary>
+  );
+};
 
 interface LazyViewRegionProps {
   label: string;

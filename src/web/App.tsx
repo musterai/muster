@@ -119,6 +119,15 @@ export const App: React.FC = () => {
   const [notificationState, setNotificationState] = useState<'granted' | 'denied' | 'default' | 'unsupported'>(() =>
     typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
   );
+  const activeViewTitle: Record<TabType, string> = {
+    board: 'Kanban board',
+    agents: 'Agents',
+    docs: 'Design documents',
+    activity: 'Activity log',
+    kb: 'Knowledge base',
+    tokens: 'API tokens',
+    admin: 'Workspace administration',
+  };
 
   const activeBoardNotDoneCount = useMemo(() => {
     if (!selectedBoardId || !columns.length) return null;
@@ -570,7 +579,7 @@ export const App: React.FC = () => {
       />
 
       {connectionError && (
-        <div className="flex-none bg-danger-950 border-b border-danger-600/40 text-danger-300 text-xs font-sans px-4 py-2 text-center">
+        <div role="alert" className="flex-none bg-danger-950 border-b border-danger-600/40 text-danger-300 text-xs font-sans px-4 py-2 text-center">
           {connectionError}
         </div>
       )}
@@ -605,7 +614,8 @@ export const App: React.FC = () => {
       )}
 
       {/* Main Full-Width View Area */}
-      <main className="flex-1 flex flex-col min-h-0 w-full px-4 sm:px-6 lg:px-8 pt-4 pb-16 md:pb-4 overflow-hidden">
+      <main aria-labelledby="active-view-heading" className="flex-1 flex flex-col min-h-0 w-full px-4 sm:px-6 lg:px-8 pt-4 pb-16 md:pb-4 overflow-hidden">
+        <h1 id="active-view-heading" className="sr-only">{activeViewTitle[activeTab]}</h1>
 
         {activeTab === 'agents' && (
           <LazyBoundary label="Agents" resetKey="agents">
