@@ -5,6 +5,8 @@ import { Column, CreateColumn, UpdateColumn } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { ValidationError } from '../shared/errors.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
 
 export class ColumnService {
   constructor(
@@ -59,10 +61,11 @@ export class ColumnService {
     return ranks;
   }
 
-  async create(data: CreateColumn, actorId?: string, adapter?: DatabaseAdapter): Promise<Column> {
-    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+  async create(data: CreateColumn, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Column> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx, auth));
 
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'board', data.board_id);
     const id = ulid();
     this.assertPosition(data.position);
     const wip_limit = data.wip_limit !== undefined ? data.wip_limit : null;
@@ -107,19 +110,22 @@ export class ColumnService {
     return col;
   }
 
-  async getById(id: string): Promise<Column | null> {
+  async getById(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Column | null> {
+    await assertResourceWorkspace(this.db, auth, 'column', id);
     const rows = await this.db.query<Column>('SELECT * FROM "column" WHERE id = ?', [id]);
     return rows[0] || null;
   }
 
-  async list(boardId: string): Promise<Column[]> {
+  async list(boardId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Column[]> {
+    await assertResourceWorkspace(this.db, auth, 'board', boardId);
     return this.db.query<Column>('SELECT * FROM "column" WHERE board_id = ? ORDER BY position ASC, id ASC', [boardId]);
   }
 
-  async update(id: string, data: UpdateColumn, actorId?: string, adapter?: DatabaseAdapter): Promise<Column> {
-    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+  async update(id: string, data: UpdateColumn, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Column> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx, auth));
 
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'column', id);
     this.assertPosition(data.position);
     const hintRows = await db.query<Pick<Column, 'board_id'>>('SELECT board_id FROM "column" WHERE id = ?', [id]);
     const hint = hintRows[0];
@@ -172,9 +178,10 @@ export class ColumnService {
     return updated;
   }
 
-  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'column', id);
     const rows = await db.query<Column>('SELECT * FROM "column" WHERE id = ?', [id]);
     const existing = rows[0] || null;
     if (!existing) throw new Error(`Column with ID ${id} not found`);

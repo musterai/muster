@@ -92,6 +92,8 @@ describe('MUS-59 REST credential-derived attribution', () => {
     expect(create).toHaveBeenCalledWith(
       expect.not.objectContaining({ author_id: expect.anything() }),
       'real-principal',
+      undefined,
+      expect.objectContaining({ workspace_id: 'workspace-1' }),
     );
 
     const updateResponse = await fetch(`${baseUrl}/documents/document-1`, {
@@ -107,6 +109,8 @@ describe('MUS-59 REST credential-derived attribution', () => {
       'document-1',
       expect.not.objectContaining({ author_id: expect.anything() }),
       'real-principal',
+      undefined,
+      expect.objectContaining({ workspace_id: 'workspace-1' }),
     );
   });
 

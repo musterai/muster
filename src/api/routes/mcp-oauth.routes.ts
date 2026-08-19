@@ -187,9 +187,9 @@ export function createMcpOAuthRouter(
         return;
       }
 
-      const agents = await agentService.list(auth.workspace_id);
+      const agents = await agentService.list(auth);
       const myAgents = agents.filter(a => a.operator_user_id === auth.principal!.id);
-      const roles = await roleService.list(auth.workspace_id);
+      const roles = await roleService.list(auth.workspace_id, auth);
 
       res.json({
         client_name: client.client_name || client.client_id,
@@ -243,6 +243,10 @@ export function createMcpOAuthRouter(
       let agentPrincipalId: string;
       if (typeof agent_id === 'string' && agent_id) {
         const existing = await agentService.assertAgentScope(agent_id, auth, 'agent.manage_others');
+        if (!existing || existing.operator_user_id !== auth.principal.id) {
+          res.status(403).json({ error: 'invalid_request', error_description: 'That agent is not one you operate.' });
+          return;
+        }
         agentPrincipalId = existing.id;
         if (existing.role_id !== role_id) {
           await agentService.update(existing.id, { role_id }, { workspaceId: auth.workspace_id, auth });

@@ -7,6 +7,8 @@
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { ValidationError } from '../shared/errors.js';
+import type { AuthContext } from '../shared/auth-context.js';
+import { assertResourceWorkspace, assertWorkspace } from './helpers/workspace-scope.helper.js';
 
 export interface AppUser {
   id: string;
@@ -182,7 +184,8 @@ export class UserService {
    * and the agent roster's operator lookup (MUS-32) both read this. No
    * liveness/status column: that telemetry is agent-only, see design §4.1.
    */
-  async listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+  async listMembers(workspaceId: string, auth?: AuthContext): Promise<WorkspaceMember[]> {
+    if (auth) assertWorkspace(auth, workspaceId);
     return this.db.query<WorkspaceMember>(
       `SELECT u.id, u.email, u.display_name, u.avatar_url, wm.role_id, r.name as role_name, wm.joined_at
        FROM workspace_member wm
@@ -282,8 +285,12 @@ export class UserService {
   }
 
   /** Change a member's role. Refuses to demote the last remaining admin — a workspace must always keep an owner. */
-  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.changeMemberRole(workspaceId, userId, newRoleId, tx));
+  async changeMemberRole(workspaceId: string, userId: string, newRoleId: string, adapter?: DatabaseAdapter, auth?: AuthContext): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.changeMemberRole(workspaceId, userId, newRoleId, tx, auth));
+    if (auth) {
+      assertWorkspace(auth, workspaceId);
+      await assertResourceWorkspace(adapter, auth, 'role', newRoleId);
+    }
     await (async tx => {
       await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(
@@ -322,8 +329,9 @@ export class UserService {
    * "Unassigned" group rather than being deleted or left pointing at a
    * principal no longer in the workspace.
    */
-  async removeMember(workspaceId: string, userId: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.removeMember(workspaceId, userId, tx));
+  async removeMember(workspaceId: string, userId: string, adapter?: DatabaseAdapter, auth?: AuthContext): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.removeMember(workspaceId, userId, tx, auth));
+    if (auth) assertWorkspace(auth, workspaceId);
     await (async tx => {
       await this.lockWorkspaceMembers(workspaceId, tx);
       const memberRows = await tx.query<{ role_id: string }>(

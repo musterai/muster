@@ -240,7 +240,13 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
       const nameInput = page.locator('input[placeholder="Your display name"], input[placeholder="Your name"]');
       if (await nameInput.isVisible()) {
         await nameInput.fill('Browser UI Tester');
-        await page.getByRole('button', { name: /Save \/ Switch Name|Save/i }).click();
+        const [identityResponse] = await Promise.all([
+          page.waitForResponse((response) => response.url().endsWith('/api/v1/auth/local')),
+          page.getByRole('button', { name: 'Save / Switch Name', exact: true }).click(),
+        ]);
+        if (!identityResponse.ok()) {
+          throw new Error(`Local identity request failed (${identityResponse.status()}): ${await identityResponse.text()}`);
+        }
         await page.waitForSelector('text=Browser UI Tester');
         console.log('  ✓ Open-mode browser identity established.');
       }

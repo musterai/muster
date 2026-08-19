@@ -597,17 +597,17 @@ All AI agents and human operators collaborating within Muster must follow this p
 
   // --- Project Tools ---
   server.tool('list_projects', {}, withPermission('list_projects', auth, async () => {
-    const projects = await services.projectService.list();
+    const projects = await services.projectService.list(auth);
     return { content: [{ type: 'text', text: JSON.stringify(projects, null, 2) }] };
   }));
 
   server.tool('create_project', { name: z.string(), description: z.string().optional() }, withPermission('create_project', auth, async (args) => {
-    const project = await services.projectService.create(args, resolveActor(auth));
+    const project = await services.projectService.create(args, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(project, null, 2) }] };
   }));
 
   server.tool('get_project_summary', { project_id: z.string() }, withPermission('get_project_summary', auth, async ({ project_id }) => {
-    const summary = await services.projectService.getSummary(project_id);
+    const summary = await services.projectService.getSummary(project_id, auth);
     return { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }] };
   }));
 
@@ -619,7 +619,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       description: z.string().optional(),
     },
     withPermission('update_project', auth, async ({ project_id, ...data }) => {
-      const project = await services.projectService.update(project_id, data, resolveActor(auth));
+      const project = await services.projectService.update(project_id, data, resolveActor(auth), undefined, auth);
       return { content: [{ type: 'text', text: JSON.stringify(project, null, 2) }] };
     })
   );
@@ -629,13 +629,13 @@ All AI agents and human operators collaborating within Muster must follow this p
       action: 'project.delete',
       target_type: 'project',
       target_id: project_id,
-    }, tx => services.projectService.delete(project_id, resolveActor(auth), tx));
+    }, tx => services.projectService.delete(project_id, resolveActor(auth), tx, auth));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Project ${project_id} deleted` }) }] };
   }));
 
   // --- Board & Column Tools ---
   server.tool('list_boards', { project_id: z.string() }, withPermission('list_boards', auth, async ({ project_id }) => {
-    const boards = await services.boardService.list(project_id);
+    const boards = await services.boardService.list(project_id, auth);
     return { content: [{ type: 'text', text: JSON.stringify(boards, null, 2) }] };
   }));
 
@@ -648,27 +648,27 @@ All AI agents and human operators collaborating within Muster must follow this p
       columns: z.array(z.string()).optional(),
     },
     withPermission('create_board', auth, async (args) => {
-      const board = await services.boardService.create(args, resolveActor(auth));
+      const board = await services.boardService.create(args, resolveActor(auth), undefined, auth);
       return { content: [{ type: 'text', text: JSON.stringify(board, null, 2) }] };
     })
   );
 
   server.tool('update_board', { board_id: z.string(), name: z.string() }, withPermission('update_board', auth, async ({ board_id, name }) => {
-    const board = await services.boardService.update(board_id, { name }, resolveActor(auth));
+    const board = await services.boardService.update(board_id, { name }, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(board, null, 2) }] };
   }));
 
   server.tool('delete_board', { board_id: z.string() }, withPermission('delete_board', auth, async ({ board_id }) => {
-    await services.boardService.delete(board_id, resolveActor(auth));
+    await services.boardService.delete(board_id, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Board ${board_id} deleted` }) }] };
   }));
 
   server.tool('get_board', { board_id: z.string() }, withPermission('get_board', auth, async ({ board_id }) => {
-    const board = await services.boardService.getById(board_id);
+    const board = await services.boardService.getById(board_id, auth);
     if (!board) throw new Error(`Board ${board_id} not found`);
 
-    const columns = await services.columnService.list(board_id);
-    const cards = await services.cardService.list({ board_id });
+    const columns = await services.columnService.list(board_id, auth);
+    const cards = await services.cardService.list({ board_id }, auth);
 
     return {
       content: [{ type: 'text', text: JSON.stringify({ ...board, columns, cards }, null, 2) }],
@@ -681,7 +681,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     position: z.string().optional(),
     wip_limit: z.number().optional()
   }, withPermission('create_column', auth, async (args) => {
-    const col = await services.columnService.create(args);
+    const col = await services.columnService.create(args, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(col, null, 2) }] };
   }));
 
@@ -691,17 +691,17 @@ All AI agents and human operators collaborating within Muster must follow this p
     wip_limit: z.number().nullable().optional(),
     position: z.string().optional()
   }, withPermission('update_column', auth, async ({ column_id, ...data }) => {
-    const col = await services.columnService.update(column_id, data);
+    const col = await services.columnService.update(column_id, data, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(col, null, 2) }] };
   }));
 
   server.tool('move_column', { column_id: z.string(), position: z.string() }, withPermission('move_column', auth, async ({ column_id, position }) => {
-    const col = await services.columnService.update(column_id, { position });
+    const col = await services.columnService.update(column_id, { position }, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(col, null, 2) }] };
   }));
 
   server.tool('delete_column', { column_id: z.string() }, withPermission('delete_column', auth, async ({ column_id }) => {
-    await services.columnService.delete(column_id);
+    await services.columnService.delete(column_id, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Column ${column_id} deleted` }) }] };
   }));
 
@@ -714,7 +714,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     label: z.string().optional(),
     archived: z.boolean().optional()
   }, withPermission('list_cards', auth, async (filters) => {
-    const cards = await services.cardService.list(filters);
+    const cards = await services.cardService.list(filters, auth);
     return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
   }));
 
@@ -727,13 +727,13 @@ All AI agents and human operators collaborating within Muster must follow this p
     const cards = await services.cardService.searchByTitle(project_id, query, {
       excludeCardId: exclude_card_id,
       limit,
-    });
+    }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
   }));
 
   server.tool('create_card', mcpCardCreateInputSchema.shape, withPermission('create_card', auth, async ({ operator_override, ...args }) => {
     const card = await services.cardService.create(args, resolveActor(auth), {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override),
+      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
     return { content: [{ type: 'text', text: JSON.stringify(card, null, 2) }] };
   }));
@@ -741,7 +741,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   server.tool('get_card', {
     card_id: cardReferenceSchema,
   }, withPermission('get_card', auth, async ({ card_id }) => {
-    const details = await services.cardService.getById(card_id);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
@@ -755,16 +755,14 @@ All AI agents and human operators collaborating within Muster must follow this p
     operator_override: z.boolean().optional().describe('Explicitly bypass card WIP rules when the authenticated caller has operator override authority'),
   }, withPermission('update_card', auth, async ({ card_id, operator_override, ...data }) => {
     const details = await services.cardService.update(card_id, data, resolveActor(auth), {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override),
-      auth,
+      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.registerTool('move_card', { inputSchema: moveCardInputSchema }, withPermission('move_card', auth, async ({ card_id, target_column_id, position, operator_override }) => {
     const details = await services.cardService.move(card_id, { target_column_id, position }, resolveActor(auth), {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override),
-      auth,
+      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
@@ -776,8 +774,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     operator_override: z.boolean().optional().describe('Explicitly bypass blocker rules when the authenticated caller has operator override authority'),
   }, withPermission('claim_card', auth, async ({ card_id, agent_id, ttl_seconds, operator_override }) => {
     const result = await services.cardService.claim(card_id, agent_id, ttl_seconds, resolveActor(auth) || agent_id, {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override),
-      auth,
+      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
     const response = 'success' in result && result.success === false
       ? result
@@ -790,13 +787,13 @@ All AI agents and human operators collaborating within Muster must follow this p
 
   server.tool('assign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('assign_card', auth, async ({ card_id, agent_id }) => {
     await services.cardService.assign(card_id, agent_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('unassign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('unassign_card', auth, async ({ card_id, agent_id }) => {
     await services.cardService.unassign(card_id, agent_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
@@ -811,7 +808,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     // author_id/agent_id in args are only ever honored by resolveActor() in
     // open mode (see its doc comment) — the authenticated principal wins otherwise.
     const author_id = resolveActor(auth, args);
-    const comment = await services.commentService.create({ ...args, author_id });
+    const comment = await services.commentService.create({ ...args, author_id }, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(comment, null, 2) }] };
   }));
 
@@ -820,7 +817,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     content: z.string(),
   }, withPermission('update_comment', auth, async ({ comment_id, content }) => {
     await requireCommentOwnershipOrAdmin(services.commentService, auth, comment_id, 'edit');
-    const comment = await services.commentService.update(comment_id, content, resolveActor(auth));
+    const comment = await services.commentService.update(comment_id, content, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(comment, null, 2) }] };
   }));
 
@@ -828,39 +825,39 @@ All AI agents and human operators collaborating within Muster must follow this p
     comment_id: z.string(),
   }, withPermission('delete_comment', auth, async ({ comment_id }) => {
     await requireCommentOwnershipOrAdmin(services.commentService, auth, comment_id, 'delete');
-    await services.commentService.delete(comment_id, resolveActor(auth));
+    await services.commentService.delete(comment_id, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Comment ${comment_id} deleted` }) }] };
   }));
 
   server.tool('add_label', { card_id: cardReferenceSchema, label_id: z.string() }, withPermission('add_label', auth, async ({ card_id, label_id }) => {
-    await services.cardService.addLabel(card_id, label_id, resolveActor(auth));
+    await services.cardService.addLabel(card_id, label_id, resolveActor(auth), auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
   }));
 
   server.tool('remove_label', { card_id: cardReferenceSchema, label_id: z.string() }, withPermission('remove_label', auth, async ({ card_id, label_id }) => {
-    await services.cardService.removeLabel(card_id, label_id, resolveActor(auth));
+    await services.cardService.removeLabel(card_id, label_id, resolveActor(auth), auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
   }));
 
   server.tool('archive_card', { card_id: cardReferenceSchema }, withPermission('archive_card', auth, async ({ card_id }) => {
-    await services.cardService.archive(card_id, resolveActor(auth));
+    await services.cardService.archive(card_id, resolveActor(auth), auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
   }));
 
   server.tool('delete_card', { card_id: cardReferenceSchema }, withPermission('delete_card', auth, async ({ card_id }) => {
-    await services.cardService.delete(card_id, resolveActor(auth));
+    await services.cardService.delete(card_id, resolveActor(auth), auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Card ${card_id} deleted` }) }] };
   }));
 
   server.tool('link_document_to_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('link_document_to_card', auth, async ({ card_id, document_id }) => {
-    await services.cardService.linkDocument(card_id, document_id, resolveActor(auth));
-    const details = await services.cardService.getById(card_id);
+    await services.cardService.linkDocument(card_id, document_id, resolveActor(auth), auth);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('unlink_document_from_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('unlink_document_from_card', auth, async ({ card_id, document_id }) => {
-    await services.cardService.unlinkDocument(card_id, document_id, resolveActor(auth));
-    const details = await services.cardService.getById(card_id);
+    await services.cardService.unlinkDocument(card_id, document_id, resolveActor(auth), auth);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
@@ -869,14 +866,14 @@ All AI agents and human operators collaborating within Muster must follow this p
     target_card_id: cardReferenceSchema,
     relation_type: z.enum(['blocks', 'blocked_by', 'relates_to', 'duplicates', 'parent_of', 'child_of']),
   }, withPermission('link_card', auth, async ({ card_id, target_card_id, relation_type }) => {
-    await services.cardService.linkCard(card_id, target_card_id, relation_type, resolveActor(auth));
-    const details = await services.cardService.getById(card_id);
+    await services.cardService.linkCard(card_id, target_card_id, relation_type, resolveActor(auth), auth);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('unlink_card', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('unlink_card', auth, async ({ card_id, link_id }) => {
-    await services.cardService.unlinkCard(card_id, link_id, resolveActor(auth));
-    const details = await services.cardService.getById(card_id);
+    await services.cardService.unlinkCard(card_id, link_id, resolveActor(auth), auth);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
@@ -889,29 +886,29 @@ All AI agents and human operators collaborating within Muster must follow this p
     title: z.string().optional(),
     status: z.string().optional(),
   }, withPermission('add_work_link', auth, async ({ card_id, ...data }) => {
-    await services.cardService.addWorkLink(card_id, data, resolveActor(auth));
-    const details = await services.cardService.getById(card_id);
+    await services.cardService.addWorkLink(card_id, data, resolveActor(auth), auth);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('remove_work_link', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('remove_work_link', auth, async ({ card_id, link_id }) => {
-    await services.cardService.removeWorkLink(card_id, link_id, resolveActor(auth));
-    const details = await services.cardService.getById(card_id);
+    await services.cardService.removeWorkLink(card_id, link_id, resolveActor(auth), auth);
+    const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('list_work_links', { card_id: cardReferenceSchema }, withPermission('list_work_links', auth, async ({ card_id }) => {
-    const links = await services.cardService.listWorkLinks(card_id);
+    const links = await services.cardService.listWorkLinks(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(links, null, 2) }] };
   }));
 
   server.tool('create_label', { board_id: z.string(), name: z.string(), color: z.string() }, withPermission('create_label', auth, async (args) => {
-    const result = await services.boardService.createLabel(args);
+    const result = await services.boardService.createLabel(args, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
   server.tool('list_labels', { board_id: z.string() }, withPermission('list_labels', auth, async ({ board_id }) => {
-    const result = await services.boardService.listLabels(board_id);
+    const result = await services.boardService.listLabels(board_id, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -921,7 +918,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     status: z.string().optional(),
     parent_id: z.string().nullable().optional()
   }, withPermission('list_documents', auth, async ({ project_id, ...filters }) => {
-    const result = await services.documentService.list(project_id, filters);
+    const result = await services.documentService.list(project_id, filters, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -932,12 +929,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     parent_id: z.string().optional(),
   }, withPermission('create_document', auth, async (args) => {
     const author_id = resolveActor(auth);
-    const result = await services.documentService.create({ ...args, author_id });
+    const result = await services.documentService.create({ ...args, author_id }, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
   server.tool('get_document', { document_id: z.string() }, withPermission('get_document', auth, async ({ document_id }) => {
-    const result = await services.documentService.getById(document_id);
+    const result = await services.documentService.getById(document_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -948,7 +945,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     change_summary: z.string().optional(),
   }, withPermission('update_document', auth, async ({ document_id, ...data }) => {
     const author_id = resolveActor(auth);
-    const result = await services.documentService.update(document_id, { ...data, author_id });
+    const result = await services.documentService.update(document_id, { ...data, author_id }, undefined, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -962,12 +959,12 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.tool('get_document_history', { document_id: z.string() }, withPermission('get_document_history', auth, async ({ document_id }) => {
-    const result = await services.documentService.getHistory(document_id);
+    const result = await services.documentService.getHistory(document_id, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
   server.tool('delete_document', { document_id: z.string() }, withPermission('delete_document', auth, async ({ document_id }) => {
-    await services.documentService.delete(document_id, resolveActor(auth));
+    await services.documentService.delete(document_id, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Document ${document_id} deleted` }) }] };
   }));
 
@@ -1048,7 +1045,7 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.tool('list_agents', {}, withPermission('list_agents', auth, async () => {
-    const result = await services.agentService.list(config.auth.mode === 'enforced' ? auth.workspace_id : undefined);
+    const result = await services.agentService.list(auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -1059,13 +1056,13 @@ All AI agents and human operators collaborating within Muster must follow this p
     entity_id: z.string().optional(),
     limit: z.number().optional()
   }, withPermission('get_activity', auth, async ({ project_id, ...filters }) => {
-    const result = await services.eventService.list(project_id, filters);
+    const result = await services.eventService.list(project_id, filters, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
   // --- Knowledge Base Tools ---
   server.tool('list_knowledge_bases', { project_id: z.string().optional() }, withPermission('list_knowledge_bases', auth, async ({ project_id }) => {
-    const kbs = await services.kbService.list(project_id);
+    const kbs = await services.kbService.list(project_id, auth);
     return { content: [{ type: 'text', text: JSON.stringify(kbs, null, 2) }] };
   }));
 
@@ -1076,7 +1073,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     project_ids: z.array(z.string()).optional(),
     agent_id: z.string().optional(),
   }, withPermission('create_knowledge_base', auth, async (args) => {
-    const kb = await services.kbService.create(args, resolveActor(auth));
+    const kb = await services.kbService.create(args, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(kb, null, 2) }] };
   }));
 
@@ -1085,7 +1082,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     project_id: z.string(),
     agent_id: z.string().optional(),
   }, withPermission('link_knowledge_base', auth, async (args) => {
-    await services.kbService.linkProject(args.kb_id, args.project_id, resolveActor(auth));
+    await services.kbService.linkProject(args.kb_id, args.project_id, resolveActor(auth), undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `KB ${args.kb_id} linked to project ${args.project_id}` }) }] };
   }));
 
@@ -1099,10 +1096,10 @@ All AI agents and human operators collaborating within Muster must follow this p
     if (kb_id) {
       kbIds = [kb_id];
     } else if (project_id) {
-      const kbs = await services.kbService.list(project_id);
+      const kbs = await services.kbService.list(project_id, auth);
       kbIds = kbs.map(k => k.id);
     }
-    const results = await services.kbService.searchKnowledge(query, kbIds, limit);
+    const results = await services.kbService.searchKnowledge(query, kbIds, limit, auth);
     return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
   }));
 
@@ -1110,7 +1107,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     query: z.string().describe('Entity ID, canonical identifier (IP, email, hostname), or entity name'),
     kb_id: z.string().optional()
   }, withPermission('get_entity_knowledge', auth, async ({ query, kb_id }) => {
-    const result = await services.kbService.getEntityKnowledge(query, kb_id ? [kb_id] : undefined);
+    const result = await services.kbService.getEntityKnowledge(query, kb_id ? [kb_id] : undefined, auth);
     if (!result) return { content: [{ type: 'text', text: `No entity knowledge found for \"${query}\"` }] };
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
@@ -1128,7 +1125,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     agent_id: z.string().optional(),
   }, withPermission('add_gained_knowledge', auth, async (args) => {
     const actorId = resolveActor(auth);
-    const fact = await services.kbService.addFact(args, actorId);
+    const fact = await services.kbService.addFact(args, actorId, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(fact, null, 2) }] };
   }));
 
@@ -1141,7 +1138,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     agent_id: z.string().optional(),
   }, withPermission('upsert_kb_entity', auth, async (args) => {
     const actorId = resolveActor(auth);
-    const entity = await services.kbService.upsertEntity(args, actorId);
+    const entity = await services.kbService.upsertEntity(args, actorId, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(entity, null, 2) }] };
   }));
 
@@ -1158,7 +1155,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     agent_id: z.string().optional(),
   }, withPermission('update_gained_knowledge', auth, async ({ fact_id, ...data }) => {
     const actorId = resolveActor(auth);
-    const fact = await services.kbService.updateFact(fact_id, data, actorId);
+    const fact = await services.kbService.updateFact(fact_id, data, actorId, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(fact, null, 2) }] };
   }));
 
@@ -1171,7 +1168,7 @@ All AI agents and human operators collaborating within Muster must follow this p
     agent_id: z.string().optional(),
   }, withPermission('update_kb_entity', auth, async ({ entity_id, ...data }) => {
     const actorId = resolveActor(auth);
-    const entity = await services.kbService.updateEntity(entity_id, data, actorId);
+    const entity = await services.kbService.updateEntity(entity_id, data, actorId, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(entity, null, 2) }] };
   }));
 
@@ -1184,18 +1181,18 @@ All AI agents and human operators collaborating within Muster must follow this p
     agent_id: z.string().optional(),
   }, withPermission('add_kb_relation', auth, async (args) => {
     const actorId = resolveActor(auth);
-    const relation = await services.kbService.addRelation(args, actorId);
+    const relation = await services.kbService.addRelation(args, actorId, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(relation, null, 2) }] };
   }));
 
   // --- Role Management Tools ---
   server.tool('list_roles', { workspace_id: z.string() }, withPermission('list_roles', auth, async ({ workspace_id }) => {
-    const roles = await services.roleService.list(workspace_id);
+    const roles = await services.roleService.list(workspace_id, auth);
     return { content: [{ type: 'text', text: JSON.stringify(roles, null, 2) }] };
   }));
 
   server.tool('get_role', { role_id: z.string() }, withPermission('get_role', auth, async ({ role_id }) => {
-    const role = await services.roleService.getById(role_id);
+    const role = await services.roleService.getById(role_id, auth);
     if (!role) throw new Error(`Role ${role_id} not found`);
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
@@ -1213,7 +1210,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       target_type: 'role',
       target_id: role.id,
       payload: { workspace_id: args.workspace_id, key: role.key, name: role.name },
-    }), tx => services.roleService.create(args, tx));
+    }), tx => services.roleService.create(args, tx, auth));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 
@@ -1229,7 +1226,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       target_type: 'role',
       target_id: role_id,
       payload: data,
-    }, tx => services.roleService.update(role_id, data, tx));
+    }, tx => services.roleService.update(role_id, data, tx, auth));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 
@@ -1238,7 +1235,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       action: 'role.delete',
       target_type: 'role',
       target_id: role_id,
-    }, tx => services.roleService.delete(role_id, tx));
+    }, tx => services.roleService.delete(role_id, tx, auth));
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Role ${role_id} deleted` }) }] };
   }));
 
@@ -1252,7 +1249,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       target_type: 'role',
       target_id: role.id,
       payload: { from: role_id, key: role.key, name: role.name },
-    }), tx => services.roleService.clone(role_id, new_key, new_name, tx));
+    }), tx => services.roleService.clone(role_id, new_key, new_name, tx, auth));
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 

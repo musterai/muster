@@ -12,7 +12,7 @@ export function createProjectRouter(db: DatabaseAdapter, projectService: Project
 
   router.get('/', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const projects = await projectService.list();
+      const projects = await projectService.list(req.authContext);
       res.json(projects);
     } catch (err) {
       next(err);
@@ -21,7 +21,7 @@ export function createProjectRouter(db: DatabaseAdapter, projectService: Project
 
   router.post('/', ...validateRequest({ body: projectCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const project = await projectService.create(req.body);
+      const project = await projectService.create(req.body, req.authContext?.principal?.id, undefined, req.authContext);
       res.status(201).json(project);
     } catch (err) {
       next(err);
@@ -30,7 +30,7 @@ export function createProjectRouter(db: DatabaseAdapter, projectService: Project
 
   router.get('/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const project = await projectService.getById(req.params.id);
+      const project = await projectService.getById(req.params.id, req.authContext);
       if (!project) return res.status(404).json({ error: 'Project not found' });
       res.json(project);
     } catch (err) {
@@ -40,7 +40,7 @@ export function createProjectRouter(db: DatabaseAdapter, projectService: Project
 
   router.put('/:id', ...validateRequest({ body: projectUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const project = await projectService.update(req.params.id, req.body);
+      const project = await projectService.update(req.params.id, req.body, req.authContext?.principal?.id, undefined, req.authContext);
       res.json(project);
     } catch (err) {
       next(err);
@@ -52,7 +52,7 @@ export function createProjectRouter(db: DatabaseAdapter, projectService: Project
       await db.transaction(async tx => {
         const projectRows = await tx.query<{ name: string }>('SELECT name FROM project WHERE id = ?', [req.params.id]);
         const project = projectRows[0];
-        await projectService.delete(req.params.id, req.authContext?.principal?.id, tx);
+        await projectService.delete(req.params.id, req.authContext?.principal?.id, tx, req.authContext);
         const auth: AuthContext | undefined = (req as any).authContext;
         await auditService.logAs(auth, {
           action: 'project.delete',
@@ -70,7 +70,7 @@ export function createProjectRouter(db: DatabaseAdapter, projectService: Project
 
   router.get('/:id/summary', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const summary = await projectService.getSummary(req.params.id);
+      const summary = await projectService.getSummary(req.params.id, req.authContext);
       res.json(summary);
     } catch (err: any) {
       if (err?.message?.includes('not found')) {

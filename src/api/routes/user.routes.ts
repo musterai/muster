@@ -37,7 +37,7 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
         res.json([]);
         return;
       }
-      const members = await userService.listMembers(workspaceId);
+      const members = await userService.listMembers(workspaceId, req.authContext);
       res.json(members);
     } catch (err) {
       next(err);
@@ -47,12 +47,12 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
   router.put('/workspaces/:workspaceId/members/:userId', ...validateRequest({ body: memberRoleSchema, params: workspaceMemberParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       requireWorkspacePathScope(req);
-      const targetRole = await roleService.getById(req.body.role_id);
+      const targetRole = await roleService.getById(req.body.role_id, req.authContext);
       if (targetRole) {
         assertPermissionsGrantable(req.authContext || OPEN_AUTH_CONTEXT, targetRole.permissions);
       }
       await db.transaction(async tx => {
-        await userService.changeMemberRole(req.params.workspaceId, req.params.userId, req.body.role_id, tx);
+        await userService.changeMemberRole(req.params.workspaceId, req.params.userId, req.body.role_id, tx, req.authContext);
         await auditService.logAs(req.authContext, {
           workspace_id: req.params.workspaceId,
           action: 'member.role_change',
@@ -62,7 +62,7 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
           ip: req.ip,
         }, tx);
       });
-      const members = await userService.listMembers(req.params.workspaceId);
+      const members = await userService.listMembers(req.params.workspaceId, req.authContext);
       res.json(members.find(m => m.id === req.params.userId) || null);
     } catch (err) {
       next(err);
@@ -73,7 +73,7 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
     try {
       requireWorkspacePathScope(req);
       await db.transaction(async tx => {
-        await userService.removeMember(req.params.workspaceId, req.params.userId, tx);
+        await userService.removeMember(req.params.workspaceId, req.params.userId, tx, req.authContext);
         await auditService.logAs(req.authContext, {
           workspace_id: req.params.workspaceId,
           action: 'member.remove',
