@@ -30,8 +30,12 @@ import {
   projectIdParamsSchema,
 } from '../schemas.js';
 
+function getAuth(req: Request): AuthContext | undefined {
+  return (req as any).authContext;
+}
+
 function getActorId(req: Request): string | undefined {
-  const auth: AuthContext | undefined = (req as any).authContext;
+  const auth = getAuth(req);
   return auth?.principal?.id;
 }
 
@@ -77,7 +81,10 @@ async function requireCommentOwnershipOrAdmin(
   return commentService.validateCommentOwnership(commentId, auth.principal.id);
 }
 
-export function createCardRouter(cardService: CardService, commentService: CommentService): Router {
+export function createCardRouter(
+  cardService: CardService,
+  commentService: CommentService,
+): Router {
   const router = Router();
 
   router.get('/projects/:projectId/cards/search', ...validateRequest({ query: cardSearchQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
@@ -148,6 +155,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
       const actorId = getActorId(req);
       const card = await cardService.update(req.params.id, req.body, actorId, {
         operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override),
+        auth: getAuth(req),
       });
       res.json(card);
     } catch (err) {
@@ -160,6 +168,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
       const actorId = getActorId(req);
       const card = await cardService.move(req.params.id, req.body, actorId, {
         operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override),
+        auth: getAuth(req),
       });
       res.json(card);
     } catch (err) {
@@ -224,7 +233,10 @@ export function createCardRouter(cardService: CardService, commentService: Comme
         agentId,
         req.body.ttl_seconds,
         getActorId(req) || agentId,
-        { operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override) },
+        {
+          operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override),
+          auth: getAuth(req),
+        },
       );
       res.status('success' in result && result.success === false ? 409 : 200).json(result);
     } catch (err) {
@@ -234,7 +246,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.post('/cards/:id/assignees', ...validateRequest({ body: cardAssigneeSchema, params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.assign(req.params.id, req.body.agent_id);
+      await cardService.assign(req.params.id, req.body.agent_id, getActorId(req), getAuth(req));
       const card = await cardService.getById(req.params.id);
       res.json(card);
     } catch (err) {
@@ -244,7 +256,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.delete('/cards/:id/assignees/:agentId', ...validateRequest({ params: cardAgentParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.unassign(req.params.id, req.params.agentId);
+      await cardService.unassign(req.params.id, req.params.agentId, getActorId(req), getAuth(req));
       const card = await cardService.getById(req.params.id);
       res.json(card);
     } catch (err) {
