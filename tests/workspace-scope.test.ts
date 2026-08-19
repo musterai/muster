@@ -170,8 +170,20 @@ describe('MUS-66 workspace isolation', () => {
       title: 'Bravo secret fact',
       content: 'Must remain private',
     }, 'user-b', undefined, authB);
+    const invalidFactId = 'invalid-cross-workspace-fact-binding';
+    await db.execute(
+      `INSERT INTO kb_fact
+       (id, kb_id, entity_id, title, content, category, confidence, source_principal_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [invalidFactId, kbA.id, entityB.id, 'Alpha malformed fact', 'Must remain private', 'general', 1, null, now, now],
+    );
     expect((await kbs.listFacts(undefined, undefined, undefined, authA)).map(fact => fact.id))
       .toEqual([factA.id]);
+    const serviceSearch = await kbs.searchKnowledge('fact', undefined, 20, authA);
+    expect(serviceSearch.facts.map(fact => fact.id)).toEqual([factA.id]);
+    expect(serviceSearch.facts[0]).toMatchObject({ entity_id: entityA.id, entity_name: 'Alpha entity' });
+    expect(JSON.stringify(serviceSearch)).not.toContain(entityB.id);
+    expect(JSON.stringify(serviceSearch)).not.toContain('Bravo entity');
 
     // Simulate a malformed/imported graph edge that satisfies SQL foreign
     // keys but violates the common-KB/workspace invariant. Read paths must
@@ -207,6 +219,12 @@ describe('MUS-66 workspace isolation', () => {
       kb_id: kbA.id,
     }, {});
     expect(JSON.parse(mcpKnowledge.content[0].text).outgoing_relations).toEqual([]);
+    const mcpSearch = await scopedMcp._registeredTools.search_knowledge.handler({ query: 'fact' }, {});
+    const mcpSearchPayload = JSON.parse(mcpSearch.content[0].text);
+    expect(mcpSearchPayload.facts.map((fact: { id: string }) => fact.id)).toEqual([factA.id]);
+    expect(mcpSearchPayload.facts[0]).toMatchObject({ entity_id: entityA.id, entity_name: 'Alpha entity' });
+    expect(mcpSearch.content[0].text).not.toContain(entityB.id);
+    expect(mcpSearch.content[0].text).not.toContain('Bravo entity');
 
     const kbRouter = createKBRouter(kbs) as any;
     const kbRouteHandler = (routePath: string) => kbRouter.stack
@@ -219,6 +237,16 @@ describe('MUS-66 workspace isolation', () => {
       (error?: unknown) => { if (error) throw error; },
     );
     expect(restKnowledge.outgoing_relations).toEqual([]);
+    let restSearch: any;
+    await kbRouteHandler('/kbs/search')(
+      { query: { q: 'fact' }, authContext: authA },
+      { json: (payload: any) => { restSearch = payload; } },
+      (error?: unknown) => { if (error) throw error; },
+    );
+    expect(restSearch.facts.map((fact: { id: string }) => fact.id)).toEqual([factA.id]);
+    expect(restSearch.facts[0]).toMatchObject({ entity_id: entityA.id, entity_name: 'Alpha entity' });
+    expect(JSON.stringify(restSearch)).not.toContain(entityB.id);
+    expect(JSON.stringify(restSearch)).not.toContain('Bravo entity');
     let restGraph: any;
     await kbRouteHandler('/kbs/graph')(
       { query: { kb_id: kbA.id }, authContext: authA },

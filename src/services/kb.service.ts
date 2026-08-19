@@ -692,18 +692,28 @@ export class KBService {
   async searchKnowledge(query: string, kbIds?: string[], limit: number = 20, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<{ facts: KBFact[]; entities: KBEntity[] }> {
     const accessibleKbIds = kbIds?.length ? kbIds : (await this.list(undefined, auth)).map(kb => kb.id);
     await assertResourcesWorkspace(this.db, auth, accessibleKbIds.map(id => ['knowledge_base', id]));
+    const scopedWorkspace = workspaceIdFor(auth);
     const pattern = `%${query}%`;
     let factSql = `SELECT f.*, e.name as entity_name, e.identifier as entity_identifier
                    FROM kb_fact f
-                   LEFT JOIN kb_entity e ON f.entity_id = e.id
+                   LEFT JOIN kb_entity e ON f.entity_id = e.id AND e.kb_id = f.kb_id
                    WHERE (f.title LIKE ? OR f.content LIKE ? OR f.category LIKE ?)`;
     const factParams: unknown[] = [pattern, pattern, pattern];
 
     if (accessibleKbIds.length > 0) {
       factSql += ` AND f.kb_id IN (${accessibleKbIds.map(() => '?').join(',')})`;
       factParams.push(...accessibleKbIds);
-    } else if (workspaceIdFor(auth)) {
+    } else if (scopedWorkspace) {
       return { facts: [], entities: [] };
+    }
+
+    if (scopedWorkspace) {
+      factSql += ` AND (
+        f.entity_id IS NULL OR EXISTS (
+          SELECT 1 FROM kb_entity fact_entity
+          WHERE fact_entity.id = f.entity_id AND fact_entity.kb_id = f.kb_id
+        )
+      )`;
     }
 
     factSql += ' ORDER BY f.created_at DESC LIMIT ?';
