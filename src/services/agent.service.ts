@@ -5,6 +5,8 @@ import { Agent, RegisterAgent, UpdateAgent } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { ValidationError } from '../shared/errors.js';
 import type { PrincipalRef } from '../shared/auth-context.js';
+import type { AuthContext } from '../shared/auth-context.js';
+import { assertResourceWorkspace, assertWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
 
 export class AgentService {
   constructor(
@@ -29,9 +31,10 @@ export class AgentService {
     workspaceId?: string | null,
     actor?: PrincipalRef | null,
     adapter?: DatabaseAdapter,
+    auth?: AuthContext,
   ): Promise<Agent> {
     if (!adapter) {
-      return this.db.transaction(tx => this.register(data, operatorUserId, restrictToRoleId, workspaceId, actor, tx));
+      return this.db.transaction(tx => this.register(data, operatorUserId, restrictToRoleId, workspaceId, actor, tx, auth));
     }
     const db = adapter;
     const id = data.agent_id || data.id || ulid();
@@ -43,10 +46,16 @@ export class AgentService {
         )
       : [];
     const resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
+    if (auth && resolvedWorkspaceId) assertWorkspace(auth, resolvedWorkspaceId);
+    if (auth && !resolvedWorkspaceId && workspaceIdFor(auth)) {
+      throw new ValidationError('Agent registration requires the authenticated workspace');
+    }
+    if (restrictToRoleId && auth) await assertResourceWorkspace(db, auth, 'role', restrictToRoleId);
 
     // Check if re-binding an existing agent
     const existing = await this.getById(id, db);
     if (existing) {
+      if (auth) await assertResourceWorkspace(db, auth, 'agent', id);
       if (actor?.kind === 'agent') {
         if (existing.id !== actor.id || !existing.workspace_id || existing.workspace_id !== resolvedWorkspaceId) {
           throw new ValidationError('Agent registration is outside the authenticated agent scope');
@@ -86,7 +95,7 @@ export class AgentService {
         [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, finalWorkspaceId, id]
       );
 
-      return (await this.getById(id, db))!;
+      return (await this.getById(id, db, auth))!;
     }
 
     // An agent credential identifies an already-registered principal. It may
@@ -134,9 +143,9 @@ export class AgentService {
     };
   }
 
-  async unregister(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.unregister(id, actorId, tx));
-    const existing = await this.getById(id, adapter);
+  async unregister(id: string, actorId?: string, adapter?: DatabaseAdapter, auth?: AuthContext): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.unregister(id, actorId, tx, auth));
+    const existing = await this.getById(id, adapter, auth);
     if (!existing) throw new Error(`Agent with ID ${id} not found`);
     await (async tx => {
       const now = new Date().toISOString();
@@ -165,9 +174,9 @@ export class AgentService {
   async update(
     id: string,
     data: UpdateAgent,
-    options: { workspaceId?: string; allowIdentityChanges?: boolean } = {},
+    options: { workspaceId?: string; allowIdentityChanges?: boolean; auth?: AuthContext } = {},
   ): Promise<Agent> {
-    const existing = await this.getById(id);
+    const existing = await this.getById(id, this.db, options.auth);
     if (!existing) throw new Error(`Agent with ID ${id} not found`);
 
     const changesIdentity = data.operator_user_id !== undefined || data.role_id !== undefined;
@@ -226,10 +235,11 @@ export class AgentService {
       }
     });
 
-    return (await this.getById(id))!;
+    return (await this.getById(id, this.db, options.auth))!;
   }
 
-  async getById(id: string, adapter: DatabaseAdapter = this.db): Promise<Agent | null> {
+  async getById(id: string, adapter: DatabaseAdapter = this.db, auth?: AuthContext): Promise<Agent | null> {
+    if (auth) await assertResourceWorkspace(adapter, auth, 'agent', id);
     const rows = await adapter.query<any>('SELECT * FROM agent WHERE id = ?', [id]);
     const row = rows[0];
     if (!row) return null;
@@ -247,8 +257,11 @@ export class AgentService {
     };
   }
 
-  async list(): Promise<Agent[]> {
-    const rows = await this.db.query<any>('SELECT * FROM agent ORDER BY created_at ASC');
+  async list(auth?: AuthContext): Promise<Agent[]> {
+    const scopedWorkspace = auth ? workspaceIdFor(auth) : null;
+    const rows = scopedWorkspace
+      ? await this.db.query<any>('SELECT * FROM agent WHERE workspace_id = ? ORDER BY created_at ASC', [scopedWorkspace])
+      : await this.db.query<any>('SELECT * FROM agent ORDER BY created_at ASC');
     return rows.map(row => ({
       id: row.id,
       name: row.name,
@@ -262,8 +275,8 @@ export class AgentService {
     }));
   }
 
-  async heartbeat(id: string): Promise<Agent> {
-    const existing = await this.getById(id);
+  async heartbeat(id: string, auth?: AuthContext): Promise<Agent> {
+    const existing = await this.getById(id, this.db, auth);
     if (!existing) throw new Error(`Agent with ID ${id} not found`);
 
     const last_seen_at = new Date().toISOString();

@@ -29,7 +29,7 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
     try {
       const status = req.query.status as string;
       const parent_id = req.query.parent_id === 'null' ? null : (req.query.parent_id as string);
-      const docs = await documentService.list(req.params.projectId, { status, parent_id });
+      const docs = await documentService.list(req.params.projectId, { status, parent_id }, req.authContext);
       res.json(docs);
     } catch (err) {
       next(err);
@@ -41,7 +41,7 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
       const { author_id: claimedAuthorId, ...data } = req.body;
       const doc = await documentService.create(
         { ...data, project_id: req.params.projectId },
-        getActorId(req, claimedAuthorId)
+        getActorId(req, claimedAuthorId), undefined, req.authContext
       );
       res.status(201).json(doc);
     } catch (err) {
@@ -52,7 +52,7 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
   router.get('/documents/:id', ...validateRequest({ query: documentQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const version = typeof req.query.version === 'number' ? req.query.version : undefined;
-      const doc = await documentService.getById(req.params.id, version);
+      const doc = await documentService.getById(req.params.id, version, req.authContext);
       if (!doc) return res.status(404).json({ error: 'Document not found' });
       res.json(doc);
     } catch (err) {
@@ -63,7 +63,7 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
   router.put('/documents/:id', ...validateRequest({ body: documentUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { author_id: claimedAuthorId, ...data } = req.body;
-      const doc = await documentService.update(req.params.id, data, getActorId(req, claimedAuthorId));
+      const doc = await documentService.update(req.params.id, data, getActorId(req, claimedAuthorId), undefined, req.authContext);
       res.json(doc);
     } catch (err) {
       next(err);
@@ -72,7 +72,7 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
 
   router.delete('/documents/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await documentService.delete(req.params.id, getActorId(req));
+      await documentService.delete(req.params.id, getActorId(req), undefined, req.authContext);
       res.json({ success: true });
     } catch (err) {
       next(err);
@@ -83,7 +83,7 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
     try {
       let doc: Awaited<ReturnType<DocumentService['setStatus']>> | undefined;
       await db.transaction(async tx => {
-        doc = await documentService.setStatus(req.params.id, req.body.status, getActorId(req), tx);
+        doc = await documentService.setStatus(req.params.id, req.body.status, getActorId(req), tx, req.authContext);
         if (req.body.status === 'approved') {
           const auth: AuthContext | undefined = (req as any).authContext;
           await auditService.logAs(auth, {
@@ -104,7 +104,7 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
 
   router.get('/documents/:id/versions', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const history = await documentService.getHistory(req.params.id);
+      const history = await documentService.getHistory(req.params.id, req.authContext);
       res.json(history);
     } catch (err) {
       next(err);

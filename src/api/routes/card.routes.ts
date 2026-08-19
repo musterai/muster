@@ -84,7 +84,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
     try {
       const cards = await cardService.searchByTitle(req.params.projectId, (req.query.q as string) || '', {
         excludeCardId: req.query.exclude_card_id as string | undefined,
-      });
+      }, req.authContext);
       res.json(cards);
     } catch (err) {
       next(err);
@@ -99,7 +99,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
         assignee_id: req.query.assignee_id as string,
         label: req.query.label as string,
         archived: (req.query.archived as unknown) === true || req.query.archived === 'true',
-      });
+      }, req.authContext);
       res.json(cards);
     } catch (err) {
       next(err);
@@ -114,7 +114,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
         assignee_id: req.query.assignee_id as string,
         label: req.query.label as string,
         archived: (req.query.archived as unknown) === true || req.query.archived === 'true',
-      });
+      }, req.authContext);
       res.json(cards);
     } catch (err) {
       next(err);
@@ -126,7 +126,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
       const card = await cardService.create(
         { ...req.body, column_id: req.params.columnId },
         getActorId(req),
-        { operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override) },
+        { operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override), auth: req.authContext },
       );
       res.status(201).json(card);
     } catch (err) {
@@ -136,7 +136,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.get('/cards/:id', ...validateRequest({ params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const card = await cardService.getById(req.params.id);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -147,7 +147,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
     try {
       const actorId = getActorId(req);
       const card = await cardService.update(req.params.id, req.body, actorId, {
-        operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override),
+        operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override), auth: req.authContext,
       });
       res.json(card);
     } catch (err) {
@@ -159,7 +159,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
     try {
       const actorId = getActorId(req);
       const card = await cardService.move(req.params.id, req.body, actorId, {
-        operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override),
+        operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override), auth: req.authContext,
       });
       res.json(card);
     } catch (err) {
@@ -177,7 +177,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
         res.status(400).json({ error: 'author_id (or agent_id) is required' });
         return;
       }
-      const comment = await commentService.create({ ...req.body, author_id: authorId, card_id: req.params.id });
+      const comment = await commentService.create({ ...req.body, author_id: authorId, card_id: req.params.id }, undefined, req.authContext);
       res.status(201).json(comment);
     } catch (err) {
       next(err);
@@ -191,7 +191,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
         res.status(403).json({ error: 'forbidden', message: 'You may only edit your own comments' });
         return;
       }
-      const comment = await commentService.update(req.params.commentId, req.body.content, getActorId(req));
+      const comment = await commentService.update(req.params.commentId, req.body.content, getActorId(req), undefined, req.authContext);
       res.json(comment);
     } catch (err) {
       next(err);
@@ -205,7 +205,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
         res.status(403).json({ error: 'forbidden', message: 'You may only delete your own comments' });
         return;
       }
-      await commentService.delete(req.params.commentId, getActorId(req));
+      await commentService.delete(req.params.commentId, getActorId(req), undefined, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -224,7 +224,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
         agentId,
         req.body.ttl_seconds,
         getActorId(req) || agentId,
-        { operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override) },
+        { operatorOverride: mayUseOperatorOverride(req, req.body?.operator_override), auth: req.authContext },
       );
       res.status('success' in result && result.success === false ? 409 : 200).json(result);
     } catch (err) {
@@ -234,8 +234,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.post('/cards/:id/assignees', ...validateRequest({ body: cardAssigneeSchema, params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.assign(req.params.id, req.body.agent_id);
-      const card = await cardService.getById(req.params.id);
+      await cardService.assign(req.params.id, req.body.agent_id, getActorId(req), req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -244,8 +244,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.delete('/cards/:id/assignees/:agentId', ...validateRequest({ params: cardAgentParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.unassign(req.params.id, req.params.agentId);
-      const card = await cardService.getById(req.params.id);
+      await cardService.unassign(req.params.id, req.params.agentId, getActorId(req), req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -254,8 +254,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.post('/cards/:id/labels', ...validateRequest({ body: cardLabelSchema, params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.addLabel(req.params.id, req.body.label_id);
-      const card = await cardService.getById(req.params.id);
+      await cardService.addLabel(req.params.id, req.body.label_id, getActorId(req), req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -264,8 +264,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.delete('/cards/:id/labels/:labelId', ...validateRequest({ params: cardLabelParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.removeLabel(req.params.id, req.params.labelId);
-      const card = await cardService.getById(req.params.id);
+      await cardService.removeLabel(req.params.id, req.params.labelId, getActorId(req), req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -275,7 +275,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
   router.delete('/cards/:id', ...validateRequest({ params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const actorId = getActorId(req);
-      await cardService.delete(req.params.id, actorId);
+      await cardService.delete(req.params.id, actorId, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -286,8 +286,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
   // Document links
   router.post('/cards/:id/documents', ...validateRequest({ body: cardDocumentSchema, params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.linkDocument(req.params.id, req.body.document_id);
-      const card = await cardService.getById(req.params.id);
+      await cardService.linkDocument(req.params.id, req.body.document_id, getActorId(req), req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -296,8 +296,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
 
   router.delete('/cards/:id/documents/:documentId', ...validateRequest({ params: cardDocumentParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await cardService.unlinkDocument(req.params.id, req.params.documentId);
-      const card = await cardService.getById(req.params.id);
+      await cardService.unlinkDocument(req.params.id, req.params.documentId, getActorId(req), req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -308,8 +308,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
   router.post('/cards/:id/links', ...validateRequest({ body: cardLinkSchema, params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const actorId = getActorId(req);
-      await cardService.linkCard(req.params.id, req.body.target_card_id, req.body.relation_type, actorId);
-      const card = await cardService.getById(req.params.id);
+      await cardService.linkCard(req.params.id, req.body.target_card_id, req.body.relation_type, actorId, req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -319,8 +319,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
   router.delete('/cards/:id/links/:linkId', ...validateRequest({ params: cardLinkParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const actorId = getActorId(req);
-      await cardService.unlinkCard(req.params.id, req.params.linkId, actorId);
-      const card = await cardService.getById(req.params.id);
+      await cardService.unlinkCard(req.params.id, req.params.linkId, actorId, req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);
@@ -330,7 +330,7 @@ export function createCardRouter(cardService: CardService, commentService: Comme
   // Work links (branches, PRs, commits, pipelines)
   router.get('/cards/:id/work-links', ...validateRequest({ params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const links = await cardService.listWorkLinks(req.params.id);
+      const links = await cardService.listWorkLinks(req.params.id, undefined, req.authContext);
       res.json(links);
     } catch (err) {
       next(err);
@@ -340,8 +340,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
   router.post('/cards/:id/work-links', ...validateRequest({ body: cardWorkLinkSchema, params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const actorId = getActorId(req);
-      await cardService.addWorkLink(req.params.id, req.body, actorId);
-      const card = await cardService.getById(req.params.id);
+      await cardService.addWorkLink(req.params.id, req.body, actorId, req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.status(201).json(card);
     } catch (err) {
       next(err);
@@ -351,8 +351,8 @@ export function createCardRouter(cardService: CardService, commentService: Comme
   router.delete('/cards/:id/work-links/:linkId', ...validateRequest({ params: cardLinkParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const actorId = getActorId(req);
-      await cardService.removeWorkLink(req.params.id, req.params.linkId, actorId);
-      const card = await cardService.getById(req.params.id);
+      await cardService.removeWorkLink(req.params.id, req.params.linkId, actorId, req.authContext);
+      const card = await cardService.getById(req.params.id, undefined, req.authContext);
       res.json(card);
     } catch (err) {
       next(err);

@@ -4,6 +4,8 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { Document, DocumentVersion, CreateDocument, UpdateDocument } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { assertMaxLength, DOCUMENT_CONTENT_MAX_CHARS } from '../shared/content-limits.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
 
 export class DocumentService {
   constructor(
@@ -11,9 +13,10 @@ export class DocumentService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateDocument, actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
-    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx));
+  async create(data: CreateDocument, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Document> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'project', data.project_id);
     assertMaxLength(data.content, DOCUMENT_CONTENT_MAX_CHARS, 'Document content');
     const id = ulid();
     const created_at = new Date().toISOString();
@@ -68,7 +71,8 @@ export class DocumentService {
     return doc;
   }
 
-  async getById(id: string, versionNumber?: number): Promise<Document | null> {
+  async getById(id: string, versionNumber?: number, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Document | null> {
+    await assertResourceWorkspace(this.db, auth, 'document', id);
     if (versionNumber) {
       const verRows = await this.db.query<DocumentVersion>(
         'SELECT * FROM document_version WHERE document_id = ? AND version = ?',
@@ -92,7 +96,8 @@ export class DocumentService {
     return rows[0] || null;
   }
 
-  async list(projectId: string, filters: { status?: string; parent_id?: string | null } = {}): Promise<Document[]> {
+  async list(projectId: string, filters: { status?: string; parent_id?: string | null } = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Document[]> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     let sql = 'SELECT * FROM document WHERE project_id = ?';
     const params: unknown[] = [projectId];
 
@@ -114,9 +119,10 @@ export class DocumentService {
     return this.db.query<Document>(sql, params);
   }
 
-  async update(id: string, data: UpdateDocument, actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
-    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+  async update(id: string, data: UpdateDocument, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Document> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'document', id);
     assertMaxLength(data.content, DOCUMENT_CONTENT_MAX_CHARS, 'Document content');
     const lockClause = db.dialect === 'postgres' ? ' FOR UPDATE' : '';
     const existingRows = await db.query<Document>(`SELECT * FROM document WHERE id = ?${lockClause}`, [id]);
@@ -170,9 +176,10 @@ export class DocumentService {
     return updated;
   }
 
-  async setStatus(id: string, status: 'draft' | 'in_review' | 'approved' | 'archived', actorId?: string, adapter?: DatabaseAdapter): Promise<Document> {
-    if (!adapter) return this.db.transaction(tx => this.setStatus(id, status, actorId, tx));
+  async setStatus(id: string, status: 'draft' | 'in_review' | 'approved' | 'archived', actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Document> {
+    if (!adapter) return this.db.transaction(tx => this.setStatus(id, status, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'document', id);
     const lockClause = db.dialect === 'postgres' ? ' FOR UPDATE' : '';
     const existingRows = await db.query<Document>(`SELECT * FROM document WHERE id = ?${lockClause}`, [id]);
     const existing = existingRows[0] || null;
@@ -197,7 +204,8 @@ export class DocumentService {
     return updated;
   }
 
-  async getHistory(id: string): Promise<DocumentVersion[]> {
+  async getHistory(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<DocumentVersion[]> {
+    await assertResourceWorkspace(this.db, auth, 'document', id);
     return this.db.query<DocumentVersion>(
       `SELECT v.*, COALESCE(a.name, u.display_name) as author_name FROM document_version v
        LEFT JOIN agent a ON v.author_id = a.id
@@ -207,9 +215,10 @@ export class DocumentService {
     );
   }
 
-  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'document', id);
     const existingRows = await db.query<Document>('SELECT * FROM document WHERE id = ?', [id]);
     const existing = existingRows[0] || null;
     if (!existing) throw new Error(`Document with ID ${id} not found`);

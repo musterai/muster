@@ -61,7 +61,7 @@ export function createAgentRouter(
   // Global agent list
   router.get('/agents', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const agents = await agentService.list();
+      const agents = await agentService.list(req.authContext);
       res.json(agents);
     } catch (err) {
       next(err);
@@ -78,6 +78,8 @@ export function createAgentRouter(
         undefined,
         auth?.workspace_id || undefined,
         config.auth.mode === 'enforced' ? auth?.principal : null,
+        undefined,
+        auth,
       );
       res.status(201).json(agent);
     } catch (err) {
@@ -88,7 +90,7 @@ export function createAgentRouter(
   router.post('/agents/:id/heartbeat', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       await requireAgentScope(agentService, req, req.params.id);
-      const agent = await agentService.heartbeat(req.params.id);
+      const agent = await agentService.heartbeat(req.params.id, req.authContext);
       await cardService.renewClaims(req.params.id);
       res.json(agent);
     } catch (err) {
@@ -104,6 +106,7 @@ export function createAgentRouter(
       const agent = await agentService.update(req.params.id, req.body, {
         workspaceId: auth?.workspace_id || undefined,
         allowIdentityChanges: auth?.permissions.includes('workspace.admin') || false,
+        auth,
       });
       res.json(agent);
     } catch (err) {
@@ -115,9 +118,9 @@ export function createAgentRouter(
     try {
       await requireAgentScope(agentService, req, req.params.id);
       const auth = getAuth(req);
-      const agent = await agentService.getById(req.params.id);
+      const agent = await agentService.getById(req.params.id, undefined, auth);
       await db.transaction(async tx => {
-        await agentService.unregister(req.params.id, auth?.principal?.id, tx);
+        await agentService.unregister(req.params.id, auth?.principal?.id, tx, auth);
         await auditService.logAs(auth, {
           workspace_id: agent?.workspace_id || auth?.workspace_id || null,
           action: 'agent.unregister',

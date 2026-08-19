@@ -4,6 +4,9 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { Role, CreateRole, UpdateRole } from '../shared/types.js';
 import { PRESET_ROLES, validatePermissions } from '../shared/permissions.js';
 import { EventService } from './event.service.js';
+import type { AuthContext } from '../shared/auth-context.js';
+import { OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace, assertWorkspace } from './helpers/workspace-scope.helper.js';
 
 export class RoleService {
   constructor(
@@ -54,9 +57,10 @@ export class RoleService {
     return result.changes;
   }
 
-  async create(data: CreateRole, adapter?: DatabaseAdapter): Promise<Role> {
-    if (!adapter) return this.db.transaction(tx => this.create(data, tx));
+  async create(data: CreateRole, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, tx, auth));
     const db = adapter;
+    assertWorkspace(auth, data.workspace_id);
     validatePermissions(data.permissions);
     const id = ulid();
     const created_at = new Date().toISOString();
@@ -81,7 +85,8 @@ export class RoleService {
     return role;
   }
 
-  async list(workspaceId: string): Promise<Role[]> {
+  async list(workspaceId: string, auth?: AuthContext): Promise<Role[]> {
+    if (auth) assertWorkspace(auth, workspaceId);
     const rows = await this.db.query<any>(
       'SELECT * FROM role WHERE workspace_id = ? ORDER BY rank DESC',
       [workspaceId],
@@ -89,12 +94,14 @@ export class RoleService {
     return rows.map(r => this.mapRow(r));
   }
 
-  async getById(id: string): Promise<Role | null> {
+  async getById(id: string, auth?: AuthContext): Promise<Role | null> {
+    if (auth) await assertResourceWorkspace(this.db, auth, 'role', id);
     const rows = await this.db.query<any>('SELECT * FROM role WHERE id = ?', [id]);
     return rows[0] ? this.mapRow(rows[0]) : null;
   }
 
-  async getByKey(workspaceId: string, key: string, adapter: DatabaseAdapter = this.db): Promise<Role | null> {
+  async getByKey(workspaceId: string, key: string, adapter: DatabaseAdapter = this.db, auth?: AuthContext): Promise<Role | null> {
+    if (auth) assertWorkspace(auth, workspaceId);
     const rows = await adapter.query<any>(
       'SELECT * FROM role WHERE workspace_id = ? AND key = ?',
       [workspaceId, key],
@@ -102,9 +109,10 @@ export class RoleService {
     return rows[0] ? this.mapRow(rows[0]) : null;
   }
 
-  async update(id: string, data: UpdateRole, adapter?: DatabaseAdapter): Promise<Role> {
-    if (!adapter) return this.db.transaction(tx => this.update(id, data, tx));
+  async update(id: string, data: UpdateRole, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'role', id);
     const rows = await db.query<any>('SELECT * FROM role WHERE id = ?', [id]);
     const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
@@ -123,8 +131,9 @@ export class RoleService {
     return { ...existing, name, description, permissions, rank };
   }
 
-  async delete(id: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.delete(id, tx));
+  async delete(id: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, tx, auth));
+    await assertResourceWorkspace(adapter, auth, 'role', id);
     const rows = await adapter.query<any>('SELECT * FROM role WHERE id = ?', [id]);
     const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
@@ -137,8 +146,9 @@ export class RoleService {
    * Clone a role (including system roles) into a new editable role.
    * The clone is never is_system.
    */
-  async clone(id: string, newKey: string, newName?: string, adapter?: DatabaseAdapter): Promise<Role> {
-    if (!adapter) return this.db.transaction(tx => this.clone(id, newKey, newName, tx));
+  async clone(id: string, newKey: string, newName?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.clone(id, newKey, newName, tx, auth));
+    await assertResourceWorkspace(adapter, auth, 'role', id);
     const rows = await adapter.query<any>('SELECT * FROM role WHERE id = ?', [id]);
     const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
@@ -151,7 +161,7 @@ export class RoleService {
       permissions: existing.permissions,
       is_system: false,
       rank: existing.rank - 1,
-    }, adapter);
+    }, adapter, auth);
   }
 
   /**

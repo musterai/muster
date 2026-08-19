@@ -63,7 +63,7 @@ function makeAuth(
 ): AuthContext {
   return {
     principal: principalId ? { kind: 'user', id: principalId } : null,
-    workspace_id: 'test-ws',
+    workspace_id: 'test-ws-perm-01',
     is_workspace_member: isWorkspaceMember,
     permissions,
     is_operator_override: false,

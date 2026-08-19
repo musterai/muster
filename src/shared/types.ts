@@ -1,4 +1,5 @@
 // File: src/shared/types.ts
+import type { AuthContext } from './auth-context.js';
 
 // ============================================================
 // Identity & access control
@@ -238,6 +239,8 @@ export interface ClaimRefusal {
 export interface CardOperationOptions {
   /** Set only when the caller explicitly requests an override and has authority to use it. */
   operatorOverride?: boolean;
+  /** Credential-derived request context used for tenant isolation. */
+  auth?: AuthContext;
 }
 
 export interface CreateCard {

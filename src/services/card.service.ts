@@ -10,6 +10,8 @@ import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.j
 import { assertHttpUrl } from '../shared/url.js';
 import { canonicalizeCardLink } from './helpers/card-links.helper.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace, assertResourcesShareWorkspace, assertResourcesWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
 const MAX_MOVE_RETRIES = 3;
@@ -179,6 +181,7 @@ export class CardService {
 
   async create(data: CreateCard, actorId?: string, options: CardOperationOptions = {}): Promise<Card> {
     assertMaxLength(data.description, CARD_TEXT_MAX_CHARS, 'Card description');
+    await assertResourceWorkspace(this.db, options.auth || OPEN_AUTH_CONTEXT, 'column', data.column_id);
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
@@ -325,10 +328,11 @@ export class CardService {
    * every caller — the MCP `get_card` tool, the REST `GET /cards/:id` route,
    * and the frontend — accepts either form without duplicating the lookup.
    */
-  async getById(idOrKey: string, db: DatabaseAdapter = this.db): Promise<CardDetails> {
+  async getById(idOrKey: string, db: DatabaseAdapter = this.db, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<CardDetails> {
     const cardRows = await db.query<Card>('SELECT * FROM card WHERE id = ? OR key = ?', [idOrKey, idOrKey]);
     const card = cardRows[0];
-    if (!card) throw new Error(`Card with ID ${idOrKey} not found`);
+    if (!card) throw new NotFoundError('Resource not found');
+    await assertResourceWorkspace(db, auth, 'card', card.id);
 
     const id = card.id;
 
@@ -373,7 +377,7 @@ export class CardService {
     );
 
     const linked_cards = await this.getLinkedCards(id, db);
-    const work_links = await this.listWorkLinks(id, db);
+    const work_links = await this.listWorkLinks(id, db, auth);
     const epic_progress = card.is_epic
       ? await this.getEpicProgress(linked_cards, db)
       : null;
@@ -468,11 +472,22 @@ export class CardService {
     ];
   }
 
-  async list(filters: { column_id?: string; board_id?: string; project_id?: string; assignee_id?: string; label?: string; archived?: boolean } = {}): Promise<Card[]> {
-    let sql = 'SELECT DISTINCT c.*, col.board_id AS board_id, b.name AS board_name, b.slug AS board_slug FROM card c JOIN "column" col ON c.column_id = col.id JOIN board b ON col.board_id = b.id';
+  async list(filters: { column_id?: string; board_id?: string; project_id?: string; assignee_id?: string; label?: string; archived?: boolean } = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Card[]> {
+    const scopedSelectors: Array<['project' | 'board' | 'column' | 'agent', string]> = [];
+    if (filters.project_id) scopedSelectors.push(['project', filters.project_id]);
+    if (filters.board_id) scopedSelectors.push(['board', filters.board_id]);
+    if (filters.column_id) scopedSelectors.push(['column', filters.column_id]);
+    if (filters.assignee_id) scopedSelectors.push(['agent', filters.assignee_id]);
+    await assertResourcesWorkspace(this.db, auth, scopedSelectors);
+    let sql = 'SELECT DISTINCT c.*, col.board_id AS board_id, b.name AS board_name, b.slug AS board_slug FROM card c JOIN "column" col ON c.column_id = col.id JOIN board b ON col.board_id = b.id JOIN project p ON p.id = b.project_id';
     const joins: string[] = [];
     const conditions: string[] = [];
     const params: unknown[] = [];
+    const workspaceId = workspaceIdFor(auth);
+    if (workspaceId) {
+      conditions.push('p.workspace_id = ?');
+      params.push(workspaceId);
+    }
 
     if (filters.board_id) {
       conditions.push('col.board_id = ?');
@@ -578,7 +593,7 @@ export class CardService {
   async update(id: string, data: UpdateCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
     assertMaxLength(data.description, CARD_TEXT_MAX_CHARS, 'Card description');
     return this.db.transaction(async tx => {
-      const existing = await this.getById(id, tx);
+      const existing = await this.getById(id, tx, options.auth || OPEN_AUTH_CONTEXT);
       const cardId = existing.id;
       const title = data.title !== undefined ? data.title : existing.title;
       const description = data.description !== undefined ? data.description : existing.description;
@@ -606,7 +621,7 @@ export class CardService {
         }
       }
 
-      return this.getById(cardId, tx);
+      return this.getById(cardId, tx, options.auth || OPEN_AUTH_CONTEXT);
     });
   }
 
@@ -615,6 +630,25 @@ export class CardService {
     // move is observably a no-op across every caller.
     this.assertMoveIntent(data);
     const cardId = await resolveCardId(this.db, id);
+    const auth = options.auth || OPEN_AUTH_CONTEXT;
+    await assertResourceWorkspace(this.db, auth, 'card', cardId);
+    if (data.target_column_id) {
+      await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['column', data.target_column_id]]);
+      await assertResourcesShareWorkspace(this.db, [['card', cardId], ['column', data.target_column_id]]);
+      const projectRows = await this.db.query<{ source_project_id: string; target_project_id: string }>(
+        `SELECT source_board.project_id AS source_project_id, target_board.project_id AS target_project_id
+         FROM card c
+         JOIN "column" source_col ON source_col.id = c.column_id
+         JOIN board source_board ON source_board.id = source_col.board_id
+         JOIN "column" target_col ON target_col.id = ?
+         JOIN board target_board ON target_board.id = target_col.board_id
+         WHERE c.id = ?`,
+        [data.target_column_id, cardId],
+      );
+      if (!projectRows[0] || projectRows[0].source_project_id !== projectRows[0].target_project_id) {
+        throw new NotFoundError('Resource not found');
+      }
+    }
     let completed = false;
     for (let attempt = 0; attempt < MAX_MOVE_RETRIES; attempt++) {
       try {
@@ -789,19 +823,21 @@ export class CardService {
     }
     if (!completed) throw new ConflictError('Card move could not be serialized; retry the move.', { retryable: true });
 
-    return this.getById(cardId);
+    return this.getById(cardId, this.db, auth);
   }
 
-  async assign(idOrKey: string, agentId: string, actorId?: string): Promise<void> {
+  async assign(idOrKey: string, agentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     await this.db.transaction(async tx => {
       const cardId = await resolveCardId(tx, idOrKey);
+      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['agent', agentId]]);
+      await assertResourcesShareWorkspace(tx, [['card', cardId], ['agent', agentId]]);
       const result = await tx.execute(
         `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
         [cardId, agentId]
       );
 
       if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx);
+        const card = await this.getById(cardId, tx, auth);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
           await this.eventService.create({
@@ -817,8 +853,9 @@ export class CardService {
     });
   }
 
-  async unassign(idOrKey: string, agentId: string, actorId?: string): Promise<void> {
+  async unassign(idOrKey: string, agentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     const cardId = await resolveCardId(this.db, idOrKey);
+    await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['agent', agentId]]);
     await this.db.execute(
       `DELETE FROM card_assignee WHERE card_id = ? AND principal_id = ?`,
       [cardId, agentId]
@@ -838,6 +875,9 @@ export class CardService {
     options: CardOperationOptions = {},
   ): Promise<CardDetails | ClaimRefusal> {
     const canonicalCardId = await resolveCardId(this.db, cardId);
+    const auth = options.auth || OPEN_AUTH_CONTEXT;
+    await assertResourcesWorkspace(this.db, auth, [['card', canonicalCardId], ['agent', agentId]]);
+    await assertResourcesShareWorkspace(this.db, [['card', canonicalCardId], ['agent', agentId]]);
     let overrideBlockers: UnresolvedBlocker[] = [];
 
     const result = await this.db.transaction(async (tx) => {
@@ -924,7 +964,7 @@ export class CardService {
         }
       }
 
-      return this.getById(canonicalCardId, tx);
+      return this.getById(canonicalCardId, tx, auth);
     });
 
     return result;
@@ -984,25 +1024,30 @@ export class CardService {
     return released;
   }
 
-  async addLabel(idOrKey: string, labelId: string, actorId?: string): Promise<void> {
+  async addLabel(idOrKey: string, labelId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     const cardId = await resolveCardId(this.db, idOrKey);
+    await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['label', labelId]]);
+    await assertResourcesShareWorkspace(this.db, [['card', cardId], ['label', labelId]]);
     await this.db.execute(
       `INSERT OR IGNORE INTO card_label (card_id, label_id) VALUES (?, ?)`,
       [cardId, labelId]
     );
   }
 
-  async removeLabel(idOrKey: string, labelId: string, actorId?: string): Promise<void> {
+  async removeLabel(idOrKey: string, labelId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     const cardId = await resolveCardId(this.db, idOrKey);
+    await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['label', labelId]]);
     await this.db.execute(
       `DELETE FROM card_label WHERE card_id = ? AND label_id = ?`,
       [cardId, labelId]
     );
   }
 
-  async linkDocument(idOrKey: string, documentId: string, actorId?: string): Promise<void> {
+  async linkDocument(idOrKey: string, documentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     await this.db.transaction(async tx => {
       const cardId = await resolveCardId(tx, idOrKey);
+      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['document', documentId]]);
+      await assertResourcesShareWorkspace(tx, [['card', cardId], ['document', documentId]]);
       const linked_at = new Date().toISOString();
       const result = await tx.execute(
         `INSERT OR IGNORE INTO card_document (card_id, document_id, linked_at) VALUES (?, ?, ?)`,
@@ -1010,7 +1055,7 @@ export class CardService {
       );
 
       if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx);
+        const card = await this.getById(cardId, tx, auth);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
           await this.eventService.create({
@@ -1026,20 +1071,23 @@ export class CardService {
     });
   }
 
-  async unlinkDocument(idOrKey: string, documentId: string, actorId?: string): Promise<void> {
+  async unlinkDocument(idOrKey: string, documentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     const cardId = await resolveCardId(this.db, idOrKey);
+    await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['document', documentId]]);
     await this.db.execute(
       `DELETE FROM card_document WHERE card_id = ? AND document_id = ?`,
       [cardId, documentId]
     );
   }
 
-  async linkCard(idOrKey: string, targetIdOrKey: string, relationType: CardLinkRelationType, actorId?: string): Promise<void> {
+  async linkCard(idOrKey: string, targetIdOrKey: string, relationType: CardLinkRelationType, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     await this.db.transaction(async tx => {
       const [cardId, targetCardId] = await Promise.all([
         resolveCardId(tx, idOrKey),
         resolveCardId(tx, targetIdOrKey),
       ]);
+      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['card', targetCardId]]);
+      await assertResourcesShareWorkspace(tx, [['card', cardId], ['card', targetCardId]]);
       const { sourceCardId, destCardId, storedType } = canonicalizeCardLink(cardId, targetCardId, relationType);
 
       const id = ulid();
@@ -1050,7 +1098,7 @@ export class CardService {
       );
 
       if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx);
+        const card = await this.getById(cardId, tx, auth);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
           await this.eventService.create({
@@ -1066,18 +1114,20 @@ export class CardService {
     });
   }
 
-  async unlinkCard(idOrKey: string, linkId: string, actorId?: string): Promise<void> {
+  async unlinkCard(idOrKey: string, linkId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     const cardId = await resolveCardId(this.db, idOrKey);
+    await assertResourceWorkspace(this.db, auth, 'card', cardId);
     await this.db.execute(
       `DELETE FROM card_link WHERE id = ? AND (source_card_id = ? OR target_card_id = ?)`,
       [linkId, cardId, cardId]
     );
   }
 
-  async addWorkLink(idOrKey: string, data: CreateCardWorkLink, actorId?: string): Promise<CardWorkLink> {
+  async addWorkLink(idOrKey: string, data: CreateCardWorkLink, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<CardWorkLink> {
     assertHttpUrl(data.url);
     return this.db.transaction(async tx => {
       const cardId = await resolveCardId(tx, idOrKey);
+      await assertResourceWorkspace(tx, auth, 'card', cardId);
       const id = ulid();
       const created_at = new Date().toISOString();
       const external_ref = data.external_ref ?? null;
@@ -1091,7 +1141,7 @@ export class CardService {
       );
 
       if (this.eventService) {
-        const card = await this.getById(cardId, tx);
+        const card = await this.getById(cardId, tx, auth);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
           await this.eventService.create({
@@ -1109,16 +1159,17 @@ export class CardService {
     });
   }
 
-  async removeWorkLink(idOrKey: string, linkId: string, actorId?: string): Promise<void> {
+  async removeWorkLink(idOrKey: string, linkId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     await this.db.transaction(async tx => {
       const cardId = await resolveCardId(tx, idOrKey);
+      await assertResourceWorkspace(tx, auth, 'card', cardId);
       const result = await tx.execute(
         `DELETE FROM card_work_link WHERE id = ? AND card_id = ?`,
         [linkId, cardId]
       );
 
       if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx);
+        const card = await this.getById(cardId, tx, auth);
         const projectId = await this.getProjectIdForColumn(card.column_id, tx);
         if (projectId) {
           await this.eventService.create({
@@ -1134,15 +1185,17 @@ export class CardService {
     });
   }
 
-  async listWorkLinks(idOrKey: string, db: DatabaseAdapter = this.db): Promise<CardWorkLink[]> {
+  async listWorkLinks(idOrKey: string, db: DatabaseAdapter = this.db, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<CardWorkLink[]> {
     const cardId = await resolveCardId(db, idOrKey);
+    await assertResourceWorkspace(db, auth, 'card', cardId);
     return db.query<CardWorkLink>(
       `SELECT * FROM card_work_link WHERE card_id = ? ORDER BY created_at ASC`,
       [cardId]
     );
   }
 
-  async searchByTitle(projectId: string, query: string, opts: { excludeCardId?: string; limit?: number } = {}): Promise<Card[]> {
+  async searchByTitle(projectId: string, query: string, opts: { excludeCardId?: string; limit?: number } = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Card[]> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
     const params: unknown[] = [projectId];
     const excludeCardId = opts.excludeCardId
@@ -1171,15 +1224,16 @@ export class CardService {
     return this.db.query<Card>(sql, params);
   }
 
-  async archive(idOrKey: string, actorId?: string): Promise<void> {
+  async archive(idOrKey: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     const cardId = await resolveCardId(this.db, idOrKey);
+    await assertResourceWorkspace(this.db, auth, 'card', cardId);
     const updated_at = new Date().toISOString();
     await this.db.execute(`UPDATE card SET archived = 1, updated_at = ? WHERE id = ?`, [updated_at, cardId]);
   }
 
-  async delete(cardId: string, actorId?: string): Promise<void> {
+  async delete(cardId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     await this.db.transaction(async tx => {
-      const existing = await this.getById(cardId, tx);
+      const existing = await this.getById(cardId, tx, auth);
       const canonicalCardId = existing.id;
       const projectId = await this.getProjectIdForColumn(existing.column_id, tx);
 

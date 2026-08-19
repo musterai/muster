@@ -15,7 +15,7 @@ export function createBoardRouter(
 
   router.get('/projects/:projectId/boards', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const boards = await boardService.list(req.params.projectId);
+      const boards = await boardService.list(req.params.projectId, req.authContext);
       res.json(boards);
     } catch (err) {
       next(err);
@@ -24,9 +24,9 @@ export function createBoardRouter(
 
   router.get('/projects/:projectId/all-boards', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const boards = await boardService.list(req.params.projectId);
-      const cards = await cardService.list({ project_id: req.params.projectId });
-      const columnsList = await Promise.all(boards.map((b) => columnService.list(b.id)));
+      const boards = await boardService.list(req.params.projectId, req.authContext);
+      const cards = await cardService.list({ project_id: req.params.projectId }, req.authContext);
+      const columnsList = await Promise.all(boards.map((b) => columnService.list(b.id, req.authContext)));
       const columns = columnsList.flat();
 
       res.json({
@@ -47,7 +47,7 @@ export function createBoardRouter(
 
   router.post('/projects/:projectId/boards', ...validateRequest({ body: boardCreateSchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const board = await boardService.create({ ...req.body, project_id: req.params.projectId });
+      const board = await boardService.create({ ...req.body, project_id: req.params.projectId }, undefined, undefined, req.authContext);
       res.status(201).json(board);
     } catch (err) {
       next(err);
@@ -56,10 +56,10 @@ export function createBoardRouter(
 
   router.get('/boards/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const board = await boardService.getById(req.params.id);
+      const board = await boardService.getById(req.params.id, req.authContext);
       if (!board) return res.status(404).json({ error: 'Board not found' });
-      const columns = await columnService.list(board.id);
-      const cards = await cardService.list({ board_id: board.id });
+      const columns = await columnService.list(board.id, req.authContext);
+      const cards = await cardService.list({ board_id: board.id }, req.authContext);
       res.json({ ...board, columns, cards });
     } catch (err) {
       next(err);
@@ -68,7 +68,7 @@ export function createBoardRouter(
 
   router.put('/boards/:id', ...validateRequest({ body: boardUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const board = await boardService.update(req.params.id, req.body);
+      const board = await boardService.update(req.params.id, req.body, undefined, undefined, req.authContext);
       res.json(board);
     } catch (err) {
       next(err);
@@ -77,7 +77,7 @@ export function createBoardRouter(
 
   router.delete('/boards/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await boardService.delete(req.params.id);
+      await boardService.delete(req.params.id, undefined, undefined, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);
