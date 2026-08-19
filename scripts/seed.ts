@@ -3,16 +3,7 @@ import { createDatabaseAdapter } from '../src/db/factory.js';
 import { Migrator } from '../src/db/migrator.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  CommentService,
-  DocumentService,
-  AgentService,
-  EventService,
-} from '../src/services/index.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,14 +17,14 @@ async function seed() {
   const migrator = new Migrator(db, path.join(__dirname, '../src/db/migrations'));
   await migrator.run();
 
-  const eventService = new EventService(db);
-  const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
-  const projectService = new ProjectService(db, eventService, boardService, documentService);
-  const columnService = new ColumnService(db, eventService);
-  const cardService = new CardService(db, eventService);
-  const commentService = new CommentService(db, eventService);
-  const agentService = new AgentService(db, eventService);
+  const {
+    projectService,
+    boardService,
+    columnService,
+    cardService,
+    commentService,
+    agentService,
+  } = createApplicationServices(db);
 
   // 1. Create Demo Project
   const project = await projectService.create({

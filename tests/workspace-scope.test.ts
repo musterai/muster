@@ -67,8 +67,8 @@ describe('MUS-66 workspace isolation', () => {
     boards = new BoardService(db, events);
     projects = new ProjectService(db, events, boards);
     columns = new ColumnService(db, events);
-    cards = new CardService(db, events);
-    documents = new DocumentService(db, events);
+    cards = createCardServiceForTest(db, events);
+    documents = createDocumentServiceForTest(db, events);
     kbs = new KBService(db, events);
     agents = new AgentService(db, events);
     users = new UserService(db);
@@ -325,3 +325,5 @@ describe('MUS-66 workspace isolation', () => {
     expect(foreignError).toMatchObject({ code: 'NOT_FOUND' });
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';
+import { createDocumentServiceForTest } from './support/document-service.js';

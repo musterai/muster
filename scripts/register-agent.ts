@@ -1,12 +1,10 @@
 // File: scripts/register-agent.ts
 import { createDatabaseAdapter } from '../src/db/factory.js';
-import { AgentService } from '../src/services/agent.service.js';
-import { ProjectService } from '../src/services/project.service.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 async function main() {
   const db = createDatabaseAdapter();
-  const ps = new ProjectService(db);
-  const as = new AgentService(db);
+  const { projectService: ps, agentService: as } = createApplicationServices(db);
 
   const projects = await ps.list();
   if (projects.length === 0) {

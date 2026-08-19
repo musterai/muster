@@ -85,7 +85,7 @@ describe('MUS-66 open-mode agent bootstrap workspace binding', () => {
     );
 
     agents = new AgentService(db);
-    cards = new CardService(db);
+    cards = createCardServiceForTest(db);
     projects = new ProjectService(db);
     projectId = (await projects.create({ name: 'Open Mode Project' })).id;
   });
@@ -223,3 +223,4 @@ describe('MUS-66 open-mode agent bootstrap workspace binding', () => {
     }
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

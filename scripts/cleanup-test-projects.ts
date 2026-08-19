@@ -1,6 +1,6 @@
 // File: scripts/cleanup-test-projects.ts
 import { createDatabaseAdapter } from '../src/db/factory.js';
-import { ProjectService } from '../src/services/project.service.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 async function cleanup() {
   console.log('===========================================================');
@@ -8,7 +8,7 @@ async function cleanup() {
   console.log('===========================================================\n');
 
   const db = createDatabaseAdapter();
-  const projectService = new ProjectService(db);
+  const { projectService } = createApplicationServices(db);
 
   const projects = await projectService.list();
   console.log(`Found ${projects.length} total projects in database.`);

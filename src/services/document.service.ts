@@ -23,8 +23,8 @@ export interface DocumentStatusTransition {
 export class DocumentService {
   constructor(
     private db: DatabaseAdapter,
-    private eventService?: EventService,
-    private auditService: AuditService = new AuditService(db),
+    private eventService: EventService | undefined,
+    private auditService: AuditService,
   ) {}
 
   async create(data: CreateDocument, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Document> {

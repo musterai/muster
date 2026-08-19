@@ -54,7 +54,7 @@ describe('MUS-28: DeviceGrantService', () => {
     );
 
     tokenService = new TokenService(db);
-    deviceGrantService = new DeviceGrantService(db, tokenService);
+    deviceGrantService = createDeviceGrantServiceForTest(db, tokenService);
   });
 
   afterEach(async () => {
@@ -186,7 +186,7 @@ describe('MUS-28: device routes — user_code brute-force rate limiting', () => 
     );
 
     const tokenService = new TokenService(db);
-    deviceGrantService = new DeviceGrantService(db, tokenService);
+    deviceGrantService = createDeviceGrantServiceForTest(db, tokenService);
 
     const app = express();
     app.use(express.json());
@@ -251,3 +251,4 @@ describe('MUS-28: device routes — user_code brute-force rate limiting', () => 
     expect(result.ok).toBe(true);
   });
 });
+import { createDeviceGrantServiceForTest } from './support/transaction-services.js';

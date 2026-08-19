@@ -1,24 +1,17 @@
 // File: scripts/setup-alpha-release-tasks.ts
 import { createDatabaseAdapter } from '../src/db/factory.js';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  DocumentService,
-  AgentService,
-  EventService,
-} from '../src/services/index.js';
+import { createApplicationServices } from '../src/application/composition.js';
 
 async function main() {
   const db = createDatabaseAdapter();
-  const eventService = new EventService(db);
-  const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
-  const projectService = new ProjectService(db, eventService, boardService, documentService);
-  const columnService = new ColumnService(db, eventService);
-  const cardService = new CardService(db, eventService);
-  const agentService = new AgentService(db, eventService);
+  const {
+    projectService,
+    boardService,
+    documentService,
+    columnService,
+    cardService,
+    agentService,
+  } = createApplicationServices(db);
 
   // 1. Create or Find Release Project
   let project = (await projectService.list()).find(p => p.name.includes('v2.0-alpha'));

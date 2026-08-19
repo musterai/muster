@@ -4,6 +4,8 @@ import {
   AuditService,
   BoardService,
   CardService,
+  CardAccessPolicy,
+  CardLanePolicy,
   ColumnService,
   CommentService,
   DeviceGrantService,
@@ -17,6 +19,7 @@ import {
   RoleService,
   SessionService,
   TokenService,
+  TransactionServiceFactory,
   UserService,
 } from '../services/index.js';
 import type { EventCallback } from '../services/event.service.js';
@@ -50,6 +53,16 @@ export function createApplicationServices(
   const documentService = new DocumentService(db, eventService, auditService);
   const tokenService = new TokenService(db);
   const agentService = new AgentService(db, eventService);
+  const transactionServiceFactory = new TransactionServiceFactory(
+    adapter => adapter === db ? tokenService : new TokenService(adapter),
+    adapter => adapter === db ? auditService : new AuditService(adapter),
+  );
+  const cardAccessPolicy = new CardAccessPolicy(db);
+  const cardLanePolicy = new CardLanePolicy(db);
+  const cardService = new CardService(db, eventService, {
+    accessPolicy: cardAccessPolicy,
+    lanePolicy: cardLanePolicy,
+  });
 
   return {
     db,
@@ -59,9 +72,12 @@ export function createApplicationServices(
     documentService,
     tokenService,
     agentService,
+    transactionServiceFactory,
+    cardAccessPolicy,
+    cardLanePolicy,
+    cardService,
     projectService: new ProjectService(db, eventService, boardService, documentService),
     columnService: new ColumnService(db, eventService),
-    cardService: new CardService(db, eventService),
     commentService: new CommentService(db, eventService),
     kbService: new KBService(db, eventService),
     roleService: new RoleService(db, eventService),
@@ -69,7 +85,7 @@ export function createApplicationServices(
     oidcService: new OidcService(db),
     invitationService: new InvitationService(db),
     userService: new UserService(db),
-    deviceGrantService: new DeviceGrantService(db, tokenService, auditService),
-    mcpOAuthService: new McpOAuthService(db, tokenService, agentService, auditService),
+    deviceGrantService: new DeviceGrantService(db, transactionServiceFactory),
+    mcpOAuthService: new McpOAuthService(db, agentService, transactionServiceFactory),
   };
 }

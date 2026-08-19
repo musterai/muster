@@ -112,7 +112,7 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
 
     tokenA = new TokenService(dbA);
     const agentA = new AgentService(dbA);
-    oauthA = new McpOAuthService(dbA, tokenA, agentA, new AuditService(dbA));
+    oauthA = createMcpOAuthServiceForTest(dbA, tokenA, agentA, new AuditService(dbA));
     const client = await oauthA.registerClient({ client_name: 'Atomic Client', redirect_uris: [redirectUri] });
     clientId = client.client_id;
     const agent = await agentA.register({ name: 'Atomic Agent' }, operatorId, seniorRole.id, workspaceId);
@@ -131,7 +131,7 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
     });
 
     dbB = createDatabaseAdapter(dbPath);
-    oauthB = new McpOAuthService(dbB, new TokenService(dbB), new AgentService(dbB), new AuditService(dbB));
+    oauthB = createMcpOAuthServiceForTest(dbB, new TokenService(dbB), new AgentService(dbB), new AuditService(dbB));
   });
 
   afterEach(async () => {
@@ -166,7 +166,7 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
 
   it('rolls back code consumption and partial token writes after an unexpected issuance failure', async () => {
     const failingDb = new FailOnceAdapter(dbA, /INSERT INTO oauth_refresh_token/);
-    const failingService = new McpOAuthService(
+    const failingService = createMcpOAuthServiceForTest(
       failingDb,
       new TokenService(failingDb),
       new AgentService(failingDb),
@@ -230,7 +230,7 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
     if (!issued.ok) throw new Error('OAuth setup failed');
     const tokenCountBefore = (await dbA.query('SELECT id FROM api_token')).length;
     const failingDb = new FailOnceAdapter(dbA, /INSERT INTO oauth_refresh_token/);
-    const failingService = new McpOAuthService(
+    const failingService = createMcpOAuthServiceForTest(
       failingDb,
       new TokenService(failingDb),
       new AgentService(failingDb),
@@ -252,3 +252,4 @@ describe('MUS-62: atomic OAuth code exchange and refresh rotation', () => {
     expect(retried.ok).toBe(true);
   });
 });
+import { createMcpOAuthServiceForTest } from './support/transaction-services.js';

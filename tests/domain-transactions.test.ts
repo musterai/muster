@@ -85,7 +85,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     const published: unknown[] = [];
     const events = new EventService(failing, event => { published.push(event); });
     const boards = new BoardService(failing, events);
-    const documents = new DocumentService(failing, events);
+    const documents = createDocumentServiceForTest(failing, events);
     const projects = new ProjectService(failing, events, boards, documents);
 
     await expect(projects.create({ name: 'Should Roll Back' })).rejects.toThrow('injected failure');
@@ -100,12 +100,12 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     const events = new EventService(db);
     const boards = new BoardService(db, events);
     const projects = new ProjectService(db, events, boards);
-    const documents = new DocumentService(db, events);
+    const documents = createDocumentServiceForTest(db, events);
     const project = await projects.create({ name: 'Document Rollback' });
     const document = await documents.create({ project_id: project.id, title: 'Original', content: 'one' });
 
     const failing = new FailingAdapter(db, sql => /INSERT INTO document_version/i.test(sql));
-    const failingDocuments = new DocumentService(failing, new EventService(failing));
+    const failingDocuments = createDocumentServiceForTest(failing, new EventService(failing));
     await expect(failingDocuments.update(document.id, { content: 'two', change_summary: 'break' })).rejects.toThrow('injected failure');
 
     const row = (await db.query<{ content: string; version: number }>('SELECT content, version FROM document WHERE id = ?', [document.id]))[0];
@@ -144,7 +144,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     await db.execute('INSERT INTO label (id, board_id, name, color) VALUES (?, ?, ?, ?)', [labelId, board.id, 'Label', 'neutral']);
 
     const failing = new FailingAdapter(db, sql => /card_assignee/i.test(sql));
-    const cards = new CardService(failing, new EventService(failing));
+    const cards = createCardServiceForTest(failing, new EventService(failing));
     await expect(cards.create({ column_id: columns[0].id, title: 'Should Roll Back', labels: [labelId], assignees: [agentId] })).rejects.toThrow('injected failure');
     expect((await db.query('SELECT * FROM card')).length).toBe(0);
     expect((await db.query('SELECT * FROM card_label')).length).toBe(0);
@@ -188,7 +188,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     expect((await db.query('SELECT id FROM "column" WHERE board_id = ? AND name = ?', [board.id, 'Transient'])).length).toBe(0);
 
     const cardColumns = await db.query<{ id: string }>('SELECT id FROM "column" WHERE board_id = ? ORDER BY position LIMIT 1', [board.id]);
-    const cards = new CardService(db, events);
+    const cards = createCardServiceForTest(db, events);
     const card = await cards.create({ column_id: cardColumns[0].id, title: 'Comment boundary' });
     const boundaryNow = new Date().toISOString();
     await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', ['boundary-author', 'user', boundaryNow]);
@@ -303,7 +303,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
 
     const events = new EventService(db);
     const boards = new BoardService(db, events);
-    const documents = new DocumentService(db, events);
+    const documents = createDocumentServiceForTest(db, events);
     const projects = new ProjectService(db, events, boards, documents);
     const createdProjects = await Promise.all([
       projects.create({ name: 'Concurrent bootstrap A' }),
@@ -316,7 +316,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
   it('serializes document versions and emits one event for duplicate association retries', async () => {
     const events = new EventService(db);
     const boards = new BoardService(db, events);
-    const documents = new DocumentService(db, events);
+    const documents = createDocumentServiceForTest(db, events);
     const projects = new ProjectService(db, events, boards, documents);
     const project = await projects.create({ name: 'Concurrent document' });
     const document = await documents.create({ project_id: project.id, title: 'Versioned', content: 'v1' });
@@ -329,7 +329,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
 
     const board = (await boards.list(project.id))[0];
     const column = (await db.query<{ id: string }>('SELECT id FROM "column" WHERE board_id = ? LIMIT 1', [board.id]))[0];
-    const cards = new CardService(db, events);
+    const cards = createCardServiceForTest(db, events);
     const card = await cards.create({ column_id: column.id, title: 'Association retry' });
     await Promise.all([cards.linkDocument(card.id, document.id), cards.linkDocument(card.id, document.id)]);
     expect((await db.query('SELECT card_id FROM card_document WHERE card_id = ?', [card.id])).length).toBe(1);
@@ -422,9 +422,9 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     const projectService = new ProjectService(db, events);
     const boardService = new BoardService(db, events);
     const columnService = new (await import('../src/services/column.service.js')).ColumnService(db, events);
-    const cardService = new CardService(db, events);
+    const cardService = createCardServiceForTest(db, events);
     const commentService = new (await import('../src/services/comment.service.js')).CommentService(db, events);
-    const documentService = new DocumentService(db, events);
+    const documentService = createDocumentServiceForTest(db, events);
     const agentService = new (await import('../src/services/agent.service.js')).AgentService(db, events);
     const kbService = new KBService(db, events);
     const roleService = new RoleService(db, events);
@@ -522,3 +522,5 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     expect((await db.query("SELECT id FROM audit_log WHERE action = 'role.create' AND payload LIKE '%mcp_missing_db%'")).length).toBe(0);
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';
+import { createDocumentServiceForTest } from './support/document-service.js';

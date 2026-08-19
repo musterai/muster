@@ -12,10 +12,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createDatabaseAdapter } from './db/factory.js';
 import { Migrator } from './db/migrator.js';
-import { SSEManager } from './realtime/sse.js';
-import { createRouter } from './api/router.js';
 import { errorHandler } from './api/middleware/error-handler.js';
-import { createMcpServer } from './mcp/server.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { config, formatHostForUrl, isLoopbackHost, setDatabaseOverride, validateDeploymentConfig } from './config/index.js';
 import { OPEN_AUTH_CONTEXT } from './shared/auth-context.js';
@@ -24,7 +21,7 @@ import { createAuthMiddleware } from './api/middleware/auth.js';
 import { createWellKnownRouter, canonicalMcpResource } from './api/routes/mcp-oauth.routes.js';
 import { corsMiddleware, securityHeadersMiddleware } from './api/middleware/security.js';
 import { createRateLimiter } from './api/middleware/generic-rate-limiter.js';
-import { createApplicationServices } from './application/composition.js';
+import { createTransportRuntime } from './application/transport-runtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,10 +61,8 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   const migrator = new Migrator(db, path.join(__dirname, 'db/migrations'));
   await migrator.run();
 
-  const sseManager = new SSEManager();
-  const services = createApplicationServices(db, {
-    publishEvent: async (event) => sseManager.broadcast(event.project_id, event),
-  });
+  const runtime = createTransportRuntime(db);
+  const { services, sseManager } = runtime;
   const {
     agentService,
     roleService,
@@ -141,8 +136,7 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   // checks in auth.ts compare against '/api/v1/auth/' etc.
   app.use((req, res, next) => authMiddleware(req, res, next));
 
-  const apiRouter = createRouter(services, sseManager, db);
-  app.use('/api', apiRouter);
+  app.use('/api', runtime.restRouter);
 
   const publicDir = config.publicDir;
   if (fs.existsSync(publicDir)) {
@@ -163,7 +157,7 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   // MCP Streamable HTTP Transport
   app.post('/mcp', mcpRateLimiter, async (req: Request, res: Response) => {
     const auth = (req as any).authContext || OPEN_AUTH_CONTEXT;
-    const mcpServer = createMcpServer(services, req, auth);
+    const mcpServer = runtime.createMcpServer(req, auth);
 
     const mcpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

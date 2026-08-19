@@ -63,7 +63,7 @@ describe('MUS-29: McpOAuthService', () => {
 
     tokenService = new TokenService(db);
     agentService = new AgentService(db);
-    oauthService = new McpOAuthService(db, tokenService, agentService);
+    oauthService = createMcpOAuthServiceForTest(db, tokenService, agentService);
   });
 
   afterEach(async () => {
@@ -270,3 +270,4 @@ describe('MUS-29: PKCE S256 verification', () => {
     expect(verifyPkce('some-other-verifier', challenge)).toBe(false);
   });
 });
+import { createMcpOAuthServiceForTest } from './support/transaction-services.js';

@@ -76,8 +76,8 @@ describe('MUS-29: MCP OAuth over real HTTP', () => {
     const tokenService = new TokenService(db);
     const agentService = new AgentService(db);
     const sessionService = new SessionService(db);
-    const deviceGrantService = new DeviceGrantService(db, tokenService);
-    const oauthService = new McpOAuthService(db, tokenService, agentService);
+    const deviceGrantService = createDeviceGrantServiceForTest(db, tokenService);
+    const oauthService = createMcpOAuthServiceForTest(db, tokenService, agentService);
 
     // The approver authenticates the same way any REST client does — a bearer PAT.
     const approverCreated = await tokenService.create({ principal_id: approverId, workspace_id: wsId, name: 'approver-http-pat' });
@@ -327,3 +327,4 @@ describe('MUS-29: MCP OAuth over real HTTP', () => {
     expect(location.search).not.toContain('stable?error');
   });
 });
+import { createDeviceGrantServiceForTest, createMcpOAuthServiceForTest } from './support/transaction-services.js';

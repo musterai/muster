@@ -168,7 +168,7 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
     await adapter.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', ['agent-1', 'agent', now]);
     await adapter.execute('INSERT INTO agent (id, name, status, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?)', ['agent-1', 'Agent', 'active', now, now]);
 
-    const cardService = new CardService(adapter);
+    const cardService = createCardServiceForTest(adapter);
     const card = await cardService.create({ column_id: 'col-1', title: 'Test card' });
 
     const claimed = await cardService.claim(card.id, 'agent-1');
@@ -197,7 +197,7 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
       await adapter.execute('INSERT INTO agent (id, name, status, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?)', [id, id, 'active', now, now]);
     }
 
-    const cardService = new CardService(adapter);
+    const cardService = createCardServiceForTest(adapter);
     const card = await cardService.create({ column_id: 'col-race', title: 'Contested card' });
 
     const results = await Promise.all(agentIds.map(id => cardService.claim(card.id, id)));
@@ -238,8 +238,8 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
         ],
       );
 
-      const serviceA = new CardService(adapter);
-      const serviceB = new CardService(second);
+      const serviceA = createCardServiceForTest(adapter);
+      const serviceB = createCardServiceForTest(second);
       const cardA = await serviceA.create({ column_id: 'col-rank-source', title: 'Move A' });
       const cardB = await serviceA.create({ column_id: 'col-rank-source', title: 'Move B' });
       let timeout!: ReturnType<typeof setTimeout>;
@@ -328,8 +328,8 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
       const tokenB = new TokenService(second);
       const agentA = new AgentService(adapter);
       const agentB = new AgentService(second);
-      const oauthA = new McpOAuthService(adapter, tokenA, agentA, new AuditService(adapter));
-      const oauthB = new McpOAuthService(second, tokenB, agentB, new AuditService(second));
+      const oauthA = createMcpOAuthServiceForTest(adapter, tokenA, agentA, new AuditService(adapter));
+      const oauthB = createMcpOAuthServiceForTest(second, tokenB, agentB, new AuditService(second));
       const redirectUri = 'http://127.0.0.1:5555/callback';
       const resource = 'https://muster.example.test/mcp';
       const client = await oauthA.registerClient({ redirect_uris: [redirectUri] });
@@ -356,8 +356,8 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
       const exchanges = await raceAtBarrier([() => exchange(oauthA), () => exchange(oauthB)]);
       expect(exchanges.filter(result => result.ok)).toHaveLength(1);
 
-      const deviceA = new DeviceGrantService(adapter, tokenA, new AuditService(adapter));
-      const deviceB = new DeviceGrantService(second, tokenB, new AuditService(second));
+      const deviceA = createDeviceGrantServiceForTest(adapter, tokenA, new AuditService(adapter));
+      const deviceB = createDeviceGrantServiceForTest(second, tokenB, new AuditService(second));
       const grant = await deviceA.createDeviceCode();
       expect(await deviceA.approve(grant.user_code, {
         principal: { kind: 'user', id: operatorId },
@@ -399,3 +399,5 @@ describe('MUS-31: dialect translation helpers (pure functions, no database neede
     expect(translateDialect(sql)).toBe(sql);
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';
+import { createDeviceGrantServiceForTest, createMcpOAuthServiceForTest } from './support/transaction-services.js';

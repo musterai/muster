@@ -34,17 +34,23 @@ function isRetryablePostgresError(error: unknown): boolean {
   return code === '40P01' || code === '40001';
 }
 
-export class CardService {
-  private readonly accessPolicy: CardAccessPolicy;
-  private readonly lanePolicy: CardLanePolicy;
+export interface CardServiceDependencies {
+  accessPolicy: CardAccessPolicy;
+  lanePolicy: CardLanePolicy;
+}
 
+export class CardService {
   constructor(
     private db: DatabaseAdapter,
-    private eventService?: EventService
+    private eventService: EventService | undefined,
+    dependencies: CardServiceDependencies,
   ) {
-    this.accessPolicy = new CardAccessPolicy(db);
-    this.lanePolicy = new CardLanePolicy(db);
+    this.accessPolicy = dependencies.accessPolicy;
+    this.lanePolicy = dependencies.lanePolicy;
   }
+
+  readonly accessPolicy: CardAccessPolicy;
+  readonly lanePolicy: CardLanePolicy;
 
   /**
    * Positions are a small, untrusted ordering hint. Digits are accepted only

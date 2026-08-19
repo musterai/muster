@@ -13,6 +13,7 @@ import { CreatedApiToken } from '../shared/types.js';
 import { AuthContext } from '../shared/auth-context.js';
 import { PermissionDeniedError } from '../shared/permission-enforcer.js';
 import { ValidationError } from '../shared/errors.js';
+import type { TransactionServiceProviders } from './transaction-service.factory.js';
 
 const DEVICE_CODE_BYTES = 32;
 const EXPIRES_IN_SECONDS = 600; // 10 minutes
@@ -45,11 +46,7 @@ function randomUserCode(): string {
 export class DeviceGrantService {
   constructor(
     private db: DatabaseAdapter,
-    // Kept in the constructor for the public service contract.  Every
-    // mutation below binds a fresh TokenService to its transaction adapter so
-    // PostgreSQL never writes a token on a different pool connection.
-    _tokenService: TokenService,
-    private auditService?: AuditService,
+    private transactionServices: TransactionServiceProviders,
   ) {}
 
   async createDeviceCode(): Promise<DeviceCodeResult> {
@@ -122,14 +119,14 @@ export class DeviceGrantService {
       }
 
       try {
-        await new TokenService(tx).authorize(auth, {
+        await this.transactionServices.token(tx).authorize(auth, {
           principal_id: principalId,
           workspace_id: auth.workspace_id,
           name: 'muster login (device)',
         });
       } catch (error) {
         if (!this.isPolicyFailure(error)) throw error;
-        await this.auditIssuanceRefusal(auth, error, this.auditService ? new AuditService(tx) : undefined);
+        await this.auditIssuanceRefusal(auth, error, this.transactionServices.audit(tx));
         return false;
       }
 
@@ -229,7 +226,7 @@ export class DeviceGrantService {
 
       let token: CreatedApiToken;
       try {
-        token = await new TokenService(tx).issueForPrincipal(
+        token = await this.transactionServices.token(tx).issueForPrincipal(
           row.principal_id,
           row.workspace_id,
           { name: 'muster login (device)' },
@@ -243,7 +240,7 @@ export class DeviceGrantService {
           row.workspace_id,
           row.principal_id,
           error,
-          this.auditService ? new AuditService(tx) : undefined,
+          this.transactionServices.audit(tx),
         );
         return { ok: false, error: 'access_denied' };
       }
@@ -251,7 +248,7 @@ export class DeviceGrantService {
       // Successful delivery is not complete until the audit write commits.
       // Let an unexpected audit failure escape so the transaction restores
       // both the grant and the token for a safe retry.
-      await (this.auditService ? new AuditService(tx) : undefined)?.log({
+      await this.transactionServices.audit(tx)?.log({
         workspace_id: row.workspace_id,
         actor: { id: row.principal_id, kind: 'user' },
         action: 'token.create',
@@ -263,7 +260,7 @@ export class DeviceGrantService {
     });
   }
 
-  private async auditIssuanceRefusal(auth: AuthContext, error: unknown, auditService = this.auditService): Promise<void> {
+  private async auditIssuanceRefusal(auth: AuthContext, error: unknown, auditService = this.transactionServices.audit(this.db)): Promise<void> {
     if (!auditService || !auth.principal || !auth.workspace_id) return;
     if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;
     try {
@@ -282,7 +279,7 @@ export class DeviceGrantService {
     workspaceId: string,
     principalId: string,
     error: unknown,
-    auditService = this.auditService,
+    auditService = this.transactionServices.audit(this.db),
   ): Promise<void> {
     if (!auditService) return;
     if (!(error instanceof PermissionDeniedError) && !(error instanceof ValidationError)) return;

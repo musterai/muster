@@ -53,9 +53,9 @@ describe('Domain Services Integration Tests', () => {
     boardService = new BoardService(db, eventService);
     projectService = new ProjectService(db, eventService, boardService);
     columnService = new ColumnService(db, eventService);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     commentService = new CommentService(db, eventService);
-    documentService = new DocumentService(db, eventService);
+    documentService = createDocumentServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
     kbService = new KBService(db, eventService);
   });
@@ -670,3 +670,5 @@ describe('Domain Services Integration Tests', () => {
     await expect(cardService.getById(card.id)).rejects.toThrow();
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';
+import { createDocumentServiceForTest } from './support/document-service.js';

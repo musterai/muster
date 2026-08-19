@@ -19,15 +19,11 @@ function getOperatorUserId(req: Request): string | undefined {
 }
 
 export function createAgentRouter(
-  dbOrService: DatabaseAdapter | AgentService,
-  serviceOrCards: AgentService | CardService,
-  cardsOrAudit?: CardService | AuditService,
-  maybeAudit?: AuditService,
+  db: DatabaseAdapter,
+  agentService: AgentService,
+  cardService: CardService,
+  auditService: AuditService,
 ): Router {
-  const db = (maybeAudit ? dbOrService : (dbOrService as any).db) as DatabaseAdapter;
-  const agentService = (maybeAudit ? serviceOrCards : dbOrService) as AgentService;
-  const cardService = (maybeAudit ? cardsOrAudit : serviceOrCards) as CardService;
-  const auditService = (maybeAudit || (cardsOrAudit as AuditService) || new AuditService(db)) as AuditService;
   const router = Router();
 
   // Global agent list

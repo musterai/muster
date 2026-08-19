@@ -41,7 +41,7 @@ describe('MUS-17: card routes thread the authenticated actor through to events',
     );
 
     eventService = new EventService(db);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     const commentService = new CommentService(db, eventService);
 
     // Seed a project/board/column/card directly via SQL — only the card
@@ -136,3 +136,4 @@ describe('MUS-17: card routes thread the authenticated actor through to events',
     expect(await eventService.list('proj-1')).toEqual([]);
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

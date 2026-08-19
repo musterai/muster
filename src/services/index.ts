@@ -19,3 +19,4 @@ export * from './user.service.js';
 export * from './device-grant.service.js';
 export * from './mcp-oauth.service.js';
 export * from './audit.service.js';
+export * from './transaction-service.factory.js';

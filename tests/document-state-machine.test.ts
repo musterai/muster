@@ -68,7 +68,7 @@ describe('MUS-60 document review state machine', () => {
         [id, name, 'active', now],
       );
     }
-    documents = new DocumentService(db, new EventService(db), new AuditService(db));
+    documents = createDocumentServiceForTest(db, new EventService(db), new AuditService(db));
     (config.auth as any).mode = 'enforced';
   });
 
@@ -205,7 +205,7 @@ describe('MUS-60 document review state machine', () => {
     const failingAudit = {
       logAs: vi.fn(async () => { throw new Error('audit unavailable'); }),
     } as unknown as AuditService;
-    const failingService = new DocumentService(db, new EventService(db), failingAudit);
+    const failingService = createDocumentServiceForTest(db, new EventService(db), failingAudit);
 
     await expect(failingService.setStatus(doc.id, {
       status: 'in_review',
@@ -362,7 +362,7 @@ describe('MUS-60 document review state machine', () => {
       close: async () => undefined,
     };
     const audit = { logAs: vi.fn(async () => undefined) } as unknown as AuditService;
-    const service = new DocumentService(adapter, undefined, audit);
+    const service = createDocumentServiceForTest(adapter, undefined, audit);
 
     const transitioned = await service.setStatus('pg-document', {
       status: 'in_review',
@@ -374,3 +374,4 @@ describe('MUS-60 document review state machine', () => {
     expect(audit.logAs).toHaveBeenCalledOnce();
   });
 });
+import { createDocumentServiceForTest } from './support/document-service.js';

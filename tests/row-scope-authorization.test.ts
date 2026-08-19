@@ -65,7 +65,7 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'muster-row-scope-'));
     db = createDatabaseAdapter(path.join(tempDir, 'muster.db'));
     await new Migrator(db, path.join(process.cwd(), 'src/db/migrations')).run();
-    cardService = new CardService(db, new EventService(db));
+    cardService = createCardServiceForTest(db, new EventService(db));
     commentService = new CommentService(db);
     agentService = new AgentService(db);
     auditService = new AuditService(db);
@@ -337,3 +337,4 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     expect((await restListed.json()).items.map((agent: { id: string }) => agent.id)).not.toContain(agentB);
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

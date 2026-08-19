@@ -17,6 +17,9 @@ import type {
   DeviceGrantService,
   McpOAuthService,
   AuditService,
+  CardAccessPolicy,
+  CardLanePolicy,
+  TransactionServiceFactory,
 } from '../services/index.js';
 import type { DatabaseAdapter } from '../db/adapter.js';
 
@@ -47,4 +50,7 @@ export interface Services {
   deviceGrantService: DeviceGrantService;
   mcpOAuthService: McpOAuthService;
   auditService: AuditService;
+  cardAccessPolicy: CardAccessPolicy;
+  cardLanePolicy: CardLanePolicy;
+  transactionServiceFactory: TransactionServiceFactory;
 }

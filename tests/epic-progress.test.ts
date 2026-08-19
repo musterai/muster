@@ -42,7 +42,7 @@ describe('MUS-34: Epic progress rollup', () => {
     );
 
     columnService = new ColumnService(db, eventService);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
   });
 
   afterEach(async () => {
@@ -161,3 +161,4 @@ describe('MUS-34: Epic progress rollup', () => {
     expect(details.epic_progress).toBeNull();
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

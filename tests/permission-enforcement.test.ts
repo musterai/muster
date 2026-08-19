@@ -120,9 +120,9 @@ describe('MUS-22: Permission enforcement', () => {
     boardService = new BoardService(db, eventService);
     projectService = new ProjectService(db, eventService, boardService);
     columnService = new ColumnService(db, eventService);
-    cardService = new CardService(db, eventService);
+    cardService = createCardServiceForTest(db, eventService);
     commentService = new CommentService(db, eventService);
-    documentService = new DocumentService(db, eventService);
+    documentService = createDocumentServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
     kbService = new KBService(db, eventService);
 
@@ -990,3 +990,5 @@ describe('MUS-22: Permission enforcement', () => {
 function allPermissions(): string[] {
   return [...ALL_PERMISSIONS];
 }
+import { createCardServiceForTest } from './support/card-service.js';
+import { createDocumentServiceForTest } from './support/document-service.js';

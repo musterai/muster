@@ -163,8 +163,8 @@ describe('MUS-62: device-grant atomicity', () => {
     dbA = createDatabaseAdapter(TEST_DB);
     auth = await seedDatabase(dbA);
     dbB = createDatabaseAdapter(TEST_DB);
-    serviceA = new DeviceGrantService(dbA, new TokenService(dbA), new AuditService(dbA));
-    serviceB = new DeviceGrantService(dbB, new TokenService(dbB), new AuditService(dbB));
+    serviceA = createDeviceGrantServiceForTest(dbA, new TokenService(dbA), new AuditService(dbA));
+    serviceB = createDeviceGrantServiceForTest(dbB, new TokenService(dbB), new AuditService(dbB));
   });
 
   afterEach(async () => {
@@ -246,7 +246,7 @@ describe('MUS-62: device-grant atomicity', () => {
       [new Date(Date.now() + 20).toISOString(), grant.user_code],
     );
     const delayedDb = new DelayOnceAdapter(dbA, sql => /SELECT kind FROM principal/i.test(sql), 50);
-    const delayedService = new DeviceGrantService(
+    const delayedService = createDeviceGrantServiceForTest(
       delayedDb,
       new TokenService(delayedDb),
       new AuditService(delayedDb),
@@ -285,7 +285,7 @@ describe('MUS-62: device-grant atomicity', () => {
       remaining: 1,
       message: 'injected api_token failure',
     });
-    const failingService = new DeviceGrantService(
+    const failingService = createDeviceGrantServiceForTest(
       failingDb,
       new TokenService(failingDb),
       new AuditService(failingDb),
@@ -310,7 +310,7 @@ describe('MUS-62: device-grant atomicity', () => {
       remaining: 1,
       message: 'injected audit failure',
     });
-    const failingService = new DeviceGrantService(
+    const failingService = createDeviceGrantServiceForTest(
       failingDb,
       new TokenService(failingDb),
       new AuditService(failingDb),
@@ -326,3 +326,4 @@ describe('MUS-62: device-grant atomicity', () => {
     expect(await countRows(dbA, 'device_grant')).toBe(0);
   });
 });
+import { createDeviceGrantServiceForTest } from './support/transaction-services.js';

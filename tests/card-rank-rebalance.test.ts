@@ -27,7 +27,7 @@ describe('transactional card rank rebalancing', () => {
     );
     boardService = new BoardService(db);
     projectService = new ProjectService(db, undefined, boardService);
-    cardService = new CardService(db);
+    cardService = createCardServiceForTest(db);
   });
 
   afterEach(async () => {
@@ -75,7 +75,7 @@ describe('transactional card rank rebalancing', () => {
   it('rejects an empty move before it can reorder cards or create an event', async () => {
     const { columns } = await lanes();
     const received: string[] = [];
-    const service = new CardService(db, new EventService(db, event => received.push(event.action)));
+    const service = createCardServiceForTest(db, new EventService(db, event => received.push(event.action)));
     const first = await service.create({ column_id: columns[0].id, title: 'First' });
     const second = await service.create({ column_id: columns[0].id, title: 'Second' });
     received.length = 0;
@@ -156,7 +156,7 @@ describe('transactional card rank rebalancing', () => {
         return realEvents.create(data, transaction);
       },
     } as unknown as EventService;
-    const transactionalService = new CardService(db, failingEvents);
+    const transactionalService = createCardServiceForTest(db, failingEvents);
 
     await expect(transactionalService.move(card.id, { target_column_id: columns[4].id, position: 'z' })).rejects.toThrow(
       'completion event write failed',
@@ -184,7 +184,7 @@ describe('transactional card rank rebalancing', () => {
         if (calls === 2) throw new Error('override event write failed');
       },
     } as unknown as EventService;
-    const transactionalService = new CardService(db, failingEvents);
+    const transactionalService = createCardServiceForTest(db, failingEvents);
 
     await expect(
       transactionalService.move(
@@ -244,3 +244,4 @@ describe('transactional card rank rebalancing', () => {
     expect(new Set(repairedCards.map(row => row.id))).toEqual(new Set(cards.map(card => card.id)));
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';

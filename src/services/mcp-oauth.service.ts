@@ -17,6 +17,7 @@ import { AuditService } from './audit.service.js';
 import { CreatedApiToken } from '../shared/types.js';
 import { PermissionDeniedError } from '../shared/permission-enforcer.js';
 import { ValidationError } from '../shared/errors.js';
+import type { TransactionServiceProviders } from './transaction-service.factory.js';
 
 const AUTH_CODE_TTL_SECONDS = 120;
 
@@ -98,9 +99,8 @@ export function verifyPkce(verifier: string, challenge: string): boolean {
 export class McpOAuthService {
   constructor(
     private db: DatabaseAdapter,
-    private tokenService: TokenService,
     private agentService: AgentService,
-    private auditService?: AuditService,
+    private transactionServices: TransactionServiceProviders,
   ) {}
 
   async registerClient(data: OAuthClientRegistration): Promise<OAuthClient> {
@@ -166,7 +166,7 @@ export class McpOAuthService {
     // Consent normally performs this check through the REST handler, but the
     // service boundary repeats it so another transport cannot forge a code
     // for an unrelated agent or workspace.
-    await this.tokenService.authorizeForOperatorOwnedAgent(
+    await this.tokenServiceFor(this.db).authorizeForOperatorOwnedAgent(
       params.operatorUserId,
       params.workspaceId,
       params.agentPrincipalId,
@@ -389,12 +389,11 @@ export class McpOAuthService {
   }
 
   private tokenServiceFor(db: DatabaseAdapter): TokenService {
-    return db === this.db ? this.tokenService : new TokenService(db);
+    return this.transactionServices.token(db);
   }
 
   private auditServiceFor(db: DatabaseAdapter): AuditService | undefined {
-    if (!this.auditService) return undefined;
-    return db === this.db ? this.auditService : new AuditService(db);
+    return this.transactionServices.audit(db);
   }
 
   private async lockRefreshFamily(db: DatabaseAdapter, familyId: string): Promise<void> {

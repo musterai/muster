@@ -402,7 +402,12 @@ describe('MUS-57: fail-closed agent lifecycle and atomic offboarding', () => {
         req.authContext = auth;
         next();
       });
-      app.use(createAgentRouter(agentService, new CardService(db)));
+      app.use(createAgentRouter(
+        db,
+        agentService,
+        createCardServiceForTest(db),
+        new AuditService(db),
+      ));
       app.use(createUserRouter(db, userService, roleService, new AuditService(db)));
       app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
         res.status(err.refusal ? 403 : 500).json(err.refusal || { error: err.message });
@@ -430,3 +435,4 @@ describe('MUS-57: fail-closed agent lifecycle and atomic offboarding', () => {
     }
   });
 });
+import { createCardServiceForTest } from './support/card-service.js';
