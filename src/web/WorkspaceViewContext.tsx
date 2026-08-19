@@ -5,6 +5,7 @@ import type { AppTab } from './navigation.js';
 export interface WorkspaceNavigationController {
   activeTab: AppTab;
   activeViewTitle: string;
+  viewFocusVersion: number;
 }
 
 export interface BoardWorkspaceController {
@@ -84,6 +85,7 @@ export function useWorkspaceViewControllers(input: WorkspaceViewControllers): Wo
   const navigation = useMemo(() => input.navigation, [
     input.navigation.activeTab,
     input.navigation.activeViewTitle,
+    input.navigation.viewFocusVersion,
   ]);
   const board = useMemo(() => input.board, [
     input.board.data.boards,

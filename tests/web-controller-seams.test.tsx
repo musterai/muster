@@ -61,7 +61,9 @@ afterEach(async () => {
 
 describe('workspace view context seam', () => {
   const controllers = (overrides: Partial<WorkspaceViewControllers> = {}): WorkspaceViewControllers => ({
-    navigation: { activeTab: 'admin', activeViewTitle: 'Workspace administration' },
+    navigation: {
+      activeTab: 'admin', activeViewTitle: 'Workspace administration', viewFocusVersion: 1,
+    },
     board: {
       data: {
         boards: [], board: null, selectedBoardId: null, columns: [], cards: [], agents: [],
@@ -106,6 +108,23 @@ describe('workspace view context seam', () => {
 
     expect(container.querySelector('#active-view-heading')?.textContent).toBe('Workspace administration');
     expect(container.textContent).toContain('No workspace found yet.');
+    const region = container.querySelector<HTMLElement>('[data-lazy-view="workspace-admin"]')!;
+    expect(document.activeElement).toBe(region);
+
+    const outside = document.createElement('button');
+    document.body.append(outside);
+    outside.focus();
+    await act(async () => root.render(
+      <WorkspaceViewProviders controllers={{
+        ...controller,
+        navigation: { ...controller.navigation, viewFocusVersion: 2 },
+      }}>
+        <AppWorkspaceView />
+      </WorkspaceViewProviders>,
+    ));
+    expect(container.querySelector('[data-lazy-view="workspace-admin"]')).toBe(region);
+    expect(document.activeElement).toBe(region);
+    outside.remove();
   });
 
   it('isolates unrelated domain updates and keeps actions stable without stale state', async () => {
