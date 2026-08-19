@@ -15,9 +15,11 @@ baseline. The complete default-board startup is 64.8% smaller minified and
 only for the Knowledge Base boundary alongside its 31.35 kB / 8.18 kB view
 chunk.
 
-The production build now writes Vite's manifest and
-`scripts/check-frontend-bundle.mjs` measures files from that manifest. Content
-hashes never enter the policy, so the check is deterministic across builds.
+The production build now writes Vite's manifest plus deterministic Rollup
+chunk metadata, and `scripts/check-frontend-bundle.mjs` validates both. The
+metadata records each chunk's normalized module IDs, static/dynamic imports,
+facade, and exact output file. Content hashes never grant an exception, so the
+check is deterministic across builds.
 Run `npm run bundle:report` for a report without failing, or
 `npm run bundle:check` to enforce `config/frontend-bundle-budget.json`.
 
@@ -34,6 +36,14 @@ is never in the default board startup path and the named split prevents normal
 Knowledge Base changes from invalidating the expensive vendor cache. Vite's
 generic warning ceiling matches this exception; the manifest check remains the
 stricter guard for every ordinary chunk.
+
+The exception is fail-closed. Exactly one Rollup chunk must have the configured
+`vendor-graph` identity; every module must belong to the explicit graph-package
+allowlist; required `vis-network` and `vis-data` modules must remain present;
+and the only direct importer must be the Knowledge Base facade. The checker
+also rejects default-route reachability, duplicate manifest/file mappings,
+metadata/manifest disagreement, duplicate exception targets, undocumented
+exceptions, and stale exceptions. Mutation regressions cover each case.
 
 Natural lazy boundaries exist for the board, documents, agents, activity,
 Knowledge Base/graph, tokens, workspace administration, account/shortcut

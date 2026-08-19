@@ -13,10 +13,24 @@
     "maxGzipBytes": 81920
   },
   "chunkOverrides": {
-    "vendor-graph": {
+    "graphVendor": {
+      "chunkName": "vendor-graph",
       "maxBytes": 819200,
       "maxGzipBytes": 215040,
-      "reason": "vis-network, vis-data, and their stable graph-only dependencies are loaded only with the Knowledge Base graph surface."
+      "reason": "vis-network, vis-data, and their stable graph-only dependencies are loaded only with the Knowledge Base graph surface.",
+      "allowedModulePrefixes": [
+        "node_modules/vis-network/",
+        "node_modules/vis-data/",
+        "node_modules/vis-util/",
+        "node_modules/component-emitter/",
+        "node_modules/keycharm/",
+        "node_modules/uuid/"
+      ],
+      "requiredModulePrefixes": [
+        "node_modules/vis-network/",
+        "node_modules/vis-data/"
+      ],
+      "allowedImporterFacades": ["components/KnowledgeBase.tsx"]
     }
   }
 }
