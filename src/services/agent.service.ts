@@ -340,6 +340,19 @@ export class AgentService {
     return toPage(agents, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
+  async listOwnedPage(workspaceId: string, operatorUserId: string, options: PageOptions = {}): Promise<Page<Agent>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `agents-owned:${workspaceId}:${operatorUserId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [workspaceId, operatorUserId];
+    let cursorSql = '';
+    if (cursor) { cursorSql = ' AND (created_at > ? OR (created_at = ? AND id > ?))'; params.push(cursor[0], cursor[0], cursor[1]); }
+    params.push(limit + 1);
+    const rows = await this.db.query<any>(`SELECT * FROM agent WHERE workspace_id=? AND operator_user_id=?${cursorSql} ORDER BY created_at ASC,id ASC LIMIT ?`, params);
+    const agents: Agent[] = rows.map(row => ({ ...row, capabilities: row.capabilities ? JSON.parse(row.capabilities) : [] }));
+    return toPage(agents, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
   async heartbeat(id: string, auth?: AuthContext): Promise<Agent> {
     return this.db.transaction(async tx => {
       await this.assertAgentScope(id, auth, 'agent.manage_others', tx);

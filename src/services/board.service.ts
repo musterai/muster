@@ -187,4 +187,20 @@ export class BoardService {
   async listLabels(boardId: string): Promise<Label[]> {
     return this.db.query<Label>('SELECT * FROM label WHERE board_id = ?', [boardId]);
   }
+
+  async listLabelsPage(boardId: string, options: PageOptions = {}): Promise<Page<Label>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `board-labels:${boardId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [boardId];
+    let sql = 'SELECT * FROM label WHERE board_id = ?';
+    if (cursor) {
+      sql += ' AND (name > ? OR (name = ? AND id > ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY name ASC, id ASC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<Label>(sql, params);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.name, row.id]));
+  }
 }

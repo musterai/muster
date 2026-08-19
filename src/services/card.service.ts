@@ -1357,6 +1357,23 @@ export class CardService {
     );
   }
 
+  async listWorkLinksPage(idOrKey: string, options: PageOptions = {}, db: DatabaseAdapter = this.db): Promise<Page<CardWorkLink>> {
+    const cardId = await resolveCardId(db, idOrKey);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `card-work-links:${cardId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [cardId];
+    let sql = 'SELECT * FROM card_work_link WHERE card_id = ?';
+    if (cursor) {
+      sql += ' AND (created_at > ? OR (created_at = ? AND id > ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY created_at ASC, id ASC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await db.query<CardWorkLink>(sql, params);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
   async searchByTitle(projectId: string, query: string, opts: { excludeCardId?: string; limit?: number } = {}): Promise<Card[]> {
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
     const params: unknown[] = [projectId];

@@ -27,6 +27,7 @@ import {
   commentParamsSchema,
   commentUpdateSchema,
   columnIdParamsSchema,
+  collectionQuerySchema,
   projectIdParamsSchema,
 } from '../schemas.js';
 
@@ -342,9 +343,12 @@ export function createCardRouter(
   });
 
   // Work links (branches, PRs, commits, pipelines)
-  router.get('/cards/:id/work-links', ...validateRequest({ params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/cards/:id/work-links', ...validateRequest({ query: collectionQuerySchema, params: cardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const links = await cardService.listWorkLinks(req.params.id);
+      const links = await cardService.listWorkLinksPage(req.params.id, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(links);
     } catch (err) {
       next(err);

@@ -32,3 +32,15 @@ CREATE INDEX IF NOT EXISTS idx_kb_entity_updated_id
   ON kb_entity(updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_kb_fact_kb_created_id
   ON kb_fact(kb_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_label_board_name_id
+  ON label(board_id, name, id);
+CREATE INDEX IF NOT EXISTS idx_work_link_card_created_id
+  ON card_work_link(card_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_agent_workspace_operator_created_id
+  ON agent(workspace_id, operator_user_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_project_kb_project_kb
+  ON project_knowledge_base(project_id, kb_id);
+CREATE INDEX IF NOT EXISTS idx_kb_relation_kb_created_id
+  ON kb_relation(kb_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_kb_fact_entity_created_id
+  ON kb_fact(entity_id, created_at, id);

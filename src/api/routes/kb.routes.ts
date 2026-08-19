@@ -71,18 +71,10 @@ export function createKBRouter(kbService: KBService): Router {
       const kbId = req.query.kb_id as string | undefined;
       const projectId = req.query.project_id as string | undefined;
 
-      let kbIds: string[] | undefined;
-      if (kbId) {
-        kbIds = [kbId];
-      } else if (projectId) {
-        const kbs = await kbService.list(projectId);
-        kbIds = kbs.map(k => k.id);
-      }
-
-      const results = await kbService.searchKnowledgePage(query, kbIds, {
+      const results = await kbService.searchKnowledgePage(query, kbId ? [kbId] : undefined, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, projectId);
       res.json(results);
     } catch (err) {
       next(err);
@@ -94,7 +86,10 @@ export function createKBRouter(kbService: KBService): Router {
     try {
       const kbId = req.query.kb_id as string | undefined;
       const projectId = req.query.project_id as string | undefined;
-      const tree = await kbService.getGraphTree(kbId, projectId);
+      const tree = await kbService.getGraphTree(kbId, projectId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(tree);
     } catch (err) {
       next(err);
@@ -108,7 +103,10 @@ export function createKBRouter(kbService: KBService): Router {
       if (!q) return res.status(400).json({ error: 'Query parameter q or identifier is required' });
 
       const kbId = req.query.kb_id as string | undefined;
-      const result = await kbService.getEntityKnowledge(q, kbId ? [kbId] : undefined);
+      const result = await kbService.getEntityKnowledge(q, kbId ? [kbId] : undefined, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       if (!result) return res.status(404).json({ error: 'Entity knowledge not found' });
       res.json(result);
     } catch (err) {

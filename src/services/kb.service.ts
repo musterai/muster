@@ -582,8 +582,8 @@ export class KBService {
 
   // --- Aggregated Knowledge & Graph Queries ---
 
-  async getEntityKnowledge(queryStr: string, kbIds?: string[]): Promise<EntityKnowledgeResult | null> {
-    let sql = 'SELECT * FROM kb_entity WHERE (id = ? OR identifier = ? OR LOWER(name) = LOWER(?))';
+  async getEntityKnowledge(queryStr: string, kbIds?: string[], options: PageOptions = {}): Promise<EntityKnowledgeResult | null> {
+    let sql = 'SELECT id, kb_id, name, type, identifier, created_at, updated_at FROM kb_entity WHERE (id = ? OR identifier = ? OR LOWER(name) = LOWER(?))';
     const params: unknown[] = [queryStr, queryStr, queryStr];
 
     if (kbIds && kbIds.length > 0) {
@@ -595,29 +595,75 @@ export class KBService {
     if (!entities[0]) return null;
 
     const entity = entities[0];
-    const facts = await this.listFacts(undefined, entity.id);
-
-    const outgoing = await this.db.query<KBRelation>(
-      `SELECT r.*, e.name as target_entity_name 
-       FROM kb_relation r 
-       JOIN kb_entity e ON r.target_entity_id = e.id 
-       WHERE r.source_entity_id = ?`,
-      [entity.id]
-    );
-
-    const incoming = await this.db.query<KBRelation>(
-      `SELECT r.*, e.name as source_entity_name 
-       FROM kb_relation r 
-       JOIN kb_entity e ON r.source_entity_id = e.id 
-       WHERE r.target_entity_id = ?`,
-      [entity.id]
-    );
+    const limit = normalizePageLimit(options.limit);
+    const scope = `entity-knowledge:${entity.id}`;
+    const cursor = decodeCursor(options.cursor, scope, 3);
+    const phase = cursor?.[0] || 'facts';
+    const afterCreated = cursor?.[1] || '';
+    const afterId = cursor?.[2] || '';
+    let facts: KBFactSummary[] = [];
+    let outgoing: Array<Omit<KBRelation, 'description'>> = [];
+    let incoming: Array<Omit<KBRelation, 'description'>> = [];
+    let rows: Array<KBFactSummary | Omit<KBRelation, 'description'>>;
+    if (phase === 'facts') {
+      const params: unknown[] = [entity.id];
+      let factSql = `SELECT f.id, f.kb_id, f.entity_id, f.title, f.category, f.confidence,
+        f.source_principal_id, f.created_at, f.updated_at, e.name as entity_name,
+        e.identifier as entity_identifier FROM kb_fact f LEFT JOIN kb_entity e ON f.entity_id=e.id
+        WHERE f.entity_id = ?`;
+      if (afterCreated) { factSql += ' AND (f.created_at > ? OR (f.created_at = ? AND f.id > ?))'; params.push(afterCreated, afterCreated, afterId); }
+      factSql += ' ORDER BY f.created_at ASC, f.id ASC LIMIT ?'; params.push(limit + 1);
+      rows = await this.db.query<KBFactSummary>(factSql, params); facts = rows.slice(0, limit) as KBFactSummary[];
+    } else {
+      const outgoingPhase = phase === 'outgoing';
+      const params: unknown[] = [entity.id];
+      let relSql = `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at,
+        e.name as ${outgoingPhase ? 'target' : 'source'}_entity_name FROM kb_relation r
+        JOIN kb_entity e ON e.id=r.${outgoingPhase ? 'target' : 'source'}_entity_id
+        WHERE r.${outgoingPhase ? 'source' : 'target'}_entity_id = ?`;
+      if (afterCreated) { relSql += ' AND (r.created_at > ? OR (r.created_at = ? AND r.id > ?))'; params.push(afterCreated, afterCreated, afterId); }
+      relSql += ' ORDER BY r.created_at ASC, r.id ASC LIMIT ?'; params.push(limit + 1);
+      rows = await this.db.query<Omit<KBRelation, 'description'>>(relSql, params);
+      if (outgoingPhase) outgoing = rows.slice(0, limit) as Array<Omit<KBRelation, 'description'>>;
+      else incoming = rows.slice(0, limit) as Array<Omit<KBRelation, 'description'>>;
+    }
+    let moreInPhase = rows.length > limit;
+    let nextPhase: string | null = moreInPhase ? phase : phase === 'facts' ? 'outgoing' : phase === 'outgoing' ? 'incoming' : null;
+    let last = rows.slice(0, limit).at(-1);
+    // Preserve the convenient legacy shape for small entity profiles while
+    // enforcing one shared row budget across all three collections.
+    if (!cursor && phase === 'facts' && !moreInPhase && facts.length < limit) {
+      let remaining = limit - facts.length;
+      const outgoingRows = await this.db.query<Omit<KBRelation, 'description'>>(
+        `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at,e.name target_entity_name
+         FROM kb_relation r JOIN kb_entity e ON e.id=r.target_entity_id
+         WHERE r.source_entity_id=? ORDER BY r.created_at ASC,r.id ASC LIMIT ?`, [entity.id, remaining + 1]);
+      outgoing = outgoingRows.slice(0, remaining);
+      if (outgoingRows.length > remaining) {
+        moreInPhase = true; nextPhase = 'outgoing'; last = outgoing.at(-1);
+      } else {
+        remaining -= outgoing.length;
+        const incomingRows = await this.db.query<Omit<KBRelation, 'description'>>(
+          `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at,e.name source_entity_name
+           FROM kb_relation r JOIN kb_entity e ON e.id=r.source_entity_id
+           WHERE r.target_entity_id=? ORDER BY r.created_at ASC,r.id ASC LIMIT ?`, [entity.id, remaining + 1]);
+        incoming = incomingRows.slice(0, remaining);
+        moreInPhase = incomingRows.length > remaining;
+        nextPhase = moreInPhase ? 'incoming' : null;
+        last = incoming.at(-1);
+      }
+    }
 
     return {
       entity,
       facts,
       outgoing_relations: outgoing,
       incoming_relations: incoming,
+      page: {
+        limit,
+        has_more: nextPhase !== null,
+        next_cursor: nextPhase ? encodeCursor(scope, [nextPhase, moreInPhase ? (last?.created_at || '') : '', moreInPhase ? (last?.id || '') : '']) : null,
+      },
     };
   }
 
@@ -660,18 +706,18 @@ export class KBService {
     query: string,
     kbIds?: string[],
     options: PageOptions = {},
+    projectId?: string,
   ): Promise<{ facts: KBFactSummary[]; entities: KBEntity[]; page: PageInfo }> {
     const limit = normalizePageLimit(options.limit ?? 20);
     const normalizedKbIds = kbIds ? [...kbIds].sort() : undefined;
-    const scope = `knowledge-search:${JSON.stringify({ query, kbIds: normalizedKbIds || null })}`;
-    const cursor = decodeCursor(options.cursor, scope, 6);
-    const factDone = cursor?.[4] === '1';
-    const entityDone = cursor?.[5] === '1';
+    const scope = `knowledge-search:${JSON.stringify({ query, kbIds: normalizedKbIds || null, projectId: projectId || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 3);
+    const phase = cursor?.[0] || 'facts';
     const pattern = `%${query}%`;
     let facts: KBFactSummary[] = [];
     let entities: KBEntity[] = [];
 
-    if (!factDone) {
+    if (phase === 'facts') {
       let sql = `SELECT f.id, f.kb_id, f.entity_id, f.title, f.category, f.confidence,
         f.source_principal_id, f.created_at, f.updated_at, e.name as entity_name,
         e.identifier as entity_identifier FROM kb_fact f
@@ -682,87 +728,94 @@ export class KBService {
         sql += ` AND f.kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
         params.push(...normalizedKbIds);
       }
-      if (cursor && cursor[0]) {
+      if (projectId) { sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=f.kb_id AND pkb.project_id=?)'; params.push(projectId); }
+      if (cursor && cursor[1]) {
         sql += ' AND (f.created_at < ? OR (f.created_at = ? AND f.id < ?))';
-        params.push(cursor[0], cursor[0], cursor[1]);
+        params.push(cursor[1], cursor[1], cursor[2]);
       }
       sql += ' ORDER BY f.created_at DESC, f.id DESC LIMIT ?';
       params.push(limit + 1);
       facts = await this.db.query<KBFactSummary>(sql, params);
     }
 
-    if (!entityDone) {
-      let sql = 'SELECT * FROM kb_entity WHERE (name LIKE ? OR identifier LIKE ? OR type LIKE ?)';
+    if (phase === 'entities') {
+      let sql = 'SELECT id,kb_id,name,type,identifier,created_at,updated_at FROM kb_entity WHERE (name LIKE ? OR identifier LIKE ? OR type LIKE ?)';
       const params: unknown[] = [pattern, pattern, pattern];
       if (normalizedKbIds?.length) {
         sql += ` AND kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
         params.push(...normalizedKbIds);
       }
-      if (cursor && cursor[2]) {
+      if (projectId) { sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=kb_entity.kb_id AND pkb.project_id=?)'; params.push(projectId); }
+      if (cursor && cursor[1]) {
         sql += ' AND (updated_at < ? OR (updated_at = ? AND id < ?))';
-        params.push(cursor[2], cursor[2], cursor[3]);
+        params.push(cursor[1], cursor[1], cursor[2]);
       }
       sql += ' ORDER BY updated_at DESC, id DESC LIMIT ?';
       params.push(limit + 1);
       entities = await this.db.query<KBEntity>(sql, params);
     }
 
-    const factMore = facts.length > limit;
-    const entityMore = entities.length > limit;
+    let factMore = facts.length > limit;
+    let entityMore = entities.length > limit;
     const factItems = facts.slice(0, limit);
     const entityItems = entities.slice(0, limit);
+    // Row limits alone do not bound bytes when user-controlled summary fields
+    // approach their individual maxima. Keep headroom for the envelope/cursor.
+    while (Buffer.byteLength(JSON.stringify({ facts: factItems, entities: entityItems }), 'utf8') > 90_000
+      && factItems.length + entityItems.length > 1) {
+      if (entityItems.length) { entityItems.pop(); entityMore = true; }
+      else { factItems.pop(); factMore = true; }
+    }
     const lastFact = factItems[factItems.length - 1];
     const lastEntity = entityItems[entityItems.length - 1];
-    const hasMore = factMore || entityMore;
+    const hasMore = phase === 'facts' ? true : entityMore;
     return {
       facts: factItems,
       entities: entityItems,
       page: {
         limit,
         has_more: hasMore,
-        next_cursor: hasMore ? encodeCursor(scope, [
-          lastFact?.created_at || cursor?.[0] || '',
-          lastFact?.id || cursor?.[1] || '',
-          lastEntity?.updated_at || cursor?.[2] || '',
-          lastEntity?.id || cursor?.[3] || '',
-          factMore ? '0' : '1',
-          entityMore ? '0' : '1',
-        ]) : null,
+        next_cursor: hasMore ? encodeCursor(scope, phase === 'facts' && factMore
+          ? ['facts', lastFact?.created_at || '', lastFact?.id || '']
+          : ['entities', phase === 'entities' ? (lastEntity?.updated_at || '') : '', phase === 'entities' ? (lastEntity?.id || '') : '']) : null,
       },
     };
   }
 
-  async getGraphTree(kbId?: string, projectId?: string): Promise<KBGraphTree> {
-    let targetKbIds: string[] = [];
-
-    if (kbId) {
-      targetKbIds = [kbId];
-    } else if (projectId) {
-      const kbs = await this.list(projectId);
-      targetKbIds = kbs.map(k => k.id);
+  async getGraphTree(kbId?: string, projectId?: string, options: PageOptions = {}): Promise<KBGraphTree> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `kb-graph:${kbId || ''}:${projectId || ''}`;
+    const cursor = decodeCursor(options.cursor, scope, 3);
+    const phase = cursor?.[0] || 'nodes';
+    const params: unknown[] = [];
+    const filter = (alias: string) => {
+      if (kbId) { params.push(kbId); return `${alias}.kb_id = ?`; }
+      if (projectId) { params.push(projectId); return `EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=${alias}.kb_id AND pkb.project_id=?)`; }
+      return '1=1';
+    };
+    let entities: Array<KBEntity & { fact_count: number }> = [];
+    let links: KBRelation[] = [];
+    if (phase === 'nodes') {
+      let sql = `SELECT e.id,e.kb_id,e.name,e.type,e.identifier,e.created_at,e.updated_at,COUNT(f.id) fact_count FROM kb_entity e LEFT JOIN kb_fact f ON e.id=f.entity_id WHERE ${filter('e')}`;
+      if (cursor?.[1]) { sql += ' AND (e.name > ? OR (e.name=? AND e.id>?))'; params.push(cursor[1], cursor[1], cursor[2]); }
+      sql += ' GROUP BY e.id ORDER BY e.name ASC,e.id ASC LIMIT ?'; params.push(limit + 1);
+      entities = await this.db.query(sql, params);
     } else {
-      const kbs = await this.list();
-      targetKbIds = kbs.map(k => k.id);
+      let sql = `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at FROM kb_relation r WHERE ${filter('r')}`;
+      if (cursor?.[1]) { sql += ' AND (r.created_at > ? OR (r.created_at=? AND r.id>?))'; params.push(cursor[1], cursor[1], cursor[2]); }
+      sql += ' ORDER BY r.created_at ASC,r.id ASC LIMIT ?'; params.push(limit + 1);
+      links = await this.db.query(sql, params);
     }
-
-    if (targetKbIds.length === 0) {
-      return { nodes: [], links: [] };
+    if (phase === 'nodes' && !cursor && entities.length <= limit && entities.length < limit) {
+      const remaining = limit - entities.length;
+      const linkParams: unknown[] = [];
+      let linkFilter = '1=1';
+      if (kbId) { linkFilter = 'r.kb_id=?'; linkParams.push(kbId); }
+      else if (projectId) { linkFilter = 'EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=r.kb_id AND pkb.project_id=?)'; linkParams.push(projectId); }
+      linkParams.push(remaining + 1);
+      links = await this.db.query(`SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at
+        FROM kb_relation r WHERE ${linkFilter} ORDER BY r.created_at ASC,r.id ASC LIMIT ?`, linkParams);
     }
-
-    const inClause = targetKbIds.map(() => '?').join(',');
-    const entities = await this.db.query<KBEntity>(
-      `SELECT e.*, COUNT(f.id) as fact_count
-       FROM kb_entity e
-       LEFT JOIN kb_fact f ON e.id = f.entity_id
-       WHERE e.kb_id IN (${inClause})
-       GROUP BY e.id`,
-      targetKbIds
-    );
-
-    const links = await this.db.query<KBRelation>(
-      `SELECT * FROM kb_relation WHERE kb_id IN (${inClause})`,
-      targetKbIds
-    );
 
     const nodes: KBGraphNode[] = entities.map(e => ({
       id: e.id,
@@ -770,7 +823,7 @@ export class KBService {
       type: e.type,
       identifier: e.identifier,
       kb_id: e.kb_id,
-      fact_count: (e as unknown as { fact_count: number }).fact_count || 0,
+      fact_count: e.fact_count || 0,
     }));
 
     const graphLinks: KBGraphLink[] = links.map(l => ({
@@ -778,10 +831,19 @@ export class KBService {
       source: l.source_entity_id,
       target: l.target_entity_id,
       relation_type: l.relation_type,
-      description: l.description,
     }));
-
-    return { nodes, links: graphLinks };
+    const nodeItems = nodes.slice(0, limit);
+    const remaining = Math.max(0, limit - nodeItems.length);
+    const linkItems = graphLinks.slice(0, phase === 'nodes' ? remaining : limit);
+    const nodeMore = entities.length > limit;
+    const linkMore = links.length > (phase === 'nodes' ? remaining : limit);
+    const hasMore = nodeMore || linkMore || (phase === 'nodes' && nodeItems.length === limit && !nodeMore);
+    const nextPhase = nodeMore ? 'nodes' : 'links';
+    const included = nodeMore ? entities.slice(0, limit).at(-1) : linkItems.at(-1);
+    return { nodes: nodeItems, links: linkItems, page: {
+      limit, has_more: hasMore,
+      next_cursor: hasMore ? encodeCursor(scope, [nextPhase, nodeMore ? (included as KBEntity).name : linkMore ? ((included as unknown as KBRelation)?.created_at || '') : '', (nodeMore || linkMore) ? included?.id || '' : '']) : null,
+    } };
   }
 
   private detectEntityType(str?: string | null): string {

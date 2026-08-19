@@ -911,8 +911,8 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
-  server.tool('list_work_links', { card_id: cardReferenceSchema }, withPermission('list_work_links', auth, async ({ card_id }) => {
-    const links = await services.cardService.listWorkLinks(card_id);
+  server.tool('list_work_links', { card_id: cardReferenceSchema, cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(), limit: z.number().int().min(1).max(100).optional() }, withPermission('list_work_links', auth, async ({ card_id, cursor, limit }) => {
+    const links = await services.cardService.listWorkLinksPage(card_id, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(links, null, 2) }] };
   }));
 
@@ -921,8 +921,8 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
-  server.tool('list_labels', { board_id: z.string() }, withPermission('list_labels', auth, async ({ board_id }) => {
-    const result = await services.boardService.listLabels(board_id);
+  server.tool('list_labels', { board_id: z.string(), cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(), limit: z.number().int().min(1).max(100).optional() }, withPermission('list_labels', auth, async ({ board_id, cursor, limit }) => {
+    const result = await services.boardService.listLabelsPage(board_id, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -1124,22 +1124,17 @@ All AI agents and human operators collaborating within Muster must follow this p
     cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
     limit: z.number().int().min(1).max(100).optional(),
   }, withPermission('search_knowledge', auth, async ({ query, kb_id, project_id, cursor, limit }) => {
-    let kbIds: string[] | undefined;
-    if (kb_id) {
-      kbIds = [kb_id];
-    } else if (project_id) {
-      const kbs = await services.kbService.list(project_id);
-      kbIds = kbs.map(k => k.id);
-    }
-    const results = await services.kbService.searchKnowledgePage(query, kbIds, { cursor, limit });
+    const results = await services.kbService.searchKnowledgePage(query, kb_id ? [kb_id] : undefined, { cursor, limit }, project_id);
     return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
   }));
 
   server.tool('get_entity_knowledge', {
     query: z.string().describe('Entity ID, canonical identifier (IP, email, hostname), or entity name'),
-    kb_id: z.string().optional()
-  }, withPermission('get_entity_knowledge', auth, async ({ query, kb_id }) => {
-    const result = await services.kbService.getEntityKnowledge(query, kb_id ? [kb_id] : undefined);
+    kb_id: z.string().optional(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('get_entity_knowledge', auth, async ({ query, kb_id, cursor, limit }) => {
+    const result = await services.kbService.getEntityKnowledge(query, kb_id ? [kb_id] : undefined, { cursor, limit });
     if (!result) return { content: [{ type: 'text', text: `No entity knowledge found for \"${query}\"` }] };
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));

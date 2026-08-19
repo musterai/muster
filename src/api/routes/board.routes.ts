@@ -4,7 +4,7 @@ import { BoardService } from '../../services/board.service.js';
 import { ColumnService } from '../../services/column.service.js';
 import { CardService } from '../../services/card.service.js';
 import { validateRequest } from '../middleware/validate.js';
-import { boardCreateSchema, boardUpdateSchema, collectionQuerySchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
+import { allBoardsQuerySchema, boardCreateSchema, boardUpdateSchema, collectionQuerySchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
 
 export function createBoardRouter(
   boardService: BoardService,
@@ -25,14 +25,18 @@ export function createBoardRouter(
     }
   });
 
-  router.get('/projects/:projectId/all-boards', ...validateRequest({ query: collectionQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/all-boards', ...validateRequest({ query: allBoardsQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const boardPage = await boardService.listPage(req.params.projectId, { limit: 100 });
-      const boards = boardPage.items;
-      const cards = await cardService.listPage({ project_id: req.params.projectId }, {
-        cursor: req.query.cursor as string | undefined,
+      const boardPage = await boardService.listPage(req.params.projectId, {
+        cursor: req.query.board_cursor as string | undefined,
         limit: req.query.limit as number | undefined,
       });
+      const boards = boardPage.items;
+      const includeCards = (req.query.include_cards as unknown as boolean | undefined) !== false;
+      const cards = includeCards ? await cardService.listPage({ project_id: req.params.projectId }, {
+        cursor: (req.query.card_cursor || req.query.cursor) as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }) : { items: [], page: { limit: (req.query.limit as unknown as number) || 50, has_more: false, next_cursor: null } };
       const columnsList = await Promise.all(boards.map((b) => columnService.list(b.id)));
       const columns = columnsList.flat();
 
@@ -73,6 +77,17 @@ export function createBoardRouter(
         limit: req.query.limit as number | undefined,
       });
       res.json({ ...board, columns, cards: cards.items, card_page: cards.page });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/boards/:id/labels', ...validateRequest({ query: collectionQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.json(await boardService.listLabelsPage(req.params.id, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }));
     } catch (err) {
       next(err);
     }

@@ -582,10 +582,11 @@ export interface AddKBRelation {
 // ============================================================
 
 export interface EntityKnowledgeResult {
-  entity: KBEntity;
-  facts: KBFact[];
-  outgoing_relations: KBRelation[];
-  incoming_relations: KBRelation[];
+  entity: Omit<KBEntity, 'metadata'>;
+  facts: KBFactSummary[];
+  outgoing_relations: Array<Omit<KBRelation, 'description'>>;
+  incoming_relations: Array<Omit<KBRelation, 'description'>>;
+  page: import('./pagination.js').PageInfo;
 }
 
 export interface KBGraphNode {
@@ -602,10 +603,10 @@ export interface KBGraphLink {
   source: string;
   target: string;
   relation_type: string;
-  description: string | null;
 }
 
 export interface KBGraphTree {
   nodes: KBGraphNode[];
   links: KBGraphLink[];
+  page: import('./pagination.js').PageInfo;
 }

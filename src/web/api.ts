@@ -76,6 +76,30 @@ async function fetchAllPages<T>(url: string): Promise<T[]> {
   return items;
 }
 
+type AllBoardsPage = Board & {
+  boards: Board[];
+  columns: Column[];
+  cards: CardSummary[];
+  board_page: Page<Board>['page'];
+};
+
+async function fetchAllBoardPages(projectId: string): Promise<AllBoardsPage> {
+  let cursor: string | null = null;
+  let first: AllBoardsPage | null = null;
+  const boards: Board[] = [];
+  const columns: Column[] = [];
+  do {
+    const response: AllBoardsPage = await fetchJSON(`/projects/${projectId}/all-boards?limit=100&include_cards=false${cursor ? `&board_cursor=${encodeURIComponent(cursor)}` : ''}`);
+    first ||= response;
+    boards.push(...response.boards);
+    columns.push(...response.columns);
+    cursor = response.board_page.has_more ? response.board_page.next_cursor : null;
+    if (response.board_page.has_more && !cursor) throw new Error('All Boards response omitted its board continuation cursor');
+  } while (cursor);
+  if (!first) throw new Error('All Boards response was empty');
+  return { ...first, boards, columns, cards: [], board_page: { ...first.board_page, has_more: false, next_cursor: null } };
+}
+
 export const api = {
   // Projects
   getProjects: () => fetchAllPages<Project>('/projects'),
@@ -91,7 +115,7 @@ export const api = {
     fetchJSON<Board>(`/projects/${projectId}/boards`, { method: 'POST', body: JSON.stringify({ name, template, columns }) }),
   getBoardDetails: async (id: string, projectId?: string) => {
     if (id === 'all' && projectId) {
-      const details = await fetchJSON<Board & { columns: Column[]; cards: CardSummary[] }>(`/projects/${projectId}/all-boards?limit=100`);
+      const details = await fetchAllBoardPages(projectId);
       const cards = await fetchAllPages<CardSummary>(`/projects/${projectId}/cards`);
       return { ...details, cards: cards as Card[] };
     }
@@ -100,7 +124,7 @@ export const api = {
     return { ...details, cards: cards as Card[] };
   },
   getAllBoardsDetails: async (projectId: string) => {
-    const details = await fetchJSON<Board & { columns: Column[]; cards: CardSummary[] }>(`/projects/${projectId}/all-boards?limit=100`);
+    const details = await fetchAllBoardPages(projectId);
     const cards = await fetchAllPages<CardSummary>(`/projects/${projectId}/cards`);
     return { ...details, cards: cards as Card[] };
   },
@@ -206,7 +230,20 @@ export const api = {
   deviceDeny: (userCode: string) => fetchJSON<{ message: string }>(`/oauth/device/deny`, { method: 'POST', body: JSON.stringify({ user_code: userCode }) }),
 
   // MCP-native OAuth (MUS-29) — the `claude mcp add` consent screen
-  mcpAuthorizeDetails: (queryString: string) => fetchJSON<McpAuthorizeDetails>(`/oauth/authorize/details?${queryString}`),
+  mcpAuthorizeDetails: async (queryString: string) => {
+    const agents: McpAuthorizeDetails['agents'] = [];
+    const roles: McpAuthorizeDetails['roles'] = [];
+    let cursor: string | null = null;
+    let first: McpAuthorizeDetails | null = null;
+    do {
+      const page: McpAuthorizeDetails = await fetchJSON(`/oauth/authorize/details?${queryString}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      first ||= page; agents.push(...page.agents); roles.push(...page.roles);
+      cursor = page.page.has_more ? page.page.next_cursor : null;
+      if (page.page.has_more && !cursor) throw new Error('OAuth details response omitted its continuation cursor');
+    } while (cursor);
+    if (!first) throw new Error('OAuth details response was empty');
+    return { ...first, agents, roles, page: { ...first.page, has_more: false, next_cursor: null } };
+  },
   mcpAuthorizeConsent: (payload: Record<string, string>) =>
     fetchJSON<{ redirect_uri: string }>(`/oauth/authorize/consent`, { method: 'POST', body: JSON.stringify(payload) }),
 
@@ -261,16 +298,32 @@ export const api = {
       return { facts, entities };
     })();
   },
-  getGraphTree: (kbId?: string, projectId?: string) => {
+  getGraphTree: async (kbId?: string, projectId?: string) => {
     let url = '/kbs/graph';
     if (kbId) url += `?kb_id=${kbId}`;
     else if (projectId) url += `?project_id=${projectId}`;
-    return fetchJSON<KBGraphTree>(url);
+    const nodes: KBGraphTree['nodes'] = []; const links: KBGraphTree['links'] = [];
+    let cursor: string | null = null; let first: KBGraphTree | null = null;
+    do {
+      const page: KBGraphTree = await fetchJSON(`${url}${url.includes('?') ? '&' : '?'}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      first ||= page; nodes.push(...page.nodes); links.push(...page.links);
+      cursor = page.page.has_more ? page.page.next_cursor : null;
+    } while (cursor);
+    return { ...(first as KBGraphTree), nodes, links, page: { ...(first as KBGraphTree).page, has_more: false, next_cursor: null } };
   },
-  getEntityKnowledge: (queryStr: string, kbId?: string) => {
+  getEntityKnowledge: async (queryStr: string, kbId?: string) => {
     let url = `/kbs/entity-knowledge?q=${encodeURIComponent(queryStr)}`;
     if (kbId) url += `&kb_id=${kbId}`;
-    return fetchJSON<EntityKnowledgeResult>(url);
+    const factSummaries: KBFactSummary[] = []; const outgoing: EntityKnowledgeResult['outgoing_relations'] = []; const incoming: EntityKnowledgeResult['incoming_relations'] = [];
+    let cursor: string | null = null; let first: EntityKnowledgeResult | null = null;
+    do {
+      const page: EntityKnowledgeResult = await fetchJSON(`${url}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      first ||= page; factSummaries.push(...page.facts); outgoing.push(...page.outgoing_relations); incoming.push(...page.incoming_relations);
+      cursor = page.page.has_more ? page.page.next_cursor : null;
+    } while (cursor);
+    if (!first) throw new Error('Entity knowledge response was empty');
+    const facts = await Promise.all(factSummaries.map(f => api.getKBFact(f.id)));
+    return { ...first, facts, outgoing_relations: outgoing, incoming_relations: incoming, page: { ...first.page, has_more: false, next_cursor: null } };
   },
   getKBFacts: async (kbId: string) => {
     const summaries = await fetchAllPages<KBFactSummary>(`/kbs/${kbId}/facts`);

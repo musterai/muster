@@ -13,6 +13,7 @@ describe('bounded collection pagination', () => {
   let db: DatabaseAdapter;
   let dbPath: string;
   let cards: CardService;
+  let boards: BoardService;
   let documents: DocumentService;
   let agents: AgentService;
   let events: EventService;
@@ -28,7 +29,7 @@ describe('bounded collection pagination', () => {
     const now = new Date().toISOString();
     await db.execute('INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ['pagination-ws', 'Pagination', 'pagination', now, now]);
     events = new EventService(db);
-    const boards = new BoardService(db, events);
+    boards = new BoardService(db, events);
     const projects = new ProjectService(db, events, boards);
     cards = new CardService(db, events);
     documents = new DocumentService(db, events);
@@ -149,4 +150,59 @@ describe('bounded collection pagination', () => {
       'idx_kb_fact_kb_created_id',
     ]));
   });
+
+  it('bounds the 105-row label, work-link, graph, entity-knowledge and 10MB metadata adversarial collections', async () => {
+    for (let index = 0; index < 105; index++) {
+      await boards.createLabel({ board_id: boardId, name: `Label ${index.toString().padStart(3, '0')}`, color: 'neutral' });
+    }
+    const labelPage = await boards.listLabelsPage(boardId, { limit: 100 });
+    expect(labelPage.items).toHaveLength(100);
+    expect(labelPage.page.has_more).toBe(true);
+    expect((await boards.listLabelsPage(boardId, { limit: 100, cursor: labelPage.page.next_cursor! })).items).toHaveLength(5);
+    await expect(boards.listLabelsPage('another-board', { cursor: labelPage.page.next_cursor! })).rejects.toThrow(/cursor is invalid/);
+
+    const card = await cards.create({ column_id: columnId, title: 'Work-link fixture' });
+    for (let index = 0; index < 105; index++) {
+      await cards.addWorkLink(card.id, { kind: 'commit', provider: 'other', url: `https://example.test/${index}` });
+    }
+    const workLinks = await cards.listWorkLinksPage(card.id, { limit: 100 });
+    expect(workLinks.items).toHaveLength(100);
+    expect((await cards.listWorkLinksPage(card.id, { limit: 100, cursor: workLinks.page.next_cursor! })).items).toHaveLength(5);
+
+    const kb = await kbs.create({ name: 'Adversarial KB', project_ids: [projectId] });
+    const metadata = JSON.stringify({ payload: 'x'.repeat(99_900) });
+    const now = new Date().toISOString();
+    for (let index = 0; index < 105; index++) {
+      const entityId = `bulk-entity-${index.toString().padStart(3, '0')}`;
+      await db.execute('INSERT INTO kb_entity (id,kb_id,name,type,identifier,metadata,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',
+        [entityId, kb.id, `Bulk ${index.toString().padStart(3, '0')}`, 'custom', entityId, metadata, now, now]);
+    }
+    for (let index = 0; index < 105; index++) {
+      await db.execute('INSERT INTO kb_fact (id,kb_id,entity_id,title,content,category,confidence,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        [`bulk-fact-${index.toString().padStart(3, '0')}`, kb.id, 'bulk-entity-000', `Bulk fact ${index}`, 'private body '.repeat(100), 'test', 1, now, now]);
+    }
+
+    const searchFacts = await kbs.searchKnowledgePage('Bulk', [kb.id], { limit: 100 });
+    expect(searchFacts.facts.length + searchFacts.entities.length).toBeLessThanOrEqual(100);
+    expect(JSON.stringify(searchFacts).length).toBeLessThan(100_000);
+    expect(searchFacts.facts.every(fact => !('content' in fact))).toBe(true);
+    const searchEntities = await kbs.searchKnowledgePage('Bulk', [kb.id], { limit: 100, cursor: searchFacts.page.next_cursor! });
+    expect(searchEntities.facts.length + searchEntities.entities.length).toBeLessThanOrEqual(100);
+    expect(searchEntities.entities.every(entity => !('metadata' in entity))).toBe(true);
+    expect(JSON.stringify(searchEntities).length).toBeLessThan(100_000);
+
+    const graphFirst = await kbs.getGraphTree(kb.id, undefined, { limit: 100 });
+    expect(graphFirst.nodes).toHaveLength(100);
+    expect(graphFirst.page.has_more).toBe(true);
+    expect(JSON.stringify(graphFirst).length).toBeLessThan(100_000);
+    const graphSecond = await kbs.getGraphTree(kb.id, undefined, { limit: 100, cursor: graphFirst.page.next_cursor! });
+    expect(graphSecond.nodes).toHaveLength(5);
+
+    const knowledgeFirst = await kbs.getEntityKnowledge('bulk-entity-000', [kb.id], { limit: 100 });
+    expect(knowledgeFirst?.facts).toHaveLength(100);
+    expect(knowledgeFirst?.facts.every(fact => !('content' in fact))).toBe(true);
+    expect(JSON.stringify(knowledgeFirst).length).toBeLessThan(100_000);
+    const knowledgeSecond = await kbs.getEntityKnowledge('bulk-entity-000', [kb.id], { limit: 100, cursor: knowledgeFirst!.page.next_cursor! });
+    expect(knowledgeSecond?.facts).toHaveLength(5);
+  }, 30_000);
 });

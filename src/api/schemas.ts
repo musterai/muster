@@ -137,6 +137,13 @@ export const cardListQuerySchema = strictObject({
   ...paginationQuery,
 });
 export const collectionQuerySchema = strictObject({ ...paginationQuery });
+export const allBoardsQuerySchema = strictObject({
+  board_cursor: paginationQuery.cursor,
+  card_cursor: paginationQuery.cursor,
+  cursor: paginationQuery.cursor,
+  limit: paginationQuery.limit,
+  include_cards: queryBoolean.optional(),
+});
 // Shared with MCP through `src/shared/card-input-schema.ts`; REST supplies
 // `column_id` through `columnIdParamsSchema` while MCP includes it in its
 // strict tool-input envelope.
@@ -268,11 +275,12 @@ export const kbSearchQuerySchema = strictObject({
   project_id: optionalId,
   ...paginationQuery,
 });
-export const kbGraphQuerySchema = strictObject({ kb_id: optionalId, project_id: optionalId });
+export const kbGraphQuerySchema = strictObject({ kb_id: optionalId, project_id: optionalId, ...paginationQuery });
 export const kbEntityKnowledgeQuerySchema = strictObject({
   q: textSchema(MAX_QUERY).optional(),
   identifier: textSchema(MAX_QUERY).optional(),
   kb_id: optionalId,
+  ...paginationQuery,
 }).refine(value => value.q !== undefined || value.identifier !== undefined, {
   message: 'q or identifier is required',
 });
@@ -403,7 +411,7 @@ export const oauthAuthorizeQuerySchema = strictObject({
   resource: urlSchema,
   state: textSchema(MAX_QUERY).optional(),
 });
-export const oauthAuthorizeDetailsQuerySchema = strictObject({ client_id: textSchema(MAX_QUERY) });
+export const oauthAuthorizeDetailsQuerySchema = strictObject({ client_id: textSchema(MAX_QUERY), ...paginationQuery });
 export const oauthConsentSchema = strictObject({
   client_id: textSchema(MAX_QUERY),
   redirect_uri: urlSchema,

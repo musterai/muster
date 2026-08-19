@@ -259,6 +259,7 @@ export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
   { method: 'GET', pattern: /^\/api\/v1\/(?:projects\/[^/]+|boards\/[^/]+)\/cards$/, operation: 'list_cards' },
   { method: 'GET', pattern: /^\/api\/v1\/cards\/[^/]+$/, operation: 'get_card' },
   { method: 'GET', pattern: /^\/api\/v1\/cards\/[^/]+\/work-links$/, operation: 'list_work_links' },
+  { method: 'GET', pattern: /^\/api\/v1\/boards\/[^/]+\/labels$/, operation: 'list_labels' },
   { method: 'POST', pattern: /^\/api\/v1\/columns\/[^/]+\/cards$/, operation: 'create_card' },
   { method: 'PUT', pattern: /^\/api\/v1\/cards\/[^/]+$/, operation: 'update_card' },
   { method: 'PATCH', pattern: /^\/api\/v1\/cards\/[^/]+\/move$/, operation: 'move_card' },

@@ -281,6 +281,7 @@ export interface EntityKnowledgeResult {
   facts: KBFact[];
   outgoing_relations: KBRelation[];
   incoming_relations: KBRelation[];
+  page: Page<unknown>['page'];
 }
 
 export interface KBGraphNode {
@@ -297,12 +298,13 @@ export interface KBGraphLink {
   source: string;
   target: string;
   relation_type: string;
-  description: string | null;
+  description?: string | null;
 }
 
 export interface KBGraphTree {
   nodes: KBGraphNode[];
   links: KBGraphLink[];
+  page: Page<unknown>['page'];
 }
 
 /** Response shape of GET /auth/me — the signed-in state of the current browser session. */
@@ -355,6 +357,7 @@ export interface McpAuthorizeDetails {
   resource: string;
   agents: { id: string; name: string; role_id: string | null }[];
   roles: { id: string; name: string }[];
+  page: Page<unknown>['page'];
 }
 
 /** A privileged-action audit record (MUS-30) — security trail, never client-writable. */
