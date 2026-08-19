@@ -24,6 +24,36 @@ function assertStringArray(label, values, { allowEmpty = false } = {}) {
   }
 }
 
+function canonicalRelativePath(label, value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${label} must be a non-empty relative path`);
+  }
+  if (value.includes('\\') || value.includes('\0') || path.posix.isAbsolute(value) || /^[A-Za-z]:\//.test(value)) {
+    throw new Error(`${label} must be a canonical relative POSIX path: ${value}`);
+  }
+  let decoded;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    throw new Error(`${label} contains an invalid path escape: ${value}`);
+  }
+  if (decoded !== value) {
+    throw new Error(`${label} must not contain escaped path characters: ${value}`);
+  }
+  if (path.posix.normalize(value) !== value || value.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new Error(`${label} must not contain non-canonical or traversal segments: ${value}`);
+  }
+  return value;
+}
+
+function canonicalModulePrefix(label, prefix) {
+  if (typeof prefix !== 'string' || !prefix.endsWith('/')) {
+    throw new Error(`${label} must be a canonical directory prefix ending in /`);
+  }
+  canonicalRelativePath(label, prefix.slice(0, -1));
+  return prefix;
+}
+
 function assertBudget(budget) {
   assertLimits('initialEntry', budget.initialEntry);
   assertLimits('initialRoute', budget.initialRoute);
@@ -44,6 +74,15 @@ function assertBudget(budget) {
     assertStringArray(`chunkOverrides.${policyName}.allowedModulePrefixes`, override.allowedModulePrefixes);
     assertStringArray(`chunkOverrides.${policyName}.requiredModulePrefixes`, override.requiredModulePrefixes);
     assertStringArray(`chunkOverrides.${policyName}.allowedImporterFacades`, override.allowedImporterFacades);
+    override.allowedModulePrefixes.forEach((prefix, index) =>
+      canonicalModulePrefix(`chunkOverrides.${policyName}.allowedModulePrefixes[${index}]`, prefix),
+    );
+    override.requiredModulePrefixes.forEach((prefix, index) =>
+      canonicalModulePrefix(`chunkOverrides.${policyName}.requiredModulePrefixes[${index}]`, prefix),
+    );
+    override.allowedImporterFacades.forEach((facade, index) =>
+      canonicalRelativePath(`chunkOverrides.${policyName}.allowedImporterFacades[${index}]`, facade),
+    );
     for (const prefix of override.requiredModulePrefixes) {
       if (!override.allowedModulePrefixes.includes(prefix)) {
         throw new Error(`chunkOverrides.${policyName}.requiredModulePrefixes contains non-allowed prefix ${prefix}`);
@@ -67,9 +106,18 @@ function assertMetadata(metadata) {
     if (chunk.facadeModuleId !== null && typeof chunk.facadeModuleId !== 'string') {
       throw new Error(`${label}.facadeModuleId must be a string or null`);
     }
+    if (chunk.facadeModuleId !== null) canonicalRelativePath(`${label}.facadeModuleId`, chunk.facadeModuleId);
     assertStringArray(`${label}.moduleIds`, chunk.moduleIds);
     assertStringArray(`${label}.imports`, chunk.imports, { allowEmpty: true });
     assertStringArray(`${label}.dynamicImports`, chunk.dynamicImports, { allowEmpty: true });
+    if (typeof chunk.isEntry !== 'boolean' || typeof chunk.isDynamicEntry !== 'boolean') {
+      throw new Error(`${label} must declare boolean isEntry and isDynamicEntry flags`);
+    }
+    canonicalRelativePath(`${label}.file`, chunk.file);
+    chunk.imports.forEach((file, edgeIndex) => canonicalRelativePath(`${label}.imports[${edgeIndex}]`, file));
+    chunk.dynamicImports.forEach((file, edgeIndex) =>
+      canonicalRelativePath(`${label}.dynamicImports[${edgeIndex}]`, file),
+    );
   }
 }
 
@@ -102,7 +150,34 @@ export function checkBundleBudget({ manifest, metadata, budget, sizeOf }) {
   assertBudget(budget);
   assertMetadata(metadata);
 
-  const manifestRecords = Object.entries(manifest).map(([source, record]) => ({ source, ...record }));
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Vite manifest must be an object');
+  }
+
+  const manifestRecords = Object.entries(manifest).map(([source, record]) => {
+    if (source.trim() === '' || !record || typeof record !== 'object' || Array.isArray(record)) {
+      throw new Error(`Vite manifest source ${source || '<empty>'} must map to an object`);
+    }
+    for (const edgeType of ['imports', 'dynamicImports']) {
+      if (record[edgeType] !== undefined) {
+        assertStringArray(`Vite manifest ${source}.${edgeType}`, record[edgeType], { allowEmpty: true });
+      }
+    }
+    if (record.src !== undefined) {
+      canonicalRelativePath(`Vite manifest ${source}.src`, record.src);
+      if (record.src !== source) {
+        throw new Error(`Vite manifest source ${source} must equal its normalized src ${record.src}`);
+      }
+    }
+    if (record.isEntry !== undefined && typeof record.isEntry !== 'boolean') {
+      throw new Error(`Vite manifest ${source}.isEntry must be a boolean`);
+    }
+    if (record.isDynamicEntry !== undefined && typeof record.isDynamicEntry !== 'boolean') {
+      throw new Error(`Vite manifest ${source}.isDynamicEntry must be a boolean`);
+    }
+    if (typeof record.file === 'string') canonicalRelativePath(`Vite manifest ${source}.file`, record.file);
+    return { source, ...record };
+  });
   const manifestFiles = manifestRecords.filter((record) => typeof record.file === 'string');
   uniqueByFile(manifestFiles, 'Vite manifest');
   const jsRecords = manifestFiles
@@ -116,12 +191,66 @@ export function checkBundleBudget({ manifest, metadata, budget, sizeOf }) {
     throw new Error('Vite JavaScript manifest files must exactly match Rollup bundle metadata files');
   }
 
+  const metadataByFacade = new Map();
+  for (const chunk of metadata.chunks) {
+    if (chunk.facadeModuleId === null) continue;
+    if (metadataByFacade.has(chunk.facadeModuleId)) {
+      throw new Error(`Rollup facade ${chunk.facadeModuleId} maps to more than one output file`);
+    }
+    metadataByFacade.set(chunk.facadeModuleId, chunk);
+  }
+
+  const bySource = new Map(jsRecords.map((record) => [record.source, record]));
+  for (const record of jsRecords) {
+    const chunk = metadataByFile.get(record.file);
+    if (Boolean(record.isEntry) !== chunk.isEntry || Boolean(record.isDynamicEntry) !== chunk.isDynamicEntry) {
+      throw new Error(`Vite and Rollup entry flags disagree for ${record.file}`);
+    }
+    if (record.src !== undefined && chunk.facadeModuleId !== record.src) {
+      throw new Error(
+        `Vite source ${record.src} and Rollup facade ${chunk.facadeModuleId ?? 'null'} disagree for ${record.file}`,
+      );
+    }
+    if (record.src === undefined && chunk.facadeModuleId !== null) {
+      throw new Error(`Rollup facade ${chunk.facadeModuleId} has no matching Vite source for ${record.file}`);
+    }
+  }
+  for (const [facade, chunk] of metadataByFacade) {
+    const record = bySource.get(facade);
+    if (!record || record.src !== facade || record.file !== chunk.file) {
+      throw new Error(`Rollup facade ${facade} must map to the same unique Vite source and output file`);
+    }
+  }
+
+  const convertedEdges = (record, edgeType) =>
+    (record[edgeType] ?? [])
+      .map((importedSource) => {
+        const imported = bySource.get(importedSource);
+        if (!imported) {
+          throw new Error(`Vite manifest ${record.source}.${edgeType} references missing JavaScript source ${importedSource}`);
+        }
+        return imported.file;
+      })
+      .sort();
+  for (const record of jsRecords) {
+    const chunk = metadataByFile.get(record.file);
+    for (const edgeType of ['imports', 'dynamicImports']) {
+      const manifestEdges = convertedEdges(record, edgeType);
+      const rollupEdges = [...chunk[edgeType]].sort();
+      if (JSON.stringify(manifestEdges) !== JSON.stringify(rollupEdges)) {
+        throw new Error(
+          `Vite and Rollup ${edgeType} disagree for ${record.file}: ` +
+            `manifest has [${manifestEdges.join(', ')}], metadata has [${rollupEdges.join(', ')}]`,
+        );
+      }
+    }
+  }
+
   const entryRecords = jsRecords.filter((record) => record.isEntry);
   if (entryRecords.length !== 1) {
     throw new Error(`Vite manifest must contain exactly one JavaScript entry (found ${entryRecords.length})`);
   }
 
-  const bySource = new Map(jsRecords.map((record) => [record.source, record]));
   const staticClosure = (seedSources) => {
     const seen = new Set();
     const visit = (source) => {
@@ -163,14 +292,22 @@ export function checkBundleBudget({ manifest, metadata, budget, sizeOf }) {
     exceptionByFile.set(chunk.file, { policyName, override });
 
     if (chunk.isEntry) failures.push(`exception ${policyName} must not target an entry chunk`);
-    const unrelatedModules = chunk.moduleIds.filter((moduleId) =>
-      !override.allowedModulePrefixes.some((prefix) => moduleId.startsWith(prefix)),
+    const canonicalModuleIds = [];
+    for (const [index, moduleId] of chunk.moduleIds.entries()) {
+      try {
+        canonicalModuleIds.push(canonicalRelativePath(`exception ${policyName} moduleIds[${index}]`, moduleId));
+      } catch (error) {
+        failures.push(error.message);
+      }
+    }
+    const unrelatedModules = canonicalModuleIds.filter(
+      (moduleId) => !override.allowedModulePrefixes.some((prefix) => moduleId.startsWith(prefix)),
     );
     if (unrelatedModules.length > 0) {
       failures.push(`exception ${policyName} contains non-allowlisted modules: ${unrelatedModules.join(', ')}`);
     }
     for (const prefix of override.requiredModulePrefixes) {
-      if (!chunk.moduleIds.some((moduleId) => moduleId.startsWith(prefix))) {
+      if (!canonicalModuleIds.some((moduleId) => moduleId.startsWith(prefix))) {
         failures.push(`exception ${policyName} is stale: required module prefix ${prefix} is absent`);
       }
     }

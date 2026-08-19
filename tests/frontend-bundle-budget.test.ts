@@ -13,17 +13,29 @@ function fixture() {
   const manifest = {
     'index.html': {
       file: files.entry,
+      src: 'index.html',
       isEntry: true,
       imports: [],
       dynamicImports: ['components/KanbanBoard.tsx', 'components/KnowledgeBase.tsx', 'components/AgentGrid.tsx'],
     },
-    'components/KanbanBoard.tsx': { file: files.board, isDynamicEntry: true, imports: [] },
+    'components/KanbanBoard.tsx': {
+      file: files.board,
+      src: 'components/KanbanBoard.tsx',
+      isDynamicEntry: true,
+      imports: [],
+    },
     'components/KnowledgeBase.tsx': {
       file: files.knowledge,
+      src: 'components/KnowledgeBase.tsx',
       isDynamicEntry: true,
       imports: ['_vendor-graph.js'],
     },
-    'components/AgentGrid.tsx': { file: files.agents, isDynamicEntry: true, imports: [] },
+    'components/AgentGrid.tsx': {
+      file: files.agents,
+      src: 'components/AgentGrid.tsx',
+      isDynamicEntry: true,
+      imports: [],
+    },
     '_vendor-graph.js': { file: files.graph, name: 'vendor-graph' },
   };
   const chunk = (
@@ -34,11 +46,20 @@ function fixture() {
     imports: string[] = [],
     dynamicImports: string[] = [],
     isEntry = false,
-  ) => ({ file, name, facadeModuleId, moduleIds, imports, dynamicImports, isEntry, isDynamicEntry: !isEntry });
+  ) => ({
+    file,
+    name,
+    facadeModuleId,
+    moduleIds,
+    imports,
+    dynamicImports,
+    isEntry,
+    isDynamicEntry: !isEntry && facadeModuleId !== null,
+  });
   const metadata = {
     version: 1,
     chunks: [
-      chunk(files.entry, 'index', 'main.tsx', ['main.tsx'], [], [files.board, files.knowledge, files.agents], true),
+      chunk(files.entry, 'index', 'index.html', ['main.tsx'], [], [files.board, files.knowledge, files.agents], true),
       chunk(files.board, 'KanbanBoard', 'components/KanbanBoard.tsx', ['components/KanbanBoard.tsx']),
       chunk(files.knowledge, 'KnowledgeBase', 'components/KnowledgeBase.tsx', ['components/KnowledgeBase.tsx'], [files.graph]),
       chunk(files.agents, 'AgentGrid', 'components/AgentGrid.tsx', ['components/AgentGrid.tsx']),
@@ -90,7 +111,7 @@ function fixture() {
 }
 
 describe('frontend bundle budget provenance', () => {
-  it('accepts the unique graph-only chunk imported only by Knowledge Base', () => {
+  it('accepts legitimate cross-bound graph-only output imported only by Knowledge Base', () => {
     expect(checkBundleBudget(fixture()).failures).toEqual([]);
   });
 
@@ -120,6 +141,39 @@ describe('frontend bundle budget provenance', () => {
     const failures = checkBundleBudget(data).failures.join('\n');
     expect(failures).toMatch(/importers must be exactly components\/KnowledgeBase\.tsx/);
     expect(failures).toMatch(/reachable from the default startup route/);
+  });
+
+  it('rejects the exact relabeled-facade mutation when AgentGrid becomes the actual graph importer', () => {
+    const data = fixture();
+    data.manifest['components/KnowledgeBase.tsx'].imports = [];
+    data.manifest['components/AgentGrid.tsx'].imports = ['_vendor-graph.js'];
+    const knowledge = data.metadata.chunks.find((chunk) => chunk.file === files.knowledge)!;
+    const agents = data.metadata.chunks.find((chunk) => chunk.file === files.agents)!;
+    knowledge.imports = [];
+    agents.imports = [files.graph];
+    agents.facadeModuleId = 'components/KnowledgeBase.tsx';
+
+    expect(() => checkBundleBudget(data)).toThrow(/Rollup facade components\/KnowledgeBase\.tsx maps to more than one output file/);
+  });
+
+  it('requires exact converted Vite and Rollup import-edge equality', () => {
+    const data = fixture();
+    data.manifest['components/AgentGrid.tsx'].imports = ['_vendor-graph.js'];
+    expect(() => checkBundleBudget(data)).toThrow(/Vite and Rollup imports disagree for .*AgentGrid/);
+  });
+
+  it('requires exact converted Vite and Rollup dynamic-import-edge equality', () => {
+    const data = fixture();
+    data.manifest['index.html'].dynamicImports = ['components/KanbanBoard.tsx', 'components/KnowledgeBase.tsx'];
+    expect(() => checkBundleBudget(data)).toThrow(/Vite and Rollup dynamicImports disagree for .*index/);
+  });
+
+  it('rejects an allowed-prefix traversal module before graph-package allowlisting', () => {
+    const data = fixture();
+    data.metadata.chunks.at(-1)!.moduleIds.push('node_modules/vis-network/../../components/AgentGrid.tsx');
+    expect(checkBundleBudget(data).failures.join('\n')).toMatch(
+      /must not contain non-canonical or traversal segments: node_modules\/vis-network\/\.\.\/\.\.\/components\/AgentGrid\.tsx/,
+    );
   });
 
   it('rejects an exception without a documented reason', () => {

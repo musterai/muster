@@ -7,7 +7,7 @@ const webRoot = path.resolve(__dirname, 'src/web');
 const projectRoot = __dirname.replaceAll('\\', '/');
 
 function normalizeModuleId(id: string): string {
-  const normalized = id.replaceAll('\\', '/');
+  const normalized = path.posix.normalize(id.replaceAll('\\', '/'));
   const nodeModulesMarker = '/node_modules/';
   const nodeModulesIndex = normalized.lastIndexOf(nodeModulesMarker);
   if (nodeModulesIndex >= 0) {

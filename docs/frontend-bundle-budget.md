@@ -41,9 +41,13 @@ The exception is fail-closed. Exactly one Rollup chunk must have the configured
 `vendor-graph` identity; every module must belong to the explicit graph-package
 allowlist; required `vis-network` and `vis-data` modules must remain present;
 and the only direct importer must be the Knowledge Base facade. The checker
-also rejects default-route reachability, duplicate manifest/file mappings,
-metadata/manifest disagreement, duplicate exception targets, undocumented
-exceptions, and stale exceptions. Mutation regressions cover each case.
+cross-binds every normalized Vite source to the same unique Rollup facade and
+output file, translates manifest source-key imports to output files, and
+requires exact static and dynamic edge equality. It also rejects duplicate
+facades/files, default-route reachability, non-canonical or escaped module IDs,
+path traversal before package allowlisting, duplicate exception targets,
+undocumented exceptions, and stale exceptions. Mutation regressions cover each
+case.
 
 Natural lazy boundaries exist for the board, documents, agents, activity,
 Knowledge Base/graph, tokens, workspace administration, account/shortcut
