@@ -35,6 +35,7 @@ import {
 } from '../schemas.js';
 import { sanitizeSameOriginPath } from '../../shared/url-security.js';
 import { ValidationError } from '../../shared/errors.js';
+import { bootstrapWorkspaceId } from '../../services/helpers/workspace-scope.helper.js';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -240,7 +241,10 @@ export function createAuthRouter(
       }
 
       const admitted = true;
-      const wsRows = await db.query<{ id: string; name: string }>('SELECT id, name FROM workspace LIMIT 1');
+      const wsRows = await db.query<{ id: string; name: string }>(
+        'SELECT id, name FROM workspace WHERE id = ?',
+        [auth.workspace_id],
+      );
       const workspace = wsRows[0] || null;
       const userRows = await db.query<any>(
         'SELECT id, email, display_name, avatar_url, status FROM app_user WHERE id = ?',
@@ -277,11 +281,11 @@ export function createAuthRouter(
       const userIdParam = typeof req.body?.user_id === 'string' ? req.body.user_id.trim() : null;
       const displayNameParam = typeof req.body?.display_name === 'string' ? req.body.display_name.trim() : null;
 
-      const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
-      const workspaceId = wsRows[0]?.id || null;
+      let workspaceId: string | null = null;
       let user: any = null;
       let session: Awaited<ReturnType<SessionService['create']>>;
       await db.transaction(async tx => {
+        workspaceId = await bootstrapWorkspaceId(tx);
         if (userIdParam) {
           user = await userService.findById(userIdParam, tx);
         } else if (displayNameParam) {

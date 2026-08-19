@@ -16,6 +16,7 @@ import { AgentService } from '../src/services/agent.service.js';
 import { AuditService } from '../src/services/audit.service.js';
 import { InvitationService } from '../src/services/invitation.service.js';
 import { OidcService } from '../src/services/oidc.service.js';
+import { ProjectService } from '../src/services/project.service.js';
 import { RoleService } from '../src/services/role.service.js';
 import { SessionService } from '../src/services/session.service.js';
 import { TokenService } from '../src/services/token.service.js';
@@ -94,6 +95,74 @@ describe('MUS-81: atomic first-use local identity', () => {
     const rows = await db.query<{ count: number }>(sql, params);
     return Number(rows[0]?.count || 0);
   }
+
+  async function assertBootstrapParity(
+    candidateId: string,
+    existingCreatedAt: string,
+    candidateCreatedAt: string,
+  ): Promise<void> {
+    await db.execute(
+      'UPDATE workspace SET created_at = ?, updated_at = ? WHERE id = ?',
+      [existingCreatedAt, existingCreatedAt, workspaceId],
+    );
+    await db.execute(
+      'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [candidateId, 'Candidate Workspace', candidateId, candidateCreatedAt, candidateCreatedAt],
+    );
+    await new RoleService(db).seedPreset(candidateId);
+
+    const project = await new ProjectService(db).create({ name: `Project for ${candidateId}` });
+    const agent = await new AgentService(db).register({ name: `Agent for ${candidateId}` });
+    const response = await localIdentity({ display_name: `Operator for ${candidateId}` });
+    expect(response.status).toBe(201);
+    const cookie = response.headers.get('set-cookie')?.match(/muster_session=([^;]+)/)?.[1];
+    expect(cookie).toBeTruthy();
+    const { user } = await response.json() as { user: { id: string } };
+
+    expect(project.workspace_id).toBe(candidateId);
+    expect(agent.workspace_id).toBe(candidateId);
+    expect(await db.query<{ workspace_id: string }>(
+      'SELECT workspace_id FROM workspace_member WHERE user_id = ?',
+      [user.id],
+    )).toEqual([{ workspace_id: candidateId }]);
+    expect(await db.query<{ workspace_id: string }>(
+      "SELECT workspace_id FROM audit_log WHERE actor_id = ? AND action = 'user.local_identity_create'",
+      [user.id],
+    )).toEqual([{ workspace_id: candidateId }]);
+    expect(await count('SELECT COUNT(*) AS count FROM session WHERE user_id = ?', [user.id])).toBe(1);
+    expect(await count(
+      'SELECT COUNT(*) AS count FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+      [workspaceId, user.id],
+    )).toBe(0);
+    expect(await count(
+      "SELECT COUNT(*) AS count FROM audit_log WHERE workspace_id = ? AND actor_id = ? AND action = 'user.local_identity_create'",
+      [workspaceId, user.id],
+    )).toBe(0);
+
+    const me = await fetch(`${baseUrl}/auth/me`, {
+      headers: { Cookie: `muster_session=${cookie}` },
+    });
+    expect(me.status).toBe(200);
+    expect(await me.json()).toMatchObject({
+      authenticated: true,
+      admitted: true,
+      user: { id: user.id },
+      workspace: { id: candidateId },
+    });
+  }
+
+  it('uses the oldest workspace consistently for project, agent, local identity, audit, and session', async () => {
+    await assertBootstrapParity(
+      'z-older-workspace',
+      '2026-01-02T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+    );
+  });
+
+  it('uses workspace ID as the stable tie-break consistently across local bootstrap paths', async () => {
+    const tiedAt = '2026-01-01T00:00:00.000Z';
+    await assertBootstrapParity('a-tied-workspace', tiedAt, tiedAt);
+  });
 
   it('creates, admits, audits, and binds a new valid display name in one request', async () => {
     const response = await localIdentity({ display_name: 'First Local Operator' });
@@ -187,11 +256,26 @@ describe('MUS-81: atomic first-use local identity', () => {
   });
 
   it('rolls back user, membership, audit, and session when the atomic audit write fails', async () => {
+    const olderWorkspace = 'rollback-older-workspace';
+    await db.execute(
+      'UPDATE workspace SET created_at = ?, updated_at = ? WHERE id = ?',
+      ['2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z', workspaceId],
+    );
+    await db.execute(
+      'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [olderWorkspace, 'Rollback Older', 'rollback-older', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'],
+    );
+    await new RoleService(db).seedPreset(olderWorkspace);
     const realLog = auditService.log.bind(auditService);
-    auditService.log = async () => { throw new Error('injected local identity audit failure'); };
+    let attemptedWorkspaceId: string | null | undefined;
+    auditService.log = async input => {
+      attemptedWorkspaceId = input.workspace_id;
+      throw new Error('injected local identity audit failure');
+    };
     try {
       const response = await localIdentity({ display_name: 'Rolled Back Operator' });
       expect(response.status).toBe(500);
+      expect(attemptedWorkspaceId).toBe(olderWorkspace);
       expect(await count('SELECT COUNT(*) AS count FROM app_user')).toBe(0);
       expect(await count('SELECT COUNT(*) AS count FROM principal WHERE kind = ?', ['user'])).toBe(0);
       expect(await count('SELECT COUNT(*) AS count FROM workspace_member')).toBe(0);
