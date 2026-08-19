@@ -89,13 +89,19 @@ async function runBrowserUiTest() {
 
     // Establish an open-mode browser identity so the comment controls can be
     // exercised as the comment author rather than skipped on an empty DB.
-    const whoAreYou = page.getByRole('button', { name: /Who are you/i });
-    if (await whoAreYou.isVisible()) {
-      await whoAreYou.click();
-      const nameInput = page.locator('input[placeholder="Your name"]');
+    const setName = page.getByRole('button', { name: /Set Name|Who are you/i });
+    if (await setName.isVisible()) {
+      await setName.click();
+      const nameInput = page.locator('input[placeholder="Your display name"], input[placeholder="Your name"]');
       if (await nameInput.isVisible()) {
         await nameInput.fill('Browser UI Tester');
-        await page.getByRole('button', { name: 'Save' }).click();
+        const [identityResponse] = await Promise.all([
+          page.waitForResponse((response) => response.url().endsWith('/api/v1/auth/local')),
+          page.getByRole('button', { name: 'Save / Switch Name', exact: true }).click(),
+        ]);
+        if (!identityResponse.ok()) {
+          throw new Error(`Local identity request failed (${identityResponse.status()}): ${await identityResponse.text()}`);
+        }
         await page.waitForSelector('text=Browser UI Tester');
         console.log('  ✓ Open-mode browser identity established.');
       }
@@ -120,13 +126,14 @@ async function runBrowserUiTest() {
     // Create a second board and verify that selecting it survives the
     // three-second polling refresh. The default board uses five lanes while
     // this one uses three, so the missing Backlog lane proves its data loaded.
-    await page.click('button:has-text("+ Board")');
-    await page.waitForSelector('text=Create New Board');
+    const boardSelector = page.getByLabel('Select board');
+    await boardSelector.selectOption('__NEW_BOARD__');
+    const newBoardHeading = page.getByRole('heading', { name: 'Create New Board', exact: true });
+    await newBoardHeading.waitFor();
     await page.fill('input[placeholder*="Sprint 2"]', 'Release Board');
     await page.click('button[type="submit"]:has-text("Create Board")');
-    await page.waitForSelector('text=Create New Board', { state: 'detached' });
+    await newBoardHeading.waitFor({ state: 'detached' });
 
-    const boardSelector = page.getByLabel('Select board');
     await boardSelector.selectOption({ label: 'Release Board' });
     await page.waitForSelector('h3:has-text("BACKLOG")', { state: 'detached' });
     await page.waitForSelector('h3:has-text("TO DO")');
@@ -156,7 +163,8 @@ async function runBrowserUiTest() {
 
     // Step 3: Test Board View & Column Creation
     console.log('\n[3/8] Testing Kanban Board & Column Creation (+ Add Column)...');
-    await page.click('button:has-text("Add Column")');
+    await page.getByTitle('Board Settings').click();
+    await page.getByRole('button', { name: 'Add New Column', exact: true }).click();
     await page.waitForSelector('text=Column Name');
 
     await page.fill('input[placeholder*="In Testing"]', 'Quality Assurance');
@@ -167,7 +175,7 @@ async function runBrowserUiTest() {
 
     // Step 4: Create Card
     console.log('\n[4/8] Testing Card Creation (+ Add Card / + Card)...');
-    await page.click('button:has-text("+ Card")');
+    await page.getByTitle('Add card to column').first().click();
     await page.waitForSelector('text=Create Card');
 
     const cardForm = page.locator('form').filter({ hasText: 'Task Title' });
@@ -223,8 +231,8 @@ async function runBrowserUiTest() {
     console.log('  ✓ Comment posted and rendered in modal.');
 
     await page.getByRole('button', { name: 'Edit comment' }).click();
-    await page.locator('textarea[aria-label="Edit comment"]').fill('Edited browser UI functionality.');
-    await page.getByRole('button', { name: 'Save comment' }).click();
+    await page.locator('textarea:not([placeholder])').fill('Edited browser UI functionality.');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.waitForSelector('text=Edited browser UI functionality.');
     await page.waitForSelector('text=Verified browser UI functionality.', { state: 'detached' });
     console.log('  ✓ Comment edited and refreshed in modal.');
@@ -259,6 +267,7 @@ async function runBrowserUiTest() {
     await page.waitForSelector('text=Register Agent');
 
     await page.fill('input[placeholder*="my-agent"]', 'Browser-Testing-Bot');
+    await page.fill('input[placeholder*="code, testing"]', 'testing');
     await page.click('button[type="submit"]:has-text("Add User")');
     await page.locator('h3').filter({ hasText: 'Browser-Testing-Bot' }).waitFor();
     console.log('  ✓ New agent "Browser-Testing-Bot" registered and displayed in grid.');
@@ -277,7 +286,7 @@ async function runBrowserUiTest() {
     await page.click('button:has-text("Design Documents")');
     await page.waitForSelector('text=Design Documents');
 
-    await page.click('button:has-text("+ Doc")');
+    await page.getByRole('button', { name: 'Create Document', exact: true }).first().click();
     await page.waitForSelector('text=Create Design Document');
 
     await page.fill('input[placeholder*="Architecture Overview"]', 'Frontend UI Architecture & E2E Verification');
