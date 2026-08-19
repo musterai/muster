@@ -7,6 +7,8 @@ import { validateRequest } from '../middleware/validate.js';
 import { agentRegisterSchema, agentUpdateSchema, idParamsSchema } from '../schemas.js';
 import { config } from '../../config/index.js';
 import { PermissionDeniedError } from '../../shared/permission-enforcer.js';
+import { DatabaseAdapter } from '../../db/adapter.js';
+import { AuditService } from '../../services/audit.service.js';
 
 function getAuth(req: Request): AuthContext | undefined {
   return (req as any).authContext;
@@ -44,7 +46,16 @@ async function requireAgentScope(agentService: AgentService, req: Request, agent
   }
 }
 
-export function createAgentRouter(agentService: AgentService, cardService: CardService): Router {
+export function createAgentRouter(
+  dbOrService: DatabaseAdapter | AgentService,
+  serviceOrCards: AgentService | CardService,
+  cardsOrAudit?: CardService | AuditService,
+  maybeAudit?: AuditService,
+): Router {
+  const db = (maybeAudit ? dbOrService : (dbOrService as any).db) as DatabaseAdapter;
+  const agentService = (maybeAudit ? serviceOrCards : dbOrService) as AgentService;
+  const cardService = (maybeAudit ? cardsOrAudit : serviceOrCards) as CardService;
+  const auditService = (maybeAudit || (cardsOrAudit as AuditService) || new AuditService(db)) as AuditService;
   const router = Router();
 
   // Global agent list
@@ -103,7 +114,19 @@ export function createAgentRouter(agentService: AgentService, cardService: CardS
   router.delete('/agents/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       await requireAgentScope(agentService, req, req.params.id);
-      await agentService.unregister(req.params.id);
+      const auth = getAuth(req);
+      const agent = await agentService.getById(req.params.id);
+      await db.transaction(async tx => {
+        await agentService.unregister(req.params.id, auth?.principal?.id, tx);
+        await auditService.logAs(auth, {
+          workspace_id: agent?.workspace_id || auth?.workspace_id || null,
+          action: 'agent.unregister',
+          target_type: 'agent',
+          target_id: req.params.id,
+          payload: agent ? { name: agent.name } : undefined,
+          ip: req.ip,
+        }, tx);
+      });
       res.status(204).send();
     } catch (err) {
       next(err);

@@ -12,10 +12,12 @@ export class RoleService {
   ) {}
 
   /** Seed preset roles into a workspace. Idempotent — safe to call on every startup. */
-  async seedPreset(workspaceId: string): Promise<Role[]> {
+  async seedPreset(workspaceId: string, adapter?: DatabaseAdapter): Promise<Role[]> {
+    if (!adapter) return this.db.transaction(tx => this.seedPreset(workspaceId, tx));
+    const db = adapter;
     const seeded: Role[] = [];
     for (const preset of PRESET_ROLES) {
-      const existing = await this.db.query<Role>(
+      const existing = await db.query<Role>(
         'SELECT * FROM role WHERE workspace_id = ? AND key = ?',
         [workspaceId, preset.key],
       );
@@ -25,7 +27,7 @@ export class RoleService {
       }
       const id = ulid();
       const created_at = new Date().toISOString();
-      await this.db.execute(
+      await db.execute(
         `INSERT INTO role (id, workspace_id, key, name, description, permissions_json, is_system, rank)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, workspaceId, preset.key, preset.name, preset.description,
@@ -52,27 +54,18 @@ export class RoleService {
     return result.changes;
   }
 
-  async create(data: CreateRole): Promise<Role> {
+  async create(data: CreateRole, adapter?: DatabaseAdapter): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, tx));
+    const db = adapter;
     validatePermissions(data.permissions);
     const id = ulid();
     const created_at = new Date().toISOString();
-    await this.db.execute(
+    await db.execute(
       `INSERT INTO role (id, workspace_id, key, name, description, permissions_json, is_system, rank)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, data.workspace_id, data.key, data.name, data.description || null,
        JSON.stringify(data.permissions), data.is_system ? 1 : 0, data.rank || 0],
     );
-
-    if (this.eventService) {
-      await this.eventService.create({
-        project_id: '',
-        entity_type: 'board',
-        entity_id: id,
-        action: 'role_created',
-        actor_id: undefined,
-        payload: { key: data.key, name: data.name, permissions: data.permissions },
-      });
-    }
 
     const role: Role = {
       id,
@@ -101,16 +94,19 @@ export class RoleService {
     return rows[0] ? this.mapRow(rows[0]) : null;
   }
 
-  async getByKey(workspaceId: string, key: string): Promise<Role | null> {
-    const rows = await this.db.query<any>(
+  async getByKey(workspaceId: string, key: string, adapter: DatabaseAdapter = this.db): Promise<Role | null> {
+    const rows = await adapter.query<any>(
       'SELECT * FROM role WHERE workspace_id = ? AND key = ?',
       [workspaceId, key],
     );
     return rows[0] ? this.mapRow(rows[0]) : null;
   }
 
-  async update(id: string, data: UpdateRole): Promise<Role> {
-    const existing = await this.getById(id);
+  async update(id: string, data: UpdateRole, adapter?: DatabaseAdapter): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, tx));
+    const db = adapter;
+    const rows = await db.query<any>('SELECT * FROM role WHERE id = ?', [id]);
+    const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
 
     const name = data.name ?? existing.name;
@@ -120,27 +116,31 @@ export class RoleService {
 
     if (data.permissions) validatePermissions(data.permissions);
 
-    await this.db.execute(
+    await db.execute(
       `UPDATE role SET name = ?, description = ?, permissions_json = ?, rank = ? WHERE id = ?`,
       [name, description, JSON.stringify(permissions), rank, id],
     );
     return { ...existing, name, description, permissions, rank };
   }
 
-  async delete(id: string): Promise<void> {
-    const existing = await this.getById(id);
+  async delete(id: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, tx));
+    const rows = await adapter.query<any>('SELECT * FROM role WHERE id = ?', [id]);
+    const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
     if (existing.is_system) throw new Error(`System role "${existing.key}" cannot be deleted — clone it instead`);
 
-    await this.db.execute('DELETE FROM role WHERE id = ?', [id]);
+    await adapter.execute('DELETE FROM role WHERE id = ?', [id]);
   }
 
   /**
    * Clone a role (including system roles) into a new editable role.
    * The clone is never is_system.
    */
-  async clone(id: string, newKey: string, newName?: string): Promise<Role> {
-    const existing = await this.getById(id);
+  async clone(id: string, newKey: string, newName?: string, adapter?: DatabaseAdapter): Promise<Role> {
+    if (!adapter) return this.db.transaction(tx => this.clone(id, newKey, newName, tx));
+    const rows = await adapter.query<any>('SELECT * FROM role WHERE id = ?', [id]);
+    const existing = rows[0] ? this.mapRow(rows[0]) : null;
     if (!existing) throw new Error(`Role ${id} not found`);
 
     return this.create({
@@ -151,7 +151,7 @@ export class RoleService {
       permissions: existing.permissions,
       is_system: false,
       rank: existing.rank - 1,
-    });
+    }, adapter);
   }
 
   /**

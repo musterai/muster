@@ -30,7 +30,7 @@ import { errorHandler } from './api/middleware/error-handler.js';
 import { createMcpServer } from './mcp/server.js';
 import type { Services } from './shared/services.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { config, formatHostForUrl, isLoopbackHost, setDatabaseOverride } from './config/index.js';
+import { config, formatHostForUrl, isLoopbackHost, setDatabaseOverride, validateDeploymentConfig } from './config/index.js';
 import { OPEN_AUTH_CONTEXT } from './shared/auth-context.js';
 import { ulid } from 'ulid';
 import { TokenService } from './services/token.service.js';
@@ -68,6 +68,17 @@ export async function startServer(options?: { db?: string }): Promise<void> {
     setDatabaseOverride(options.db);
   }
 
+  // Validate the effective deployment before opening the database. In
+  // enforced/public mode a missing OIDC secret or unsafe origin must fail
+  // closed rather than leaving a partially initialized service behind.
+  const deployment = validateDeploymentConfig();
+  config.trustedProxies = deployment.trustedProxies;
+  config.oidc.publicUrl = deployment.publicUrl;
+  config.oidc.issuer = deployment.oidcIssuer;
+  config.oidc.clientId = deployment.oidcClientId;
+  config.oidc.clientSecret = deployment.oidcClientSecret;
+  config.oidc.bootstrapOwnerSubject = deployment.bootstrapOwnerSubject;
+
   const db = createDatabaseAdapter();
 
   const migrator = new Migrator(db, path.join(__dirname, 'db/migrations'));
@@ -77,9 +88,10 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   const eventService = new EventService(db, async (evt) => {
     sseManager.broadcast(evt.project_id, evt);
   });
+  const auditService = new AuditService(db);
 
   const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
+  const documentService = new DocumentService(db, eventService, auditService);
   const kbService = new KBService(db, eventService);
   const roleService = new RoleService(db, eventService);
   const tokenService = new TokenService(db);
@@ -87,11 +99,11 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   const oidcService = new OidcService(db);
   const invitationService = new InvitationService(db);
   const userService = new UserService(db);
-  const auditService = new AuditService(db);
   const deviceGrantService = new DeviceGrantService(db, tokenService, auditService);
   const agentService = new AgentService(db, eventService);
   const mcpOAuthService = new McpOAuthService(db, tokenService, agentService, auditService);
   const services: Services = {
+    db,
     projectService: new ProjectService(db, eventService, boardService, documentService),
     boardService,
     columnService: new ColumnService(db, eventService),
@@ -145,6 +157,10 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   const authMiddleware = createAuthMiddleware(db, tokenService, roleService, agentService, sessionService);
 
   const app = express();
+  // Forwarded headers are ignored by default. Operators must explicitly list
+  // the proxy IP/CIDR(s) that can reach this process; this keeps direct-client
+  // X-Forwarded-* spoofing from changing protocol, host, or client IP.
+  app.set('trust proxy', config.trustedProxies);
   app.use(corsMiddleware);
   app.use(securityHeadersMiddleware);
   // Explicit, not the body-parser default — large enough for a real design
@@ -260,6 +276,8 @@ export async function startServer(options?: { db?: string }): Promise<void> {
       console.log(`  • REST API: http://${displayHost}:${port}/api/v1`);
       console.log(`  • MCP Tool: POST http://${displayHost}:${port}/mcp`);
       console.log(`  • Auth:     ${config.auth.mode}`);
+      console.log(`  • Public URL: ${config.oidc.publicUrl}`);
+      console.log(`  • Trusted proxies: ${config.trustedProxies.length > 0 ? config.trustedProxies.join(', ') : 'none'}`);
       console.log(`  • Database: ${activeDb}`);
       console.log(`======================================================\n`);
     });

@@ -130,7 +130,7 @@ export const api = {
   updateDocument: (id: string, data: { title?: string; content?: string; change_summary?: string; author_id?: string }) =>
     fetchJSON<Document>(`/documents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteDocument: (id: string) => fetchJSON<{ success: boolean }>(`/documents/${id}`, { method: 'DELETE' }),
-  setDocumentStatus: (id: string, status: string) => fetchJSON<Document>(`/documents/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  setDocumentStatus: (id: string, status: 'in_review' | 'approved', expectedVersion: number) => fetchJSON<Document>(`/documents/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status, expected_version: expectedVersion }) }),
   getDocumentHistory: (id: string) => fetchJSON<DocumentVersion[]>(`/documents/${id}/versions`),
 
   // Auth

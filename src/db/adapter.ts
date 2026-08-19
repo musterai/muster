@@ -24,6 +24,8 @@ export interface DatabaseAdapter {
    * reach for this field only when that's genuinely not possible.
    */
   readonly dialect: 'sqlite' | 'postgres';
+  /** Register a side effect that runs only after the current transaction commits. */
+  afterCommit?(callback: () => void | Promise<void>): void | Promise<void>;
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   execute(sql: string, params?: unknown[]): Promise<ExecutionResult>;
   transaction<T>(fn: (adapter: DatabaseAdapter) => Promise<T>): Promise<T>;

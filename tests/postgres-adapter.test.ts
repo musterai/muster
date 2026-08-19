@@ -22,6 +22,7 @@ import { AuditService } from '../src/services/audit.service.js';
 import { DeviceGrantService } from '../src/services/device-grant.service.js';
 import { McpOAuthService } from '../src/services/mcp-oauth.service.js';
 import { TokenService } from '../src/services/token.service.js';
+import { isCanonicalRank } from '../src/shared/lexorank.js';
 import crypto from 'node:crypto';
 
 async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[]> {
@@ -37,6 +38,56 @@ async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[
 }
 
 const PG_URL = process.env.MUSTER_TEST_PG_URL;
+
+describe('PostgreSQL transaction lifecycle probe', () => {
+  it('returns the client before a slow after-commit callback and keeps commit order', async () => {
+    const clients: Array<{ released: boolean; query: (sql: string) => Promise<{ rows: never[]; rowCount: number }> }> = [];
+    const pool = {
+      connect: async () => {
+        const client = {
+          released: false,
+          query: async (_sql: string) => ({ rows: [], rowCount: 0 }),
+          release: () => { client.released = true; },
+        };
+        clients.push(client);
+        return client;
+      },
+      query: async () => ({ rows: [], rowCount: 0 }),
+      end: async () => undefined,
+    };
+    const adapter = new PostgresAdapter('unused', pool as any);
+    let enterCallback!: () => void;
+    const callbackEntered = new Promise<void>(resolve => { enterCallback = resolve; });
+    let releaseCallback!: () => void;
+    const callbackRelease = new Promise<void>(resolve => { releaseCallback = resolve; });
+    const callbackOrder: string[] = [];
+
+    const first = adapter.transaction(async tx => {
+      tx.afterCommit(async () => {
+        callbackOrder.push('first');
+        enterCallback();
+        await callbackRelease;
+      });
+    });
+    await callbackEntered;
+    expect(clients[0].released).toBe(true);
+
+    // The first callback is still blocked, but its checked-out client has
+    // already returned to the pool, so a second transaction can commit.
+    const second = adapter.transaction(async tx => {
+      tx.afterCommit(() => { callbackOrder.push('second'); });
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(clients).toHaveLength(2);
+    expect(clients[1].released).toBe(true);
+    expect(callbackOrder).toEqual(['first']);
+
+    releaseCallback();
+    await Promise.all([first, second]);
+    expect(callbackOrder).toEqual(['first', 'second']);
+    await adapter.close();
+  });
+});
 
 describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
   let adminPool: pg.Pool;
@@ -159,6 +210,95 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
     // The row itself agrees with exactly one of the calls that "won".
     const finalRows = await adapter.query<{ claimed_by: string }>('SELECT claimed_by FROM card WHERE id = ?', [card.id]);
     expect(agentIds).toContain(finalRows[0].claimed_by);
+  });
+
+  it('serializes cross-lane moves with deterministic source/target lane locking', async () => {
+    const migrator = new Migrator(adapter, './src/db/migrations');
+    await migrator.run();
+    const second = new PostgresAdapter(PG_URL!);
+    try {
+      const now = new Date().toISOString();
+      await adapter.execute('INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', [
+        'ws-rank-race', 'Rank Race', 'rank-race', now, now,
+      ]);
+      await adapter.execute(
+        'INSERT INTO project (id, workspace_id, name, key_prefix, card_seq, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ['proj-rank-race', 'ws-rank-race', 'Rank Race', 'RACE', 0, now, now],
+      );
+      await adapter.execute(
+        'INSERT INTO board (id, project_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ['board-rank-race', 'proj-rank-race', 'Board', now, now],
+      );
+      await adapter.execute(
+        'INSERT INTO "column" (id, board_id, name, position) VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)',
+        [
+          'col-rank-source', 'board-rank-race', 'Source', 'a',
+          'col-rank-a', 'board-rank-race', 'Target A', 'b',
+          'col-rank-b', 'board-rank-race', 'Target B', 'c',
+        ],
+      );
+
+      const serviceA = new CardService(adapter);
+      const serviceB = new CardService(second);
+      const cardA = await serviceA.create({ column_id: 'col-rank-source', title: 'Move A' });
+      const cardB = await serviceA.create({ column_id: 'col-rank-source', title: 'Move B' });
+      let timeout!: ReturnType<typeof setTimeout>;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('cross-lane move barrier timed out')), 5_000);
+      });
+      try {
+        await Promise.race([
+          raceAtBarrier([
+            () => serviceA.move(cardA.id, { target_column_id: 'col-rank-a', position: 'a' }),
+            () => serviceB.move(cardB.id, { target_column_id: 'col-rank-b', position: 'a' }),
+          ]),
+          timeoutPromise,
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const sourceRows = await adapter.query<{ id: string }>('SELECT id FROM card WHERE column_id = ?', ['col-rank-source']);
+      const targetRows = await adapter.query<{ column_id: string; position: string }>(
+        'SELECT column_id, position FROM card WHERE column_id IN (?, ?) ORDER BY column_id',
+        ['col-rank-a', 'col-rank-b'],
+      );
+      expect(sourceRows).toHaveLength(0);
+      expect(targetRows).toHaveLength(2);
+      expect(targetRows.every(row => isCanonicalRank(row.position))).toBe(true);
+      expect(targetRows.map(row => row.column_id)).toEqual(['col-rank-a', 'col-rank-b']);
+
+      // Opposite cross-lane moves contend for the same two lane rows. The
+      // canonical [lane-id] lock order must serialize them without a
+      // PostgreSQL deadlock cycle.
+      const reverseA = await serviceA.create({ column_id: 'col-rank-a', title: 'Reverse A' });
+      const reverseB = await serviceA.create({ column_id: 'col-rank-b', title: 'Reverse B' });
+      let reverseTimeout!: ReturnType<typeof setTimeout>;
+      const reverseTimeoutPromise = new Promise<never>((_, reject) => {
+        reverseTimeout = setTimeout(() => reject(new Error('opposite cross-lane move timed out')), 5_000);
+      });
+      try {
+        await Promise.race([
+          raceAtBarrier([
+            () => serviceA.move(reverseA.id, { target_column_id: 'col-rank-b', position: 'z' }),
+            () => serviceB.move(reverseB.id, { target_column_id: 'col-rank-a', position: 'z' }),
+          ]),
+          reverseTimeoutPromise,
+        ]);
+      } finally {
+        clearTimeout(reverseTimeout);
+      }
+      const finalCounts = await adapter.query<{ column_id: string; count: number | string }>(
+        'SELECT column_id, COUNT(*) AS count FROM card WHERE column_id IN (?, ?) GROUP BY column_id ORDER BY column_id',
+        ['col-rank-a', 'col-rank-b'],
+      );
+      expect(finalCounts.map(row => [row.column_id, Number(row.count)])).toEqual([
+        ['col-rank-a', 2],
+        ['col-rank-b', 2],
+      ]);
+    } finally {
+      await second.close();
+    }
   });
 
   it('serializes OAuth code exchange and approved device delivery across real pool connections', async () => {

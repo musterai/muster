@@ -22,8 +22,8 @@ export class NotFoundError extends AppError {
 }
 
 export class ConflictError extends AppError {
-  constructor(message: string) {
-    super(message, 409, 'CONFLICT');
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 409, 'CONFLICT', details);
   }
 }
 
@@ -35,6 +35,13 @@ export class ValidationError extends AppError {
 
 /** A structured domain-rule refusal that is safe for both REST and MCP callers to act on. */
 export class CardRuleError extends AppError {
+  constructor(code: string, message: string, details: Record<string, unknown>) {
+    super(message, 409, code, details);
+  }
+}
+
+/** A document workflow refusal that callers can distinguish from write conflicts. */
+export class DocumentStateError extends AppError {
   constructor(code: string, message: string, details: Record<string, unknown>) {
     super(message, 409, code, details);
   }

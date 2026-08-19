@@ -1,0 +1,22 @@
+# The Compose Caddy service is Muster's first and only HTTP edge. It receives
+# browser connections directly, discards any client-supplied forwarding
+# headers, and writes a fresh, single-hop set for the fixed backend peer.
+# Do not place an unconfigured host proxy in front of this container.
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+{$MUSTER_PUBLIC_HOST} {
+	reverse_proxy muster-backend:6878 {
+		# Do not relay a client-provided forwarding chain. Caddy's defaults are
+		# already spoof-resistant; these explicit overwrites keep that property
+		# clear and make the one-hop Compose contract auditable.
+		header_up -X-Forwarded-For
+		header_up -X-Forwarded-Proto
+		header_up -X-Forwarded-Host
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {http.request.host}
+	}
+}

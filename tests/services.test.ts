@@ -13,7 +13,8 @@ import {
   CommentService,
   DocumentService,
   AgentService,
-  EventService
+  EventService,
+  KBService,
 } from '../src/services/index.js';
 import { rankBetween } from '../src/shared/lexorank.js';
 
@@ -29,6 +30,7 @@ describe('Domain Services Integration Tests', () => {
   let documentService: DocumentService;
   let agentService: AgentService;
   let eventService: EventService;
+  let kbService: KBService;
 
   beforeEach(async () => {
     if (fs.existsSync(TEST_DB)) {
@@ -55,6 +57,7 @@ describe('Domain Services Integration Tests', () => {
     commentService = new CommentService(db, eventService);
     documentService = new DocumentService(db, eventService);
     agentService = new AgentService(db, eventService);
+    kbService = new KBService(db, eventService);
   });
 
   afterEach(async () => {
@@ -323,6 +326,36 @@ describe('Domain Services Integration Tests', () => {
     expect(deleted).toBeNull();
     const deletedHistory = await documentService.getHistory(doc.id);
     expect(deletedHistory).toEqual([]);
+  });
+
+  it('MUS-59: credential-derived document and KB actors override legacy payload attribution', async () => {
+    const project = await projectService.create({ name: 'Attribution precedence project' });
+    const realActor = await agentService.register({ name: 'Credential actor' });
+    const spoofedActor = await agentService.register({ name: 'Payload spoof target' });
+
+    const doc = await documentService.create({
+      project_id: project.id,
+      title: 'Credential-derived author',
+      content: 'v1',
+      author_id: spoofedActor.id,
+    }, realActor.id);
+    expect(doc.author_id).toBe(realActor.id);
+
+    await documentService.update(doc.id, {
+      content: 'v2',
+      author_id: spoofedActor.id,
+    }, realActor.id);
+    const history = await documentService.getHistory(doc.id);
+    expect(history[0].author_id).toBe(realActor.id);
+
+    const kb = await kbService.create({ name: 'Attribution precedence KB', project_ids: [project.id] }, realActor.id);
+    const fact = await kbService.addFact({
+      kb_id: kb.id,
+      title: 'Credential-derived source',
+      content: 'fact',
+      source_principal_id: spoofedActor.id,
+    }, realActor.id);
+    expect(fact.source_principal_id).toBe(realActor.id);
   });
 
   it('Feature: agent registration and session re-binding', async () => {

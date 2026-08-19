@@ -21,6 +21,15 @@ export interface ListenerConfig {
   requestedAuthMode: AuthMode | null;
 }
 
+export interface DeploymentConfig {
+  publicUrl: string;
+  oidcIssuer: string | null;
+  oidcClientId: string | null;
+  oidcClientSecret: string | null;
+  bootstrapOwnerSubject: string | null;
+  trustedProxies: string[];
+}
+
 function validateHost(host: string): string {
   if (!host || /\s|\0/.test(host)) {
     throw new Error('MUSTER_HOST must be a non-empty hostname or IP address without whitespace');
@@ -113,12 +122,131 @@ export function resolveListenerConfig(env: NodeJS.ProcessEnv = process.env): Lis
   };
 }
 
+function readSecret(env: NodeJS.ProcessEnv, name: string): string | null {
+  const direct = env[name]?.trim();
+  const fileName = env[`${name}_FILE`]?.trim();
+  // A direct secret and a mounted secret are two different sources of
+  // authority. Choosing one by precedence makes an accidental stale value
+  // silently win, so fail before opening a listener and never echo either
+  // the value or the filesystem path in the error.
+  if (direct && fileName) {
+    throw new Error(`Ambiguous ${name} configuration: set either ${name} or ${name}_FILE, not both`);
+  }
+  if (direct) return direct;
+  if (!fileName) return null;
+  try {
+    const value = fs.readFileSync(fileName, 'utf8').trim();
+    if (!value) throw new Error(`${name}_FILE is empty`);
+    return value;
+  } catch (error) {
+    if (error instanceof Error && error.message === `${name}_FILE is empty`) throw error;
+    throw new Error(`Unable to read ${name}_FILE`);
+  }
+}
+
+function validateProxyAddress(value: string): string {
+  const parts = value.split('/');
+  if (parts.length > 2) {
+    throw new Error(`MUSTER_TRUST_PROXY contains an invalid address "${value}"`);
+  }
+  const [address, prefix] = parts;
+  const ipVersion = net.isIP(address);
+  if (!ipVersion) throw new Error(`MUSTER_TRUST_PROXY contains an invalid address "${value}"`);
+  if (prefix !== undefined) {
+    const fullPrefix = ipVersion === 4 ? 32 : 128;
+    if (!/^\d+$/.test(prefix) || Number(prefix) > fullPrefix) {
+      throw new Error(`MUSTER_TRUST_PROXY contains an invalid CIDR "${value}"`);
+    }
+    if (Number(prefix) !== fullPrefix) {
+      throw new Error(`MUSTER_TRUST_PROXY must name a single IP address, not a CIDR range: "${value}"`);
+    }
+  }
+  return value;
+}
+
+/**
+ * Parse an explicit reverse-proxy allowlist; an empty list means trust none.
+ *
+ * A broad Docker/private subnet turns every container on that network into a
+ * trusted proxy. Service addresses can change, so Compose pins the one proxy
+ * peer it needs and this parser accepts only a single IP (/32 or /128 is the
+ * same single host), never an address range.
+ */
+export function resolveTrustedProxies(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env.MUSTER_TRUST_PROXY?.trim();
+  if (!raw) return [];
+  return raw.split(',').map((entry) => entry.trim()).filter(Boolean).map(validateProxyAddress);
+}
+
+/**
+ * Validate deployment-only requirements before opening the database or socket.
+ * Open loopback development remains zero-config; any enforced/public deployment
+ * must provide enough OIDC and origin information to fail closed.
+ */
+export function validateDeploymentConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  listener: ListenerConfig = resolveListenerConfig(env),
+): DeploymentConfig {
+  const port = Number.parseInt(env.MUSTER_PORT || '6878', 10);
+  const suppliedPublicUrl = env.MUSTER_PUBLIC_URL?.trim();
+  if (!listener.isLoopback && !suppliedPublicUrl) {
+    throw new Error('MUSTER_PUBLIC_URL is required when MUSTER_HOST is non-loopback');
+  }
+  const publicUrl = (suppliedPublicUrl || `http://localhost:${port}`).replace(/\/$/, '');
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(publicUrl);
+  } catch {
+    throw new Error('MUSTER_PUBLIC_URL must be an absolute http(s) URL');
+  }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash || !['', '/'].includes(parsedUrl.pathname)) {
+    throw new Error('MUSTER_PUBLIC_URL must be an origin URL without credentials, path, query, or fragment');
+  }
+  if (!listener.isLoopback && parsedUrl.protocol !== 'https:') {
+    throw new Error('MUSTER_PUBLIC_URL must use https when MUSTER_HOST is non-loopback');
+  }
+  const oidcIssuer = env.MUSTER_OIDC_ISSUER?.trim() || null;
+  const oidcClientId = env.MUSTER_OIDC_CLIENT_ID?.trim() || null;
+  const oidcClientSecret = readSecret(env, 'MUSTER_OIDC_CLIENT_SECRET');
+  const bootstrapOwnerSubject = env.MUSTER_BOOTSTRAP_OWNER_SUBJECT?.trim() || null;
+  if (bootstrapOwnerSubject && /[\r\n]/.test(bootstrapOwnerSubject)) {
+    throw new Error('MUSTER_BOOTSTRAP_OWNER_SUBJECT must not contain newlines');
+  }
+  if (listener.authMode === 'enforced') {
+    const missing = [
+      !oidcIssuer && 'MUSTER_OIDC_ISSUER',
+      !oidcClientId && 'MUSTER_OIDC_CLIENT_ID',
+      !oidcClientSecret && 'MUSTER_OIDC_CLIENT_SECRET',
+      !bootstrapOwnerSubject && 'MUSTER_BOOTSTRAP_OWNER_SUBJECT',
+    ].filter(Boolean);
+    if (missing.length > 0) {
+      throw new Error(`Enforced authentication requires ${missing.join(', ')}`);
+    }
+    try {
+      const issuerUrl = new URL(oidcIssuer!);
+      if (issuerUrl.protocol !== 'https:' && !listener.isLoopback) throw new Error('issuer must use https');
+    } catch {
+      throw new Error('MUSTER_OIDC_ISSUER must be an absolute URL (https for non-loopback deployments)');
+    }
+  }
+
+  return {
+    publicUrl,
+    oidcIssuer,
+    oidcClientId,
+    oidcClientSecret,
+    bootstrapOwnerSubject,
+    trustedProxies: resolveTrustedProxies(env),
+  };
+}
+
 /** Render an address safely inside an HTTP URL for startup guidance. */
 export function formatHostForUrl(host: string): string {
   return net.isIP(host) === 6 && !host.startsWith('[') ? `[${host}]` : host;
 }
 
 const listener = resolveListenerConfig();
+const deployment = validateDeploymentConfig(process.env, listener);
 
 function getDefaultDbDir(): string {
   if (process.env.MUSTER_DB_DIR) {
@@ -197,6 +325,7 @@ export const config = {
   auth: {
     mode: listener.authMode,
   },
+  trustedProxies: deployment.trustedProxies,
   db: {
     /** 'sqlite' (default, zero-config) or 'postgres' — see docs/deployment.md. */
     type: (process.env.MUSTER_DB_TYPE || 'sqlite') as 'sqlite' | 'postgres',
@@ -209,10 +338,10 @@ export const config = {
   oidc: {
     issuer: process.env.MUSTER_OIDC_ISSUER || null,
     clientId: process.env.MUSTER_OIDC_CLIENT_ID || null,
-    clientSecret: process.env.MUSTER_OIDC_CLIENT_SECRET || null,
-    publicUrl: process.env.MUSTER_PUBLIC_URL || `http://localhost:${port}`,
+    clientSecret: deployment.oidcClientSecret,
+    publicUrl: deployment.publicUrl,
     /** OIDC `sub` claim pinned in advance as the workspace owner, bypassing invitation admission. */
-    bootstrapOwnerSubject: process.env.MUSTER_BOOTSTRAP_OWNER_SUBJECT || null,
+    bootstrapOwnerSubject: deployment.bootstrapOwnerSubject,
   },
 };
 

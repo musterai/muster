@@ -173,6 +173,34 @@ describe('Atomic card claiming and lease expiry', () => {
     expect(response.next_action).toContain('next active-work lane');
   });
 
+  it('move_card requires explicit move intent in MCP and its handler cannot mutate on an empty call', async () => {
+    const first = await makeCard('MCP first');
+    const second = await cardService.create({ column_id: first.column_id, title: 'MCP second' });
+    const services: Services = {
+      projectService, boardService, columnService, cardService, commentService,
+      documentService, agentService, eventService, kbService, roleService: {} as RoleService,
+    };
+    const server = createMcpServer(services, { headers: {} } as any) as any;
+    const tool = server._registeredTools.move_card;
+    expect(tool.inputSchema.safeParse({ card_id: first.id }).success).toBe(false);
+    const before = await db.query<{ id: string; column_id: string; position: string }>(
+      'SELECT id, column_id, position FROM card WHERE column_id = ? ORDER BY position, id', [first.column_id],
+    );
+    const beforeEvents = await db.query<{ id: string }>('SELECT id FROM event WHERE entity_id = ?', [first.id]);
+
+    // Calling the registered handler directly bypasses the SDK transport, but
+    // MUS-59's central registration guard still applies MUS-76's complete
+    // cross-field schema before the service can rebalance or emit an event.
+    await expect(tool.handler({ card_id: first.id }, {}))
+      .rejects.toThrow(/target_column_id or position is required/);
+
+    const after = await db.query<{ id: string; column_id: string; position: string }>(
+      'SELECT id, column_id, position FROM card WHERE column_id = ? ORDER BY position, id', [first.column_id],
+    );
+    expect(after).toEqual(before);
+    expect(await db.query('SELECT id FROM event WHERE entity_id = ?', [first.id])).toEqual(beforeEvents);
+  });
+
   it('an expired lease is reclaimable by a different agent', async () => {
     const card = await makeCard();
     const holder = await agentService.register({ name: 'Original Holder' });
@@ -228,6 +256,46 @@ describe('Atomic card claiming and lease expiry', () => {
 
     const events = await eventService.list(project.id, { entity_id: card.id });
     expect(events.some(e => e.action === 'claim_expired')).toBe(true);
+  });
+
+  it('rolls back an expired lease when event persistence fails', async () => {
+    const project = await projectService.create({ name: 'Sweep rollback project' });
+    const boards = await boardService.list(project.id);
+    const columns = await columnService.list(boards[0].id);
+    const card = await cardService.create({ column_id: columns[0].id, title: 'Keep my lease' });
+    const agent = await agentService.register({ name: 'Still alive' });
+    await cardService.claim(card.id, agent.id, 1);
+    await db.execute('UPDATE card SET claim_expires_at = ? WHERE id = ?', [
+      new Date(Date.now() - 1000).toISOString(), card.id,
+    ]);
+
+    eventService.create = async () => { throw new Error('injected event failure'); };
+    await expect(cardService.releaseExpiredLeases()).rejects.toThrow('injected event failure');
+
+    const retained = await cardService.getById(card.id);
+    expect(retained.claimed_by).toBe(agent.id);
+    expect(retained.claim_expires_at).not.toBeNull();
+    expect((await db.query('SELECT id FROM event WHERE entity_id = ? AND action = ?', [card.id, 'claim_expired'])).length).toBe(0);
+  });
+
+  it('concurrent expiry sweepers release once and emit one event', async () => {
+    const project = await projectService.create({ name: 'Concurrent sweep project' });
+    const boards = await boardService.list(project.id);
+    const columns = await columnService.list(boards[0].id);
+    const card = await cardService.create({ column_id: columns[0].id, title: 'Sweep once' });
+    const agent = await agentService.register({ name: 'Expired holder' });
+    await cardService.claim(card.id, agent.id, 1);
+    await db.execute('UPDATE card SET claim_expires_at = ? WHERE id = ?', [
+      new Date(Date.now() - 1000).toISOString(), card.id,
+    ]);
+
+    const [first, second] = await Promise.all([
+      cardService.releaseExpiredLeases(),
+      cardService.releaseExpiredLeases(),
+    ]);
+    expect([first, second].filter(ids => ids.includes(card.id)).length).toBe(1);
+    const events = await eventService.list(project.id, { entity_id: card.id });
+    expect(events.filter(event => event.action === 'claim_expired')).toHaveLength(1);
   });
 
   it('claiming an unclaimed card by an unrelated agent does not affect other cards', async () => {

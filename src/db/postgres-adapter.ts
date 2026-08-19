@@ -11,6 +11,8 @@
 import pg from 'pg';
 import { DatabaseAdapter, ExecutionResult } from './adapter.js';
 
+type PostgresPoolLike = Pick<pg.Pool, 'connect' | 'query' | 'end'>;
+
 /**
  * SQLite-style positional `?` placeholders → Postgres's `$1, $2, ...`.
  * Every service is written with `?`, so this runs on every query rather
@@ -79,6 +81,8 @@ abstract class BasePostgresAdapter implements DatabaseAdapter {
 
 /** Bound to one already-checked-out client for the lifetime of an open transaction — every call inside must run on this same connection to see uncommitted writes and hold the same locks. */
 class PostgresTransactionAdapter extends BasePostgresAdapter {
+  private commitCallbacks: Array<() => void | Promise<void>> = [];
+
   constructor(private readonly client: pg.PoolClient) {
     super();
   }
@@ -95,6 +99,18 @@ class PostgresTransactionAdapter extends BasePostgresAdapter {
     return fn(this);
   }
 
+  afterCommit(callback: () => void | Promise<void>): void {
+    this.commitCallbacks.push(callback);
+  }
+
+  async runAfterCommit(): Promise<void> {
+    const callbacks = this.commitCallbacks;
+    this.commitCallbacks = [];
+    for (const callback of callbacks) {
+      try { await callback(); } catch (error) { console.error('Error in after-commit callback:', error); }
+    }
+  }
+
   async migrate(sql: string): Promise<void> {
     // node-postgres sends a parameter-free script through PostgreSQL's native
     // multi-statement parser.  Keep this on the checked-out transaction
@@ -108,11 +124,15 @@ class PostgresTransactionAdapter extends BasePostgresAdapter {
 }
 
 export class PostgresAdapter extends BasePostgresAdapter {
-  private readonly pool: pg.Pool;
+  private readonly pool: PostgresPoolLike;
+  // After-commit listeners are serialized in commit order, but run after the
+  // transaction client is returned to the pool. A slow SSE subscriber must
+  // never consume a checked-out database connection.
+  private afterCommitQueue: Promise<unknown> = Promise.resolve();
 
-  constructor(connectionString: string) {
+  constructor(connectionString: string, pool: PostgresPoolLike = new pg.Pool({ connectionString })) {
     super();
-    this.pool = new pg.Pool({ connectionString });
+    this.pool = pool;
   }
 
   protected runQuery(sql: string, params: unknown[]): Promise<pg.QueryResult> {
@@ -121,21 +141,35 @@ export class PostgresAdapter extends BasePostgresAdapter {
 
   async transaction<T>(fn: (adapter: DatabaseAdapter) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
+    let released = false;
     try {
       await client.query('BEGIN');
       const txAdapter = new PostgresTransactionAdapter(client);
       const result = await fn(txAdapter);
       await client.query('COMMIT');
+      // COMMIT is durable before any listener runs. Release immediately so a
+      // listener that awaits network/SSE backpressure cannot saturate the
+      // pool. The queue preserves callback ordering across transactions and
+      // each transaction adapter contains listener failures best-effort.
+      client.release();
+      released = true;
+      const callbacksRun = this.afterCommitQueue.then(() => txAdapter.runAfterCommit());
+      this.afterCommitQueue = callbacksRun.catch(error => {
+        console.error('Error in after-commit callbacks:', error);
+      });
+      await callbacksRun;
       return result;
     } catch (err) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        // Already rolled back (e.g. the connection itself failed) — ignore.
+      if (!released) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Already rolled back (e.g. the connection itself failed) — ignore.
+        }
       }
       throw err;
     } finally {
-      client.release();
+      if (!released) client.release();
     }
   }
 
