@@ -23,6 +23,11 @@ import {
   NewDocModal,
 } from './components/Modals.js';
 import { readBrowserLocation, updateBrowserLocation, type AppTab as TabType } from './navigation.js';
+import {
+  WorkspaceViewProvider,
+  type WorkspaceViewController,
+} from './WorkspaceViewContext.js';
+import { useAppDialogController } from './hooks/useAppDialogController.js';
 
 const parseLocation = readBrowserLocation;
 
@@ -86,19 +91,31 @@ export const App: React.FC = () => {
     return cards.filter((c) => !c.archived && !terminalColumnIds.has(c.column_id)).length;
   }, [selectedBoardId, columns, cards]);
 
-  // Modals visibility
-  const [showNewProjectModal, setShowNewProjectModal] = useState(false);
-  const [showEditProjectModal, setShowEditProjectModal] = useState(false);
-  const [showNewBoardModal, setShowNewBoardModal] = useState(false);
-  const [showNewColumnModal, setShowNewColumnModal] = useState(false);
-  const [showRegisterAgentModal, setShowRegisterAgentModal] = useState(false);
-  const [showNewDocModal, setShowNewDocModal] = useState(false);
-  const [showUserAccountModal, setShowUserAccountModal] = useState(false);
-  const [userAccountInitialTab, setUserAccountInitialTab] = useState<'appearance' | 'tokens' | 'admin' | 'profile'>('appearance');
-  const [showShortcutsHelpModal, setShowShortcutsHelpModal] = useState(false);
-  const [newCardRequest, setNewCardRequest] = useState<{ columnId?: string; token: number } | null>(null);
-  const newCardTokenRef = useRef(0);
-  const [openCardRequest, setOpenCardRequest] = useState<{ cardId: string; token: number } | null>(null);
+  const {
+    showNewProjectModal,
+    setShowNewProjectModal,
+    showEditProjectModal,
+    setShowEditProjectModal,
+    showNewBoardModal,
+    setShowNewBoardModal,
+    showNewColumnModal,
+    setShowNewColumnModal,
+    showRegisterAgentModal,
+    setShowRegisterAgentModal,
+    showNewDocModal,
+    setShowNewDocModal,
+    showUserAccountModal,
+    setShowUserAccountModal,
+    userAccountInitialTab,
+    setUserAccountInitialTab,
+    showShortcutsHelpModal,
+    setShowShortcutsHelpModal,
+    newCardRequest,
+    setNewCardRequest,
+    openCardRequest,
+    setOpenCardRequest,
+    requestNewCard,
+  } = useAppDialogController();
 
   const rememberSelectedBoard = useCallback((boardId: string | null) => {
     selectedBoardIdRef.current = boardId;
@@ -462,8 +479,7 @@ export const App: React.FC = () => {
   };
 
   const handleOpenNewCardModal = (colId?: string) => {
-    newCardTokenRef.current += 1;
-    setNewCardRequest({ columnId: colId, token: newCardTokenRef.current });
+    requestNewCard(colId);
     if (activeTab !== 'board') {
       handleSelectTab('board');
     }
@@ -491,6 +507,59 @@ export const App: React.FC = () => {
     } catch (err) {
       console.error('Failed to delete board:', err);
     }
+  };
+
+  const workspaceController: WorkspaceViewController = {
+    navigation: {
+      activeTab,
+      activeViewTitle: activeViewTitle[activeTab],
+      selectedProjectId,
+      selectedBoardId,
+      selectedDocId,
+      selectedEntityId,
+    },
+    data: {
+      projects,
+      boards,
+      board,
+      columns,
+      cards,
+      agents,
+      users,
+      currentUser,
+      authMode,
+      documents,
+      events,
+      workspaceId,
+    },
+    requests: {
+      newCard: newCardRequest,
+      openCard: openCardRequest,
+    },
+    actions: {
+      agentHeartbeat: handleAgentHeartbeat,
+      unregisterAgent: handleUnregisterAgent,
+      requestRegisterAgent: () => setShowRegisterAgentModal(true),
+      refresh: loadProjectData,
+      selectBoard: handleSelectBoard,
+      moveCard: handleMoveCard,
+      moveColumn: handleMoveColumn,
+      newCardRequestHandled: () => setNewCardRequest(null),
+      openCardRequestHandled: () => setOpenCardRequest(null),
+      requestNewColumn: () => setShowNewColumnModal(true),
+      requestNewBoard: () => setShowNewBoardModal(true),
+      deleteBoard: handleDeleteBoard,
+      openDocumentInVault: (docId) => {
+        setActiveTab('docs');
+        handleSelectDoc(docId);
+      },
+      selectDoc: handleSelectDoc,
+      requestNewDoc: () => setShowNewDocModal(true),
+      selectEntity: (entityId) => {
+        setSelectedEntityId(entityId);
+        if (selectedProjectId) updateLocation(selectedProjectId, 'kb', null, entityId);
+      },
+    },
   };
 
   return (
@@ -560,50 +629,9 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      <AppWorkspaceView
-        activeTab={activeTab}
-        activeViewTitle={activeViewTitle[activeTab]}
-        projects={projects}
-        selectedProjectId={selectedProjectId}
-        boards={boards}
-        board={board}
-        selectedBoardId={selectedBoardId}
-        columns={columns}
-        cards={cards}
-        agents={agents}
-        users={users}
-        currentUser={currentUser}
-        authMode={authMode}
-        documents={documents}
-        events={events}
-        workspaceId={workspaceId}
-        selectedDocId={selectedDocId}
-        selectedEntityId={selectedEntityId}
-        newCardRequest={newCardRequest}
-        openCardRequest={openCardRequest}
-        onAgentHeartbeat={handleAgentHeartbeat}
-        onUnregisterAgent={handleUnregisterAgent}
-        onRequestRegisterAgent={() => setShowRegisterAgentModal(true)}
-        onRefresh={loadProjectData}
-        onSelectBoard={handleSelectBoard}
-        onMoveCard={handleMoveCard}
-        onMoveColumn={handleMoveColumn}
-        onNewCardRequestHandled={() => setNewCardRequest(null)}
-        onOpenCardRequestHandled={() => setOpenCardRequest(null)}
-        onRequestNewColumn={() => setShowNewColumnModal(true)}
-        onRequestNewBoard={() => setShowNewBoardModal(true)}
-        onDeleteBoard={handleDeleteBoard}
-        onOpenDocumentInVault={(docId) => {
-          setActiveTab('docs');
-          handleSelectDoc(docId);
-        }}
-        onSelectDoc={handleSelectDoc}
-        onRequestNewDoc={() => setShowNewDocModal(true)}
-        onSelectEntity={(entityId) => {
-          setSelectedEntityId(entityId);
-          if (selectedProjectId) updateLocation(selectedProjectId, 'kb', null, entityId);
-        }}
-      />
+      <WorkspaceViewProvider controller={workspaceController}>
+        <AppWorkspaceView />
+      </WorkspaceViewProvider>
       {/* Mobile Bottom Navigation Bar */}
       <MobileBottomNav activeTab={activeTab} onSelectTab={handleSelectTab} />
 

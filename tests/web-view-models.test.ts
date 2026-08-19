@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildAppPath, parseAppLocation } from '../src/web/navigation.js';
-import { buildDisplayColumns, resolveTargetColumnId } from '../src/web/kanban-view.js';
+import { buildDisplayColumns, resolveCardDrop, resolveTargetColumnId } from '../src/web/kanban-view.js';
 import type { Board, Card, Column } from '../src/web/types.js';
 
 const board = (id: string): Board => ({ id, project_id: 'project', name: id, slug: id, created_at: '', updated_at: '' });
@@ -24,5 +24,26 @@ describe('browser view models', () => {
     const aggregate = buildDisplayColumns(columns, 'all', board('all'));
     expect(aggregate.displayColumns.map((item) => item.name)).toEqual(['To Do', 'Done']);
     expect(resolveTargetColumnId('all-col-done', 'card-b', aggregate.displayColumns, columns, [card('card-b', 'b', 'b-todo')])).toBe('b-done');
+  });
+
+  it('resolves an aggregate swimlane drop to a concrete board lane and rank', () => {
+    const columns = [column('a-todo', 'a', 'To Do'), column('b-todo', 'b', 'To Do'), column('b-done', 'b', 'Done')];
+    const moving = { ...card('card-b', 'b', 'b-todo'), position: 'a' };
+    const existing = { ...card('done-b', 'b', 'b-done'), position: 'z' };
+    const aggregate = buildDisplayColumns(columns, 'all', board('all'));
+    const resolution = resolveCardDrop({
+      draggableId: moving.id,
+      sourceDroppableId: 'all-col-to-do:::unparented',
+      sourceIndex: 0,
+      destinationDroppableId: 'all-col-done:::unparented',
+      destinationIndex: 1,
+      cards: [moving, existing],
+      columns,
+      displayColumns: aggregate.displayColumns,
+      columnMap: aggregate.columnMap,
+    });
+
+    expect(resolution.targetColumnId).toBe('b-done');
+    expect(resolution.position > existing.position).toBe(true);
   });
 });

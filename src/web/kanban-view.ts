@@ -1,4 +1,5 @@
 import type { Board, Card, Column } from './types.js';
+import { computeReorderedPosition } from './kanban.js';
 
 export interface DisplayColumnModel {
   displayColumns: Column[];
@@ -45,4 +46,66 @@ export function resolveTargetColumnId(
   return columns.find((column) =>
     column.board_id === targetCard.board_id && column.name.trim().toLowerCase() === targetName
   )?.id ?? columns.find((column) => column.name.trim().toLowerCase() === targetName)?.id ?? targetColumnId;
+}
+
+export interface CardDropResolution {
+  targetColumnId: string;
+  position: string;
+}
+
+/** Resolve a rendered card drop into the concrete lane and LexoRank hint. */
+export function resolveCardDrop({
+  draggableId,
+  sourceDroppableId,
+  sourceIndex,
+  destinationDroppableId,
+  destinationIndex,
+  cards,
+  columns,
+  displayColumns,
+  columnMap,
+}: {
+  draggableId: string;
+  sourceDroppableId: string;
+  sourceIndex: number;
+  destinationDroppableId: string;
+  destinationIndex: number;
+  cards: Card[];
+  columns: Column[];
+  displayColumns: Column[];
+  columnMap: Record<string, string>;
+}): CardDropResolution {
+  const targetDisplayColumnId = destinationDroppableId.split(':::')[0];
+  let targetCards = cards.filter((card) => {
+    if (card.archived) return false;
+    if (targetDisplayColumnId.startsWith('all-col-')) {
+      const targetColumn = displayColumns.find((column) => column.id === targetDisplayColumnId);
+      if (!targetColumn) return false;
+      return (columnMap[card.column_id] || '').trim().toLowerCase()
+        === targetColumn.name.trim().toLowerCase();
+    }
+    return card.column_id === targetDisplayColumnId;
+  });
+
+  const [, targetEpicId] = destinationDroppableId.split(':::');
+  if (targetEpicId && targetEpicId !== 'unparented') {
+    targetCards = targetCards.filter((card) => card.parent_epic_id === targetEpicId || card.id === targetEpicId);
+  } else if (targetEpicId === 'unparented') {
+    targetCards = targetCards.filter((card) => !card.is_epic && !card.parent_epic_id);
+  }
+
+  return {
+    targetColumnId: resolveTargetColumnId(
+      targetDisplayColumnId,
+      draggableId,
+      displayColumns,
+      columns,
+      cards,
+    ),
+    position: computeReorderedPosition(
+      targetCards,
+      sourceDroppableId === destinationDroppableId ? sourceIndex : targetCards.length,
+      destinationIndex,
+    ),
+  };
 }

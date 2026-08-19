@@ -5,7 +5,6 @@ import { Board, Column, Card, Agent, CardDetails, Document, CardLinkRelationType
 import { Layers, ChevronDown, ChevronRight } from 'lucide-react';
 import { api, getLocalProxyToken } from '../api.js';
 import {
-  CardDateSortOrder,
   DONE_LANE_PAGE_SIZE,
   computeReorderedPosition,
   getLaneCards,
@@ -18,8 +17,8 @@ import { CardDetailDrawer } from './kanban/CardDetailDrawer.js';
 import { BoardSettingsDialog } from './kanban/BoardSettingsDialog.js';
 import { KanbanToolbar } from './kanban/KanbanToolbar.js';
 import { MobileLaneSwitcher } from './kanban/MobileLaneSwitcher.js';
-import { buildDisplayColumns, resolveTargetColumnId } from '../kanban-view.js';
-import { useBoardViewMode } from '../hooks/useBoardViewMode.js';
+import { buildDisplayColumns, resolveCardDrop, resolveTargetColumnId } from '../kanban-view.js';
+import { useKanbanChromeController } from '../hooks/useKanbanChromeController.js';
 
 interface KanbanBoardProps {
   boards: Board[];
@@ -75,11 +74,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   const [copiedKeyCardId, setCopiedKeyCardId] = useState<string | null>(null);
   const [readerDocument, setReaderDocument] = useState<Document | null>(null);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
-  const [showBoardSettingsModal, setShowBoardSettingsModal] = useState(false);
-  const [boardNameInput, setBoardNameInput] = useState('');
   const [editingColumn, setEditingColumn] = useState<Column | null>(null);
 
-  const [isEditingBoardName, setIsEditingBoardName] = useState(false);
   const [isEditingCard, setIsEditingCard] = useState(false);
   const [editCardTitle, setEditCardTitle] = useState('');
   const [editCardDescription, setEditCardDescription] = useState('');
@@ -89,15 +85,32 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
   const [isCreatingCard, setIsCreatingCard] = useState(false);
   const [newCardColumnId, setNewCardColumnId] = useState('');
-  const [cardDateSortOrder, setCardDateSortOrder] = useState<CardDateSortOrder>('newest');
   const [doneVisibleLimits, setDoneVisibleLimits] = useState<Record<string, number>>({});
   const [focusedCardId, setFocusedCardId] = useState<string | null>(null);
-  const [focusedColumnIdx, setFocusedColumnIdx] = useState<number>(0);
   const [boardAnnouncement, setBoardAnnouncement] = useState('');
-  const [boardViewMode, setBoardViewMode] = useBoardViewMode();
 
   const [hoveredEpicId, setHoveredEpicId] = useState<string | null>(null);
   const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>({});
+
+  const chrome = useKanbanChromeController({
+    boards,
+    board,
+    selectedBoardId,
+    columns,
+    cards,
+    onSelectBoard,
+    onOpenNewBoard,
+    onOpenNewColumn,
+    onDeleteBoard,
+    onRefresh,
+  });
+  const {
+    isBoardSettingsOpen: showBoardSettingsModal,
+    boardViewMode,
+    cardDateSortOrder,
+    focusedColumnIndex: focusedColumnIdx,
+  } = chrome.state;
+  const setFocusedColumnIdx = chrome.actions.setFocusedColumnIndex;
 
   const { displayColumns, columnMap } = React.useMemo(
     () => buildDisplayColumns(columns, selectedBoardId, board),
@@ -153,7 +166,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (showBoardSettingsModal) {
-          setShowBoardSettingsModal(false);
+          chrome.actions.closeBoardSettings();
         } else if (editingColumn) {
           setEditingColumn(null);
         } else if (cardDetails || isCreatingCard) {
@@ -610,17 +623,6 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
     }
   };
 
-  const handleRenameBoard = async () => {
-    if (!board || !boardNameInput.trim()) return;
-    try {
-      await api.updateBoard(board.id, boardNameInput.trim());
-      setIsEditingBoardName(false);
-      onRefresh();
-    } catch (err) {
-      console.error('Failed to rename board:', err);
-    }
-  };
-
   const handleDeleteColumn = async (colId: string) => {
     try {
       await api.deleteColumn(colId);
@@ -646,34 +648,18 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       return;
     }
 
-    const targetColumnId = destination.droppableId.split(':::')[0];
-    const sourceColumnId = source.droppableId.split(':::')[0];
-
-    let targetColCards = cards.filter((c) => {
-      if (c.archived) return false;
-      if (targetColumnId.startsWith('all-col-')) {
-        const targetCol = displayColumns.find((col) => col.id === targetColumnId);
-        if (!targetCol) return false;
-        const targetName = targetCol.name.trim().toLowerCase();
-        const cColName = (columnMap[c.column_id] || '').trim().toLowerCase();
-        return cColName === targetName;
-      }
-      return c.column_id === targetColumnId;
+    const resolution = resolveCardDrop({
+      draggableId,
+      sourceDroppableId: source.droppableId,
+      sourceIndex: source.index,
+      destinationDroppableId: destination.droppableId,
+      destinationIndex: destination.index,
+      cards,
+      columns,
+      displayColumns,
+      columnMap,
     });
-    const targetEpicId = destination.droppableId.includes(':::') ? destination.droppableId.split(':::')[1] : null;
-    if (targetEpicId && targetEpicId !== 'unparented') {
-      targetColCards = targetColCards.filter((c) => c.parent_epic_id === targetEpicId || c.id === targetEpicId);
-    } else if (targetEpicId === 'unparented') {
-      targetColCards = targetColCards.filter((c) => !c.is_epic && !c.parent_epic_id);
-    }
-
-    const newPos = computeReorderedPosition(
-      targetColCards,
-      source.droppableId === destination.droppableId ? source.index : targetColCards.length,
-      destination.index
-    );
-
-    handleMoveCardWithResolution(draggableId, targetColumnId, newPos);
+    handleMoveCardWithResolution(draggableId, resolution.targetColumnId, resolution.position);
   };
 
   if (!board) {
@@ -689,28 +675,12 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       <h2 id="kanban-board-heading" className="sr-only">{board.name} Kanban board</h2>
       <div className="sr-only" aria-live="polite" aria-atomic="true">{boardAnnouncement}</div>
       <KanbanToolbar
-        boards={boards}
-        board={board}
-        selectedBoardId={selectedBoardId}
-        isEditingBoardName={isEditingBoardName}
-        boardNameInput={boardNameInput}
-        boardViewMode={boardViewMode}
-        cards={cards}
-        cardDateSortOrder={cardDateSortOrder}
-        onSelectBoard={onSelectBoard}
-        onOpenNewBoard={onOpenNewBoard}
-        onBoardNameInput={setBoardNameInput}
-        onRenameBoard={handleRenameBoard}
-        onCancelRename={() => setIsEditingBoardName(false)}
-        onOpenBoardSettings={() => {
-          setBoardNameInput(board.name);
-          setShowBoardSettingsModal(true);
+        controller={{
+          ...chrome.toolbar,
+          actions: { ...chrome.toolbar.actions, openCard: handleOpenCard },
         }}
-        onSetBoardViewMode={setBoardViewMode}
-        onOpenCard={handleOpenCard}
-        onToggleSort={() => setCardDateSortOrder((current) => current === 'newest' ? 'oldest' : 'newest')}
       />
-      <MobileLaneSwitcher columns={columns} cards={cards} focusedColumnIdx={focusedColumnIdx} />
+      <MobileLaneSwitcher controller={chrome.mobile} />
       {/* Main Board Area */}
       {boardViewMode === 'default' ? (
         <DragDropContext onDragEnd={onDragEnd}>
@@ -1024,16 +994,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
         />
       )}
 
-      {showBoardSettingsModal && (
-        <BoardSettingsDialog
-          board={board}
-          boardNameInput={boardNameInput}
-          onBoardNameInput={setBoardNameInput}
-          onRename={handleRenameBoard}
-          onClose={() => setShowBoardSettingsModal(false)}
-          onOpenNewColumn={onOpenNewColumn}
-          onDeleteBoard={onDeleteBoard}
-        />
+      {showBoardSettingsModal && chrome.settings && (
+        <BoardSettingsDialog controller={chrome.settings} />
       )}
       {/* Edit Column Modal */}
       {editingColumn && (
