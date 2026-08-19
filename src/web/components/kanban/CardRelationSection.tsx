@@ -73,6 +73,7 @@ export const CardRelationSection: React.FC<CardRelationModalProps> = ({
       <div className="flex flex-col sm:flex-row gap-1.5 min-w-0">
         <select
           value={relationType}
+          aria-label="Card relation type"
           onChange={(e) => setRelationType(e.target.value as CardLinkRelationType)}
           className="muster-input text-xs py-1 w-full sm:w-36 shrink-0"
         >

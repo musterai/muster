@@ -1,10 +1,12 @@
 // File: scripts/browser-ui-test.ts
 import { chromium } from 'playwright';
+import AxeBuilder from '@axe-core/playwright';
 import { fork, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { ulid } from 'ulid';
+import { COLOR_PROFILES, type AppearanceMode } from '../src/web/theme.js';
 
 const TEST_PORT = 3094;
 const TEST_DB_PATH = path.join(process.cwd(), 'data', `e2e-browser-${Date.now()}.db`);
@@ -110,6 +112,131 @@ async function assertNestedDialogIsolation(page: any, topDialog: any) {
   if (state.dialogCount < 2 || !state.lowerLayersIsolated || !state.topLayerInteractive || !state.focusInsideTop) {
     throw new Error(`Nested dialog stack did not isolate only the top layer: ${JSON.stringify(state)}`);
   }
+}
+
+async function assertNoSeriousAxeViolations(page: any, state: string) {
+  const results = await new AxeBuilder({ page }).analyze();
+  const blockers = results.violations.filter(({ impact }) => impact === 'serious' || impact === 'critical');
+  if (blockers.length > 0) {
+    const summary = blockers.map((violation) => ({
+      id: violation.id,
+      impact: violation.impact,
+      help: violation.help,
+      targets: violation.nodes.slice(0, 5).map((node) => node.target),
+    }));
+    throw new Error(`axe serious/critical violations in ${state}: ${JSON.stringify(summary)}`);
+  }
+  console.log(`  ✓ axe: ${state} has no serious/critical violations.`);
+}
+
+type ContrastKind = 'text' | 'non-text' | 'focus';
+
+async function measureRenderedContrast(locator: any, label: string, kind: ContrastKind) {
+  return locator.evaluate((element: HTMLElement, { label, kind }: { label: string; kind: ContrastKind }) => {
+    type Rgba = { r: number; g: number; b: number; a: number };
+    const parse = (value: string): Rgba => {
+      const channels = value.match(/[\d.]+/g)?.map(Number) || [];
+      return { r: channels[0] || 0, g: channels[1] || 0, b: channels[2] || 0, a: channels[3] ?? 1 };
+    };
+    const composite = (foreground: Rgba, background: Rgba): Rgba => {
+      const alpha = foreground.a + background.a * (1 - foreground.a);
+      if (alpha === 0) return { r: 0, g: 0, b: 0, a: 0 };
+      return {
+        r: (foreground.r * foreground.a + background.r * background.a * (1 - foreground.a)) / alpha,
+        g: (foreground.g * foreground.a + background.g * background.a * (1 - foreground.a)) / alpha,
+        b: (foreground.b * foreground.a + background.b * background.a * (1 - foreground.a)) / alpha,
+        a: alpha,
+      };
+    };
+    const effectiveBackground = (start: HTMLElement | null): Rgba => {
+      const layers: Rgba[] = [];
+      for (let current = start; current; current = current.parentElement) {
+        layers.push(parse(getComputedStyle(current).backgroundColor));
+      }
+      let result: Rgba = { r: 255, g: 255, b: 255, a: 1 };
+      for (const layer of layers.reverse()) result = composite(layer, result);
+      return result;
+    };
+    const linear = (channel: number) => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    };
+    const luminance = (color: Rgba) => 0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b);
+    const ratio = (first: Rgba, second: Rgba) => {
+      const firstLuminance = luminance(first);
+      const secondLuminance = luminance(second);
+      return (Math.max(firstLuminance, secondLuminance) + 0.05) / (Math.min(firstLuminance, secondLuminance) + 0.05);
+    };
+
+    const style = getComputedStyle(element);
+    const background = effectiveBackground(kind === 'focus' ? element.parentElement : element);
+    const foreground = composite(parse(kind === 'focus' ? style.outlineColor : style.color), background);
+    const fontSize = Number.parseFloat(style.fontSize);
+    const fontWeight = Number.parseInt(style.fontWeight, 10) || 400;
+    const largeText = fontSize >= 24 || (fontSize >= 18.66 && fontWeight >= 700);
+    const threshold = kind === 'text' ? (largeText ? 3 : 4.5) : 3;
+    return { label, kind, ratio: ratio(foreground, background), threshold, foreground: style.color, background: style.backgroundColor };
+  }, { label, kind });
+}
+
+async function assertRenderedAppearanceContrast(page: any, accountDialog: any) {
+  // tsx preserves nested callback names with an esbuild helper. Playwright
+  // serializes this evaluator into the page, so expose the no-op helper there
+  // before evaluating the contrast math in Chromium.
+  await page.evaluate('globalThis.__name = function (target) { return target; };');
+  const modes: AppearanceMode[] = ['dark', 'light'];
+  const matrix: Array<{ profile: string; mode: AppearanceMode; samples: Awaited<ReturnType<typeof measureRenderedContrast>>[] }> = [];
+  const appearanceTab = accountDialog.getByRole('tab', { name: 'Appearance & Theme' });
+  const tokensTab = accountDialog.getByRole('tab', { name: 'API Tokens' });
+
+  for (const profile of COLOR_PROFILES) {
+    for (const mode of modes) {
+      await appearanceTab.click();
+      await accountDialog.getByRole('button', { name: mode === 'dark' ? 'Dark Mode' : 'Light Mode', exact: true }).click();
+      const profileControl = accountDialog.getByRole('radio', { name: new RegExp(profile.name) });
+      await profileControl.click();
+      await page.waitForFunction(({ profile, mode }) => {
+        const root = document.documentElement;
+        return root.dataset.profile === profile && root.classList.contains(mode);
+      }, { profile: profile.id, mode });
+
+      const primary = accountDialog.locator('.muster-text-primary:visible').first();
+      const muted = accountDialog.locator('.muster-text-muted:visible').first();
+      await tokensTab.focus();
+      await page.keyboard.press('ArrowLeft');
+      if (!await appearanceTab.evaluate((element: HTMLElement) => element.matches(':focus-visible'))) {
+        throw new Error(`Appearance tab did not expose a keyboard focus-visible ring for ${profile.id}/${mode}`);
+      }
+      const samples = await Promise.all([
+        measureRenderedContrast(primary, 'primary text', 'text'),
+        measureRenderedContrast(muted, 'muted text', 'text'),
+        measureRenderedContrast(appearanceTab, 'account-tab focus ring', 'focus'),
+      ]);
+
+      await tokensTab.click();
+      const tokenRow = accountDialog.locator('tbody tr').filter({ hasText: 'Browser nested token' });
+      await tokenRow.waitFor();
+      const dangerControl = tokenRow.getByTitle('Revoke token');
+      await dangerControl.hover();
+      await page.waitForTimeout(200);
+      samples.push(
+        await measureRenderedContrast(accountDialog.getByRole('button', { name: 'New Token' }).first(), 'primary control', 'text'),
+        await measureRenderedContrast(tokenRow.locator('.muster-badge-success'), 'success status', 'text'),
+        await measureRenderedContrast(dangerControl, 'danger control', 'non-text'),
+      );
+
+      const failures = samples.filter((sample) => sample.ratio + 0.001 < sample.threshold);
+      if (failures.length > 0) {
+        throw new Error(`Rendered WCAG AA contrast failed for ${profile.id}/${mode}: ${JSON.stringify(failures)}`);
+      }
+      matrix.push({ profile: profile.id, mode, samples });
+    }
+  }
+
+  if (matrix.length !== COLOR_PROFILES.length * modes.length) {
+    throw new Error(`Rendered appearance matrix is incomplete: ${matrix.length} combinations`);
+  }
+  console.log(`  ✓ Rendered contrast: ${matrix.length} profile/mode combinations × 6 real UI surfaces meet WCAG AA.`);
 }
 
 async function runBrowserUiTest() {
@@ -276,6 +403,7 @@ async function runBrowserUiTest() {
     await page.click('h4:has-text("Implement Playwright E2E UI Tests")');
     await assertAccessibleDialog(page, /Implement Playwright E2E UI Tests/);
     await page.waitForSelector('text=Comments');
+    await assertNoSeriousAxeViolations(page, 'card details dialog');
 
     // Assign and remove an agent from the card.
     const assigneeSelect = page.locator('select:has-text("Select Agent...")');
@@ -374,6 +502,7 @@ async function runBrowserUiTest() {
 
     await page.getByRole('button', { name: 'Create Document', exact: true }).first().click();
     await assertAccessibleDialog(page, 'Create Design Document');
+    await assertNoSeriousAxeViolations(page, 'create document dialog');
 
     await page.fill('input[placeholder*="Architecture Overview"]', 'Frontend UI Architecture & E2E Verification');
     await page.fill('textarea', '# Frontend Specification\n\n- React 19 SPA\n- Lucide Icons\n- Tailwind CSS');
@@ -418,8 +547,10 @@ async function runBrowserUiTest() {
 
     // AgentGrid's edit overlay must use the same modal boundary.
     await page.getByRole('button', { name: /Agents/ }).click();
+    await assertNoSeriousAxeViolations(page, 'agents view');
     await page.getByTitle('Edit Agent Attributes').first().click();
     const editAgentDialog = await assertAccessibleDialog(page, 'Edit Agent Attributes');
+    await assertNoSeriousAxeViolations(page, 'agent edit dialog');
     await page.keyboard.press('Escape');
     await editAgentDialog.waitFor({ state: 'detached' });
 
@@ -427,6 +558,7 @@ async function runBrowserUiTest() {
     // stop, Arrow/Home/End navigation, and a stable nested dialog stack.
     await page.locator('header button[title*="Account"]').click();
     const accountDialog = await assertAccessibleDialog(page, /Operator|Browser UI Tester/);
+    await assertNoSeriousAxeViolations(page, 'account appearance dialog');
     const accountTabs = accountDialog.getByRole('tab');
     const initialTabStops = await accountTabs.evaluateAll((tabs: HTMLElement[]) => tabs.map((tab) => ({
       text: tab.textContent?.trim(),
@@ -465,6 +597,7 @@ async function runBrowserUiTest() {
     await newTokenTrigger.click();
     let newTokenDialog = await assertAccessibleDialog(page, 'New Token');
     await assertNestedDialogIsolation(page, newTokenDialog);
+    await assertNoSeriousAxeViolations(page, 'nested token dialog');
     await page.keyboard.press('Escape');
     await newTokenDialog.waitFor({ state: 'detached' });
     if (!await accountDialog.isVisible() || !await newTokenTrigger.evaluate((button: HTMLElement) => document.activeElement === button)) {
@@ -478,6 +611,7 @@ async function runBrowserUiTest() {
     await assertNestedDialogIsolation(page, tokenCreatedDialog);
     await tokenCreatedDialog.getByRole('button', { name: /Done/ }).click();
     await tokenCreatedDialog.waitFor({ state: 'detached' });
+    await assertRenderedAppearanceContrast(page, accountDialog);
 
     // RolesPanel and InvitationsPanel each contribute a nested overlay under
     // the account dialog and must participate in the same stack.
@@ -486,6 +620,7 @@ async function runBrowserUiTest() {
     await accountDialog.getByRole('button', { name: 'New Role' }).click();
     const roleDialog = await assertAccessibleDialog(page, 'New Role');
     await assertNestedDialogIsolation(page, roleDialog);
+    await assertNoSeriousAxeViolations(page, 'nested role dialog');
     await page.keyboard.press('Escape');
     await roleDialog.waitFor({ state: 'detached' });
 
@@ -496,6 +631,7 @@ async function runBrowserUiTest() {
     await invitationForm.getByRole('button', { name: 'Invite' }).click();
     const invitationDialog = await assertAccessibleDialog(page, 'Invitation Created');
     await assertNestedDialogIsolation(page, invitationDialog);
+    await assertNoSeriousAxeViolations(page, 'nested invitation dialog');
     await page.keyboard.press('Escape');
     await invitationDialog.waitFor({ state: 'detached' });
     if (!await accountDialog.isVisible()) throw new Error('Invitation Escape closed the parent account dialog');
@@ -508,6 +644,7 @@ async function runBrowserUiTest() {
     await page.getByRole('button', { name: /Knowledge Base/ }).click();
     await page.getByRole('button', { name: 'New KB' }).click();
     const createKbDialog = await assertAccessibleDialog(page, 'Create New Knowledge Base');
+    await assertNoSeriousAxeViolations(page, 'knowledge-base dialog');
     await createKbDialog.getByLabel('KB Name').fill('Browser Accessibility KB');
     await createKbDialog.getByRole('button', { name: 'Create KB' }).click();
     await createKbDialog.waitFor({ state: 'detached' });
@@ -548,6 +685,7 @@ async function runBrowserUiTest() {
     // Create a second board card so the initial roving tab stop and the DnD
     // keyboard lift/reorder/drop/cancel lifecycle can be observed end-to-end.
     await page.getByRole('button', { name: /Kanban Board/ }).click();
+    await assertNoSeriousAxeViolations(page, 'kanban board');
     await page.locator('button[title="Add card to column"]').first().click();
     const secondCardDialog = await assertAccessibleDialog(page, 'Create card');
     const secondCardForm = secondCardDialog.locator('form');
@@ -600,6 +738,7 @@ async function runBrowserUiTest() {
     await shortcutTrigger.focus();
     await shortcutTrigger.click();
     const shortcutDialog = await assertAccessibleDialog(page, 'Keyboard Shortcuts');
+    await assertNoSeriousAxeViolations(page, 'keyboard shortcuts dialog');
     for (let index = 0; index < 12; index += 1) await page.keyboard.press('Tab');
     if (!await shortcutDialog.evaluate((element: HTMLElement) => element.contains(document.activeElement))) {
       throw new Error('Keyboard focus escaped the shortcuts dialog');
@@ -654,34 +793,7 @@ async function runBrowserUiTest() {
     }
     await mobileCardDialog.getByTitle('Close Task').click();
     await mobileCardDialog.waitFor({ state: 'detached' });
-
-    const modeContrast = await page.evaluate(() => {
-      const root = document.documentElement;
-      const originalClassName = root.className;
-      const ratios = ['dark', 'light'].map((mode) => {
-        root.classList.remove('dark', 'light');
-        root.classList.add(mode);
-        const probe = document.createElement('div');
-        probe.className = 'bg-muster-base muster-text-primary';
-        document.body.appendChild(probe);
-        const style = getComputedStyle(probe);
-        const foregroundChannels = (style.color.match(/[\d.]+/g) || []).slice(0, 3).map(Number)
-          .map((channel) => channel / 255)
-          .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
-        const backgroundChannels = (style.backgroundColor.match(/[\d.]+/g) || []).slice(0, 3).map(Number)
-          .map((channel) => channel / 255)
-          .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
-        const foreground = 0.2126 * foregroundChannels[0] + 0.7152 * foregroundChannels[1] + 0.0722 * foregroundChannels[2];
-        const background = 0.2126 * backgroundChannels[0] + 0.7152 * backgroundChannels[1] + 0.0722 * backgroundChannels[2];
-        probe.remove();
-        return { mode, ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) };
-      });
-      root.className = originalClassName;
-      return ratios;
-    });
-    if (modeContrast.some(({ ratio }: { ratio: number }) => ratio < 4.5)) {
-      throw new Error(`Primary text contrast failed: ${JSON.stringify(modeContrast)}`);
-    }
+    await assertNoSeriousAxeViolations(page, 'mobile navigation and board');
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const transitionSeconds = await page.locator('.muster-btn').first().evaluate((element: HTMLElement) => {
@@ -689,7 +801,7 @@ async function runBrowserUiTest() {
       return duration.endsWith('ms') ? Number.parseFloat(duration) / 1000 : Number.parseFloat(duration);
     });
     if (transitionSeconds > 0.001) throw new Error(`Reduced-motion transition remains ${transitionSeconds}s`);
-    console.log('  ✓ Dialog lifecycle, keyboard containment, semantic controls, two-width 44px targets, light/dark contrast and reduced motion verified.');
+    console.log('  ✓ Dialog lifecycle, keyboard containment, semantic controls, two-width 44px targets, axe scans, rendered appearance contrast and reduced motion verified.');
 
     console.log('\n===========================================================');
     console.log('   🎉 ALL BROWSER E2E USER TESTS PASSED 100%!');

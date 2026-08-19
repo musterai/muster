@@ -190,7 +190,7 @@ export const CardItem: React.FC<CardItemProps> = ({
             </div>
           )}
 
-          <div className="flex items-center justify-between pt-2 border-t border-muster-border/50 text-[10px] font-sans text-neutral-500 gap-1">
+          <div className="flex items-center justify-between pt-2 border-t border-muster-border/50 text-[10px] font-sans muster-text-muted gap-1">
             <span>Updated {new Date(card.updated_at).toLocaleDateString()}</span>
             <select
               value={column.id}

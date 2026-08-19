@@ -196,6 +196,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <Layout className="w-3 h-3 text-neutral-400 shrink-0" aria-hidden="true" />
                   <select
                     value={cardDetails.column_id}
+                    aria-label="Card column"
                     onChange={async (e) => {
                       const targetColId = e.target.value;
                       if (targetColId && targetColId !== cardDetails.column_id) {
@@ -407,6 +408,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <div className="flex space-x-1.5">
                     <select
                       value={assignAgentId}
+                      aria-label="Assignee"
                       onChange={(e) => setAssignAgentId(e.target.value)}
                       className="muster-input text-xs py-1 flex-1"
                     >
@@ -512,6 +514,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <div className="flex space-x-1.5">
                     <select
                       value={linkDocumentId}
+                      aria-label="Document to link"
                       onChange={(e) => setLinkDocumentId(e.target.value)}
                       className="muster-input text-xs py-1 flex-1"
                     >
