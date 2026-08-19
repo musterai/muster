@@ -66,19 +66,15 @@ describe('kanban card arrangement', () => {
     const done = getLaneCards(
       [...doneCards, archived, anotherLane],
       'column-1',
-      'Done',
       'newest',
       DONE_LANE_PAGE_SIZE,
-      undefined,
       'terminal',
     );
     const inProgress = getLaneCards(
       doneCards,
       'column-1',
-      'In Progress',
       'newest',
       DONE_LANE_PAGE_SIZE,
-      undefined,
       'active',
     );
 
@@ -102,10 +98,8 @@ describe('kanban card arrangement', () => {
     const result = getLaneCards(
       cards,
       'column-1',
-      'Done',
       'oldest',
       DONE_LANE_PAGE_SIZE * 2,
-      undefined,
       'terminal',
     );
 

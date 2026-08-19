@@ -30,24 +30,24 @@ export const sortCardsByUpdatedAt = (
 export const getLaneCards = (
   cards: Card[],
   columnId: string,
-  columnName: string,
   order: CardDateSortOrder,
   doneVisibleLimit = DONE_LANE_PAGE_SIZE,
-  columnMap?: Record<string, string>,
   workflowRole?: string | null,
   columnRoleMap?: Record<string, string | null | undefined>,
 ): { all: Card[]; visible: Card[]; hiddenCount: number } => {
   const isAllView = columnId.startsWith('all-col-');
-  const targetName = columnName.trim().toLowerCase();
   const all = sortCardsByUpdatedAt(
     cards.filter((card) => {
       if (card.archived) return false;
-      if (isAllView && columnMap) {
-        if (columnRoleMap && workflowRole !== undefined) {
+      if (isAllView) {
+        if (columnRoleMap && workflowRole) {
           return (columnRoleMap[card.column_id] ?? null) === workflowRole;
         }
-        const cardColName = (columnMap[card.column_id] || '').trim().toLowerCase();
-        return cardColName === targetName;
+        const unclassifiedPrefix = 'all-col-unclassified-';
+        const sourceColumnId = columnId.startsWith(unclassifiedPrefix)
+          ? columnId.slice(unclassifiedPrefix.length)
+          : null;
+        return sourceColumnId !== null && card.column_id === sourceColumnId;
       }
       return card.column_id === columnId;
     }),

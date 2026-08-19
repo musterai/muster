@@ -3,7 +3,6 @@ import { computeReorderedPosition } from './kanban.js';
 
 export interface DisplayColumnModel {
   displayColumns: Column[];
-  columnMap: Record<string, string>;
   columnRoleMap: Record<string, ColumnWorkflowRole | null | undefined>;
 }
 
@@ -13,15 +12,17 @@ export function buildDisplayColumns(
   selectedBoardId: string | null,
   board: Board | null,
 ): DisplayColumnModel {
-  const columnMap = Object.fromEntries(columns.map((column) => [column.id, column.name]));
   const columnRoleMap = Object.fromEntries(columns.map((column) => [column.id, column.workflow_role]));
-  if (selectedBoardId !== 'all' && board?.id !== 'all') return { displayColumns: columns, columnMap, columnRoleMap };
+  if (selectedBoardId !== 'all' && board?.id !== 'all') return { displayColumns: columns, columnRoleMap };
 
   const uniqueMap = new Map<string, Column>();
   for (const column of columns) {
-    const nameKey = column.name.trim().toLowerCase();
-    const roleKey = column.workflow_role === undefined ? null : (column.workflow_role ?? 'unclassified');
-    const displayKey = roleKey === null ? nameKey : `${nameKey}::${roleKey}`;
+    // Aggregate configured lanes by their persisted semantics, never by
+    // presentation text. An unclassified legacy lane remains isolated by its
+    // immutable ID until an operator assigns a role.
+    const displayKey = column.workflow_role
+      ? `role-${column.workflow_role}`
+      : `unclassified-${column.id}`;
     if (!uniqueMap.has(displayKey)) {
       uniqueMap.set(displayKey, {
         ...column,
@@ -30,7 +31,7 @@ export function buildDisplayColumns(
       });
     }
   }
-  return { displayColumns: [...uniqueMap.values()], columnMap, columnRoleMap };
+  return { displayColumns: [...uniqueMap.values()], columnRoleMap };
 }
 
 /** Resolve an aggregate-board lane back to the card's concrete board. */
@@ -47,23 +48,40 @@ export function resolveTargetColumnId(
   const targetCard = cards.find((card) => card.id === cardId);
   if (!targetColumn || !targetCard) return targetColumnId;
 
-  const targetName = targetColumn.name.trim().toLowerCase();
   const targetRole = targetColumn.workflow_role;
-  const roleMatches = targetRole !== undefined
-    ? columns.filter((column) => column.workflow_role === targetRole)
-    : [];
-  return roleMatches.find((column) => column.board_id === targetCard.board_id)?.id
-    ?? roleMatches[0]?.id
-    ?? columns.find((column) =>
-      column.board_id === targetCard.board_id && column.name.trim().toLowerCase() === targetName
-    )?.id
-    ?? columns.find((column) => column.name.trim().toLowerCase() === targetName)?.id
-    ?? targetColumnId;
+  if (targetRole) {
+    return columns
+      .filter((column) => column.board_id === targetCard.board_id && column.workflow_role === targetRole)
+      .sort((left, right) => left.position.localeCompare(right.position) || left.id.localeCompare(right.id))[0]?.id
+      ?? targetColumnId;
+  }
+
+  const unclassifiedPrefix = 'all-col-unclassified-';
+  const sourceColumnId = targetColumnId.startsWith(unclassifiedPrefix)
+    ? targetColumnId.slice(unclassifiedPrefix.length)
+    : null;
+  return columns.find((column) =>
+    column.id === sourceColumnId && column.board_id === targetCard.board_id && !column.workflow_role
+  )?.id ?? targetColumnId;
 }
 
 export interface CardDropResolution {
   targetColumnId: string;
   position: string;
+}
+
+export function cardMatchesDisplayColumn(
+  card: Card,
+  displayColumn: Column,
+  columnRoleMap: Record<string, ColumnWorkflowRole | null | undefined>,
+): boolean {
+  if (!displayColumn.id.startsWith('all-col-')) return card.column_id === displayColumn.id;
+  if (displayColumn.workflow_role) {
+    return (columnRoleMap[card.column_id] ?? null) === displayColumn.workflow_role;
+  }
+  const unclassifiedPrefix = 'all-col-unclassified-';
+  return displayColumn.id.startsWith(unclassifiedPrefix)
+    && card.column_id === displayColumn.id.slice(unclassifiedPrefix.length);
 }
 
 /** Resolve a rendered card drop into the concrete lane and LexoRank hint. */
@@ -76,7 +94,6 @@ export function resolveCardDrop({
   cards,
   columns,
   displayColumns,
-  columnMap,
   columnRoleMap,
 }: {
   draggableId: string;
@@ -87,7 +104,6 @@ export function resolveCardDrop({
   cards: Card[];
   columns: Column[];
   displayColumns: Column[];
-  columnMap: Record<string, string>;
   columnRoleMap?: Record<string, ColumnWorkflowRole | null | undefined>;
 }): CardDropResolution {
   const targetDisplayColumnId = destinationDroppableId.split(':::')[0];
@@ -96,11 +112,7 @@ export function resolveCardDrop({
     if (targetDisplayColumnId.startsWith('all-col-')) {
       const targetColumn = displayColumns.find((column) => column.id === targetDisplayColumnId);
       if (!targetColumn) return false;
-      if (columnRoleMap && targetColumn.workflow_role !== undefined) {
-        return (columnRoleMap[card.column_id] ?? null) === targetColumn.workflow_role;
-      }
-      return (columnMap[card.column_id] || '').trim().toLowerCase()
-        === targetColumn.name.trim().toLowerCase();
+      return cardMatchesDisplayColumn(card, targetColumn, columnRoleMap ?? {});
     }
     return card.column_id === targetDisplayColumnId;
   });

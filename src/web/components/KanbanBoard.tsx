@@ -16,7 +16,7 @@ import { CardDetailDrawer } from './kanban/CardDetailDrawer.js';
 import { BoardSettingsDialog } from './kanban/BoardSettingsDialog.js';
 import { KanbanToolbar } from './kanban/KanbanToolbar.js';
 import { MobileLaneSwitcher } from './kanban/MobileLaneSwitcher.js';
-import { buildDisplayColumns, resolveCardDrop, resolveTargetColumnId } from '../kanban-view.js';
+import { buildDisplayColumns, cardMatchesDisplayColumn, resolveCardDrop, resolveTargetColumnId } from '../kanban-view.js';
 import { useKanbanChromeController } from '../hooks/useKanbanChromeController.js';
 
 interface KanbanBoardProps {
@@ -112,7 +112,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   } = chrome.state;
   const setFocusedColumnIdx = chrome.actions.setFocusedColumnIndex;
 
-  const { displayColumns, columnMap, columnRoleMap } = React.useMemo(
+  const { displayColumns, columnRoleMap } = React.useMemo(
     () => buildDisplayColumns(columns, selectedBoardId, board),
     [columns, selectedBoardId, board],
   );
@@ -123,7 +123,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   useEffect(() => {
     const visibleCards = displayColumns.flatMap((column, columnIndex) => {
       const doneLimit = doneVisibleLimits[column.id] ?? DONE_LANE_PAGE_SIZE;
-      return getLaneCards(cards, column.id, column.name, cardDateSortOrder, doneLimit, columnMap, column.workflow_role, columnRoleMap).visible.map((card) => ({
+      return getLaneCards(cards, column.id, cardDateSortOrder, doneLimit, column.workflow_role, columnRoleMap).visible.map((card) => ({
         card,
         columnIndex,
       }));
@@ -142,7 +142,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
     setFocusedCardId(visibleCards[0].card.id);
     setFocusedColumnIdx(visibleCards[0].columnIndex);
-  }, [displayColumns, cards, cardDateSortOrder, doneVisibleLimits, columnMap, columnRoleMap, focusedCardId, focusedColumnIdx]);
+  }, [displayColumns, cards, cardDateSortOrder, doneVisibleLimits, columnRoleMap, focusedCardId, focusedColumnIdx]);
 
   const handleMoveCardWithResolution = async (cardId: string, targetColId: string, position?: string) => {
     const resolvedTargetColId = resolveTargetColumnId(targetColId, cardId, displayColumns, columns, cards, columnRoleMap);
@@ -211,7 +211,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       const colCardsMap: Record<string, Card[]> = {};
       displayColumns.forEach((col) => {
         const doneLimit = doneVisibleLimits[col.id] ?? DONE_LANE_PAGE_SIZE;
-        colCardsMap[col.id] = getLaneCards(cards, col.id, col.name, cardDateSortOrder, doneLimit, columnMap, col.workflow_role, columnRoleMap).visible;
+        colCardsMap[col.id] = getLaneCards(cards, col.id, cardDateSortOrder, doneLimit, col.workflow_role, columnRoleMap).visible;
       });
 
       // Determine current active column and card index
@@ -660,7 +660,6 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       cards,
       columns,
       displayColumns,
-      columnMap,
       columnRoleMap,
     });
     handleMoveCardWithResolution(draggableId, resolution.targetColumnId, resolution.position);
@@ -700,10 +699,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                   const { all: colCards, visible: visibleCards } = getLaneCards(
                     cards,
                     column.id,
-                    column.name,
                     cardDateSortOrder,
                     doneLimit,
-                    columnMap,
                     column.workflow_role,
                     columnRoleMap,
                   );
@@ -830,14 +827,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           <div className="p-3 flex space-x-4 overflow-x-auto">
                             {displayColumns.map((column, colIdx) => {
                               const laneCards = children.filter((c) => {
-                                if (column.id.startsWith('all-col-')) {
-                                  if (column.workflow_role !== undefined) {
-                                    return (columnRoleMap[c.column_id] ?? null) === column.workflow_role;
-                                  }
-                                  const cColName = (columnMap[c.column_id] || '').trim().toLowerCase();
-                                  return cColName === column.name.trim().toLowerCase();
-                                }
-                                return c.column_id === column.id;
+                                return cardMatchesDisplayColumn(c, column, columnRoleMap);
                               });
                               return (
                                 <KanbanColumn
@@ -893,14 +883,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       <div className="p-3 flex space-x-4 overflow-x-auto">
                         {displayColumns.map((column, colIdx) => {
                           const laneCards = unparentedCards.filter((c) => {
-                            if (column.id.startsWith('all-col-')) {
-                              if (column.workflow_role !== undefined) {
-                                return (columnRoleMap[c.column_id] ?? null) === column.workflow_role;
-                              }
-                              const cColName = (columnMap[c.column_id] || '').trim().toLowerCase();
-                              return cColName === column.name.trim().toLowerCase();
-                            }
-                            return c.column_id === column.id;
+                            return cardMatchesDisplayColumn(c, column, columnRoleMap);
                           });
                           return (
                             <KanbanColumn
