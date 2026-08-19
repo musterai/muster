@@ -1,18 +1,10 @@
 // File: src/web/App.tsx
-import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import React, { lazy, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Project, Board, Column, Card, Agent, User, AuthMe, Document, Event, ProjectSummary } from './types.js';
 import { api, ApiError, getLocalProxyToken } from './api.js';
 import { Header } from './components/Header.js';
-import { AgentGrid } from './components/AgentGrid.js';
-import { KanbanBoard } from './components/KanbanBoard.js';
-import { DocumentVault } from './components/DocumentVault.js';
-import { TacticalTerminal } from './components/TacticalTerminal.js';
-import { KnowledgeBaseView } from './components/KnowledgeBase.js';
-import { TokensView } from './components/TokensView.js';
-import { WorkspaceAdmin } from './components/WorkspaceAdmin.js';
 import { MobileBottomNav } from './components/MobileBottomNav.js';
-import { UserAccountModal } from './components/UserAccountModal.js';
-import { ShortcutsHelpModal } from './components/ShortcutsHelpModal.js';
+import { LazyBoundary, LazyViewRegion } from './components/LazyBoundary.js';
 import { ThemeProvider } from './ThemeContext.js';
 import {
   shouldAlertOnCompletion,
@@ -20,14 +12,24 @@ import {
   fireBrowserNotification,
   requestNotificationPermission,
 } from './notifications.js';
-import {
-  NewProjectModal,
-  EditProjectModal,
-  NewBoardModal,
-  NewColumnModal,
-  NewAgentModal,
-  NewDocModal,
-} from './components/Modals.js';
+
+const AgentGrid = lazy(() => import('./components/AgentGrid.js').then((module) => ({ default: module.AgentGrid })));
+const KanbanBoard = lazy(() => import('./components/KanbanBoard.js').then((module) => ({ default: module.KanbanBoard })));
+const DocumentVault = lazy(() => import('./components/DocumentVault.js').then((module) => ({ default: module.DocumentVault })));
+const TacticalTerminal = lazy(() => import('./components/TacticalTerminal.js').then((module) => ({ default: module.TacticalTerminal })));
+const KnowledgeBaseView = lazy(() => import('./components/KnowledgeBase.js').then((module) => ({ default: module.KnowledgeBaseView })));
+const TokensView = lazy(() => import('./components/TokensView.js').then((module) => ({ default: module.TokensView })));
+const WorkspaceAdmin = lazy(() => import('./components/WorkspaceAdmin.js').then((module) => ({ default: module.WorkspaceAdmin })));
+const UserAccountModal = lazy(() => import('./components/UserAccountModal.js').then((module) => ({ default: module.UserAccountModal })));
+const ShortcutsHelpModal = lazy(() => import('./components/ShortcutsHelpModal.js').then((module) => ({ default: module.ShortcutsHelpModal })));
+
+const loadModals = () => import('./components/Modals.js');
+const NewProjectModal = lazy(() => loadModals().then((module) => ({ default: module.NewProjectModal })));
+const EditProjectModal = lazy(() => loadModals().then((module) => ({ default: module.EditProjectModal })));
+const NewBoardModal = lazy(() => loadModals().then((module) => ({ default: module.NewBoardModal })));
+const NewColumnModal = lazy(() => loadModals().then((module) => ({ default: module.NewColumnModal })));
+const NewAgentModal = lazy(() => loadModals().then((module) => ({ default: module.NewAgentModal })));
+const NewDocModal = lazy(() => loadModals().then((module) => ({ default: module.NewDocModal })));
 
 type TabType = 'board' | 'agents' | 'docs' | 'activity' | 'kb' | 'tokens' | 'admin';
 
@@ -94,6 +96,7 @@ export const App: React.FC = () => {
   const [selectedDocId, setSelectedDocId] = useState<string | null>(initialNav.docId);
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(initialNav.entityId);
   const [summary, setSummary] = useState<ProjectSummary | null>(null);
+  const [viewFocusVersion, setViewFocusVersion] = useState(initialNav.tab === 'board' ? 0 : 1);
 
   const [boards, setBoards] = useState<Board[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState<string | null>(null);
@@ -274,6 +277,9 @@ export const App: React.FC = () => {
   };
 
   const handleSelectTab = (tab: TabType) => {
+    if (tab !== activeTab) {
+      setViewFocusVersion((version) => version + 1);
+    }
     setActiveTab(tab);
     const project = projects.find((candidate) => candidate.id === selectedProjectId);
     if (project) {
@@ -330,6 +336,7 @@ export const App: React.FC = () => {
         rememberSelectedBoard(boards.find((candidate) => candidate.slug === boardSlug)?.id ?? null);
       }
       setActiveTab(tab);
+      setViewFocusVersion((version) => version + 1);
       setSelectedDocId(docId);
       setSelectedEntityId(entityId);
 
@@ -601,95 +608,125 @@ export const App: React.FC = () => {
       <main className="flex-1 flex flex-col min-h-0 w-full px-4 sm:px-6 lg:px-8 pt-4 pb-16 md:pb-4 overflow-hidden">
 
         {activeTab === 'agents' && (
-          <AgentGrid
-            agents={agents}
-            users={users}
-            cards={cards}
-            workspaceId={workspaceId}
-            onHeartbeat={handleAgentHeartbeat}
-            onUnregisterAgent={handleUnregisterAgent}
-            onOpenRegisterAgent={() => setShowRegisterAgentModal(true)}
-            onRefresh={loadProjectData}
-          />
+          <LazyBoundary label="Agents" resetKey="agents">
+            <LazyViewRegion label="Agents" focusVersion={viewFocusVersion}>
+              <AgentGrid
+                agents={agents}
+                users={users}
+                cards={cards}
+                workspaceId={workspaceId}
+                onHeartbeat={handleAgentHeartbeat}
+                onUnregisterAgent={handleUnregisterAgent}
+                onOpenRegisterAgent={() => setShowRegisterAgentModal(true)}
+                onRefresh={loadProjectData}
+              />
+            </LazyViewRegion>
+          </LazyBoundary>
         )}
 
 
         {activeTab === 'board' && (
-          <KanbanBoard
-            boards={boards}
-            board={board}
-            selectedBoardId={selectedBoardId}
-            onSelectBoard={handleSelectBoard}
-            columns={columns}
-            cards={cards}
-            agents={agents}
-            users={users}
-            currentUser={currentUser}
-            documents={documents}
-            projectId={selectedProjectId}
-            newCardRequest={newCardRequest}
-            openCardRequest={openCardRequest}
-            onMoveCard={handleMoveCard}
-            onMoveColumn={handleMoveColumn}
-            onNewCardRequestHandled={() => setNewCardRequest(null)}
-            onOpenCardRequestHandled={() => setOpenCardRequest(null)}
-            onOpenNewColumn={() => setShowNewColumnModal(true)}
-            onOpenNewBoard={() => setShowNewBoardModal(true)}
-            onDeleteBoard={handleDeleteBoard}
-            onOpenDocumentInVault={(docId) => {
-              setActiveTab('docs');
-              handleSelectDoc(docId);
-            }}
-            onRefresh={loadProjectData}
-          />
+          <LazyBoundary label="Kanban Board" resetKey="board">
+            <LazyViewRegion label="Kanban Board" focusVersion={viewFocusVersion}>
+              <KanbanBoard
+                boards={boards}
+                board={board}
+                selectedBoardId={selectedBoardId}
+                onSelectBoard={handleSelectBoard}
+                columns={columns}
+                cards={cards}
+                agents={agents}
+                users={users}
+                currentUser={currentUser}
+                documents={documents}
+                projectId={selectedProjectId}
+                newCardRequest={newCardRequest}
+                openCardRequest={openCardRequest}
+                onMoveCard={handleMoveCard}
+                onMoveColumn={handleMoveColumn}
+                onNewCardRequestHandled={() => setNewCardRequest(null)}
+                onOpenCardRequestHandled={() => setOpenCardRequest(null)}
+                onOpenNewColumn={() => setShowNewColumnModal(true)}
+                onOpenNewBoard={() => setShowNewBoardModal(true)}
+                onDeleteBoard={handleDeleteBoard}
+                onOpenDocumentInVault={(docId) => {
+                  setViewFocusVersion((version) => version + 1);
+                  setActiveTab('docs');
+                  handleSelectDoc(docId);
+                }}
+                onRefresh={loadProjectData}
+              />
+            </LazyViewRegion>
+          </LazyBoundary>
         )}
 
 
         {activeTab === 'docs' && (
-          <DocumentVault
-            documents={documents}
-            selectedDocId={selectedDocId}
-            onSelectDoc={handleSelectDoc}
-            onOpenNewDoc={() => setShowNewDocModal(true)}
-            onRefresh={loadProjectData}
-          />
+          <LazyBoundary label="Design Documents" resetKey={`docs:${selectedDocId ?? ''}`}>
+            <LazyViewRegion label="Design Documents" focusVersion={viewFocusVersion}>
+              <DocumentVault
+                documents={documents}
+                selectedDocId={selectedDocId}
+                onSelectDoc={handleSelectDoc}
+                onOpenNewDoc={() => setShowNewDocModal(true)}
+                onRefresh={loadProjectData}
+              />
+            </LazyViewRegion>
+          </LazyBoundary>
         )}
 
         {activeTab === 'kb' && (
-          <KnowledgeBaseView
-            currentProject={projects.find((p) => p.id === selectedProjectId) || null}
-            initialEntityId={selectedEntityId}
-            onSelectEntity={(entityId) => {
-              setSelectedEntityId(entityId);
-              if (selectedProjectId) {
-                updateLocation(selectedProjectId, 'kb', null, entityId);
-              }
-            }}
-          />
+          <LazyBoundary label="Knowledge Base" resetKey={`kb:${selectedEntityId ?? ''}`}>
+            <LazyViewRegion label="Knowledge Base" focusVersion={viewFocusVersion}>
+              <KnowledgeBaseView
+                currentProject={projects.find((p) => p.id === selectedProjectId) || null}
+                initialEntityId={selectedEntityId}
+                onSelectEntity={(entityId) => {
+                  setSelectedEntityId(entityId);
+                  const project = projects.find((candidate) => candidate.id === selectedProjectId);
+                  if (project) {
+                    updateLocation(project.slug, 'kb', null, entityId);
+                  }
+                }}
+              />
+            </LazyViewRegion>
+          </LazyBoundary>
         )}
 
 
         {activeTab === 'activity' && (
-          <TacticalTerminal
-            events={events}
-            agents={agents}
-            cards={cards}
-            documents={documents}
-            onRefresh={loadProjectData}
-          />
+          <LazyBoundary label="Activity Log" resetKey="activity">
+            <LazyViewRegion label="Activity Log" focusVersion={viewFocusVersion}>
+              <TacticalTerminal
+                events={events}
+                agents={agents}
+                cards={cards}
+                documents={documents}
+                onRefresh={loadProjectData}
+              />
+            </LazyViewRegion>
+          </LazyBoundary>
         )}
 
         {activeTab === 'tokens' && (
-          <div className="muster-panel p-6 max-w-4xl mx-auto my-8 space-y-4">
-            <h2 className="text-sm font-bold muster-text-primary">API Tokens Management</h2>
-            <TokensView />
-          </div>
+          <LazyBoundary label="API Tokens" resetKey="tokens">
+            <LazyViewRegion label="API Tokens" focusVersion={viewFocusVersion}>
+              <div className="muster-panel p-6 max-w-4xl mx-auto my-8 space-y-4">
+                <h1 className="text-sm font-bold muster-text-primary">API Tokens Management</h1>
+                <TokensView />
+              </div>
+            </LazyViewRegion>
+          </LazyBoundary>
         )}
 
         {activeTab === 'admin' && (
-          workspaceId
-            ? <WorkspaceAdmin workspaceId={workspaceId} currentUser={currentUser} authMode={authMode} />
-            : <div className="text-center py-16 muster-text-muted text-sm">No workspace found yet.</div>
+          <LazyBoundary label="Workspace Admin" resetKey={`admin:${workspaceId ?? ''}`}>
+            <LazyViewRegion label="Workspace Admin" focusVersion={viewFocusVersion}>
+              {workspaceId
+                ? <WorkspaceAdmin workspaceId={workspaceId} currentUser={currentUser} authMode={authMode} />
+                : <div className="text-center py-16 muster-text-muted text-sm">No workspace found yet.</div>}
+            </LazyViewRegion>
+          </LazyBoundary>
         )}
       </main>
 
@@ -699,76 +736,92 @@ export const App: React.FC = () => {
 
       {/* Modals */}
       {showNewProjectModal && (
-        <NewProjectModal
-          onClose={() => setShowNewProjectModal(false)}
-          onSuccess={(newId) => {
-            handleSelectProject(newId);
-            loadProjects(newId);
-          }}
-        />
+        <LazyBoundary label="New Project dialog" resetKey="new-project" variant="dialog">
+          <NewProjectModal
+            onClose={() => setShowNewProjectModal(false)}
+            onSuccess={(newId) => {
+              handleSelectProject(newId);
+              loadProjects(newId);
+            }}
+          />
+        </LazyBoundary>
       )}
 
       {showEditProjectModal && selectedProjectId && projects.some((p) => p.id === selectedProjectId) && (
-        <EditProjectModal
-          project={projects.find((p) => p.id === selectedProjectId)!}
-          onClose={() => setShowEditProjectModal(false)}
-          onSuccess={() => {
-            loadProjects(selectedProjectId);
-            loadProjectData();
-          }}
-          onDeleteProject={handleDeleteProject}
-        />
+        <LazyBoundary label="Edit Project dialog" resetKey={`edit-project:${selectedProjectId}`} variant="dialog">
+          <EditProjectModal
+            project={projects.find((p) => p.id === selectedProjectId)!}
+            onClose={() => setShowEditProjectModal(false)}
+            onSuccess={() => {
+              loadProjects(selectedProjectId);
+              loadProjectData();
+            }}
+            onDeleteProject={handleDeleteProject}
+          />
+        </LazyBoundary>
       )}
 
       {showNewBoardModal && selectedProjectId && (
-        <NewBoardModal
-          projectId={selectedProjectId}
-          onClose={() => setShowNewBoardModal(false)}
-          onSuccess={loadProjectData}
-        />
+        <LazyBoundary label="New Board dialog" resetKey={`new-board:${selectedProjectId}`} variant="dialog">
+          <NewBoardModal
+            projectId={selectedProjectId}
+            onClose={() => setShowNewBoardModal(false)}
+            onSuccess={loadProjectData}
+          />
+        </LazyBoundary>
       )}
 
       {showNewColumnModal && board && (
-        <NewColumnModal
-          boardId={board.id}
-          onClose={() => setShowNewColumnModal(false)}
-          onSuccess={loadProjectData}
-        />
+        <LazyBoundary label="New Column dialog" resetKey={`new-column:${board.id}`} variant="dialog">
+          <NewColumnModal
+            boardId={board.id}
+            onClose={() => setShowNewColumnModal(false)}
+            onSuccess={loadProjectData}
+          />
+        </LazyBoundary>
       )}
 
       {showRegisterAgentModal && (
-        <NewAgentModal
-          onClose={() => setShowRegisterAgentModal(false)}
-          onSuccess={loadProjectData}
-        />
+        <LazyBoundary label="Register Agent dialog" resetKey="register-agent" variant="dialog">
+          <NewAgentModal
+            onClose={() => setShowRegisterAgentModal(false)}
+            onSuccess={loadProjectData}
+          />
+        </LazyBoundary>
       )}
 
       {showNewDocModal && selectedProjectId && (
-        <NewDocModal
-          projectId={selectedProjectId}
-          onClose={() => setShowNewDocModal(false)}
-          onSuccess={(newDoc) => {
-            if (newDoc && newDoc.id) {
-              handleSelectDoc(newDoc.id);
-            }
-            loadProjectData();
-          }}
-        />
+        <LazyBoundary label="New Document dialog" resetKey={`new-document:${selectedProjectId}`} variant="dialog">
+          <NewDocModal
+            projectId={selectedProjectId}
+            onClose={() => setShowNewDocModal(false)}
+            onSuccess={(newDoc) => {
+              if (newDoc && newDoc.id) {
+                handleSelectDoc(newDoc.id);
+              }
+              loadProjectData();
+            }}
+          />
+        </LazyBoundary>
       )}
 
       {showUserAccountModal && (
-        <UserAccountModal
-          currentUser={currentUser}
-          workspaceId={workspaceId}
-          authMode={authMode}
-          onSetLocalIdentity={handleSetLocalIdentity}
-          initialTab={userAccountInitialTab}
-          onClose={() => setShowUserAccountModal(false)}
-        />
+        <LazyBoundary label="User Account dialog" resetKey={`account:${userAccountInitialTab}`} variant="dialog">
+          <UserAccountModal
+            currentUser={currentUser}
+            workspaceId={workspaceId}
+            authMode={authMode}
+            onSetLocalIdentity={handleSetLocalIdentity}
+            initialTab={userAccountInitialTab}
+            onClose={() => setShowUserAccountModal(false)}
+          />
+        </LazyBoundary>
       )}
 
       {showShortcutsHelpModal && (
-        <ShortcutsHelpModal onClose={() => setShowShortcutsHelpModal(false)} />
+        <LazyBoundary label="Keyboard Shortcuts dialog" resetKey="shortcuts" variant="dialog">
+          <ShortcutsHelpModal onClose={() => setShowShortcutsHelpModal(false)} />
+        </LazyBoundary>
       )}
     </div>
     </ThemeProvider>

@@ -1,0 +1,22 @@
+{
+  "initialEntry": {
+    "maxBytes": 266240,
+    "maxGzipBytes": 81920
+  },
+  "initialRoute": {
+    "sources": ["components/KanbanBoard.tsx"],
+    "maxBytes": 614400,
+    "maxGzipBytes": 184320
+  },
+  "defaultChunk": {
+    "maxBytes": 266240,
+    "maxGzipBytes": 81920
+  },
+  "chunkOverrides": {
+    "vendor-graph": {
+      "maxBytes": 819200,
+      "maxGzipBytes": 215040,
+      "reason": "vis-network, vis-data, and their stable graph-only dependencies are loaded only with the Knowledge Base graph surface."
+    }
+  }
+}

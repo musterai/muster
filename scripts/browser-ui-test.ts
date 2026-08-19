@@ -238,6 +238,7 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
     if (await setName.isVisible()) {
       await setName.click();
       const nameInput = page.locator('input[placeholder="Your display name"], input[placeholder="Your name"]');
+      await nameInput.waitFor();
       if (await nameInput.isVisible()) {
         await nameInput.fill('Browser UI Tester');
         const [identityResponse] = await Promise.all([
@@ -305,6 +306,45 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
       throw new Error(`Board URL changed after reload: ${new URL(page.url()).pathname}`);
     }
     console.log('  ✓ Additional board selected and preserved across background refresh.');
+
+    // Lazy-view contract: delay the first Knowledge Base chunk, prove the
+    // polite loading state is visible, navigate by keyboard, focus the
+    // resolved region, and return through browser history without resetting
+    // the selected project/board state held above the boundary.
+    const knowledgeChunkPattern = '**/assets/KnowledgeBase-*.js';
+    await page.route(knowledgeChunkPattern, async (route) => {
+      await sleep(750);
+      await route.continue();
+    });
+    const knowledgeTab = page.getByRole('button', { name: /Knowledge Base/ }).first();
+    await knowledgeTab.focus();
+    await knowledgeTab.press('Enter');
+    await page.getByRole('status').filter({ hasText: 'Loading Knowledge Base' }).waitFor();
+    const knowledgeRegion = page.locator('[data-lazy-view="knowledge-base"]');
+    await knowledgeRegion.waitFor();
+    const focusedLazyView = await page.evaluate(() => document.activeElement?.getAttribute('data-lazy-view'));
+    if (focusedLazyView !== 'knowledge-base') {
+      throw new Error(`Resolved lazy Knowledge Base view did not receive focus: ${focusedLazyView}`);
+    }
+    await page.unroute(knowledgeChunkPattern);
+    await page.goBack({ waitUntil: 'domcontentloaded' });
+    await page.locator('[data-lazy-view="kanban-board"]').waitFor();
+    const restoredBoardName = await boardSelector.locator('option:checked').textContent();
+    if (restoredBoardName !== 'Release Board') {
+      throw new Error(`Lazy back navigation lost selected board state: ${restoredBoardName}`);
+    }
+    console.log('  ✓ Lazy loading, keyboard focus, and back-navigation state verified.');
+
+    // A failed dynamic import must become an actionable, non-secret-bearing
+    // alert instead of a blank view. A separate page keeps this deliberate
+    // failure from poisoning the main page's React.lazy module cache.
+    const failurePage = await context.newPage();
+    await failurePage.route('**/assets/WorkspaceAdmin-*.js', (route) => route.abort('failed'));
+    await failurePage.goto(`${appUrl}/projects/e2e-isolated-test-project/admin`, { waitUntil: 'domcontentloaded' });
+    await failurePage.getByRole('alert').filter({ hasText: 'Workspace Admin could not be loaded' }).waitFor();
+    await failurePage.getByRole('button', { name: 'Reload Workspace Admin', exact: true }).waitFor();
+    await failurePage.close();
+    console.log('  ✓ Failed lazy chunk rendered an accessible recovery action.');
 
     // Step 3: Test Board View & Column Creation
     console.log('\n[3/8] Testing Kanban Board & Column Creation (+ Add Column)...');
@@ -438,6 +478,7 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
     await page.fill('textarea', '# Frontend Specification\n\n- React 19 SPA\n- Lucide Icons\n- Tailwind CSS');
     await page.click('button[type="submit"]:has-text("Create Document")');
     await page.waitForSelector('h2:has-text("Frontend UI Architecture & E2E Verification")');
+    const documentDeepLink = page.url();
     console.log('  ✓ Document created and rendered with Markdown preview.');
 
     // Workflow status progression
@@ -448,6 +489,16 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
     await page.click('button:has-text("Approve")');
     await page.waitForSelector('text=Approved');
     console.log('  ✓ Status transitioned: In Review → Approved');
+
+    // Direct navigation must resolve the same lazy document surface and
+    // selected document, rather than falling back to the board or losing the
+    // deep-link identifier during project hydration.
+    await page.goto(documentDeepLink, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('h2:has-text("Frontend UI Architecture & E2E Verification")');
+    if (!new URL(page.url()).pathname.includes('/docs/')) {
+      throw new Error(`Document deep link was not preserved: ${new URL(page.url()).pathname}`);
+    }
+    console.log('  ✓ Direct document deep navigation restored the selected lazy view.');
 
     // Step 8: Real-Time Activity Log
     console.log('\n[8/8] Testing Activity Log View (Real-Time Feed)...');
