@@ -24,12 +24,23 @@ import {
 } from './components/Modals.js';
 import { readBrowserLocation, updateBrowserLocation, type AppTab as TabType } from './navigation.js';
 import {
-  WorkspaceViewProvider,
-  type WorkspaceViewController,
+  WorkspaceViewProviders,
+  type WorkspaceViewControllers,
+  useWorkspaceViewControllers,
 } from './WorkspaceViewContext.js';
 import { useAppDialogController } from './hooks/useAppDialogController.js';
 
 const parseLocation = readBrowserLocation;
+
+const ACTIVE_VIEW_TITLE: Record<TabType, string> = {
+  board: 'Kanban board',
+  agents: 'Agents',
+  docs: 'Design documents',
+  activity: 'Activity log',
+  kb: 'Knowledge base',
+  tokens: 'API tokens',
+  admin: 'Workspace administration',
+};
 
 function updateLocation(
   projectSlug: string | null,
@@ -75,16 +86,6 @@ export const App: React.FC = () => {
   const [notificationState, setNotificationState] = useState<'granted' | 'denied' | 'default' | 'unsupported'>(() =>
     typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
   );
-  const activeViewTitle: Record<TabType, string> = {
-    board: 'Kanban board',
-    agents: 'Agents',
-    docs: 'Design documents',
-    activity: 'Activity log',
-    kb: 'Knowledge base',
-    tokens: 'API tokens',
-    admin: 'Workspace administration',
-  };
-
   const activeBoardNotDoneCount = useMemo(() => {
     if (!selectedBoardId || !columns.length) return null;
     const terminalColumnIds = new Set(columns.filter((col) => col.is_terminal === 1).map((col) => col.id));
@@ -241,7 +242,7 @@ export const App: React.FC = () => {
   }, [selectedProjectId, loadProjects, rememberSelectedBoard]);
 
   // Sync state when selectedProjectId or activeTab or selectedDocId changes
-  const handleSelectProject = (projectId: string) => {
+  const handleSelectProject = useCallback((projectId: string) => {
     setBoards([]);
     rememberSelectedBoard(null);
     setBoard(null);
@@ -251,9 +252,9 @@ export const App: React.FC = () => {
     selectedBoardSlugRef.current = null;
     const project = projects.find((candidate) => candidate.id === projectId);
     updateLocation(project?.slug ?? null, activeTab, selectedDocId, selectedEntityId, null);
-  };
+  }, [activeTab, projects, rememberSelectedBoard, selectedDocId, selectedEntityId]);
 
-  const handleSelectTab = (tab: TabType) => {
+  const handleSelectTab = useCallback((tab: TabType) => {
     setActiveTab(tab);
     const project = projects.find((candidate) => candidate.id === selectedProjectId);
     if (project) {
@@ -262,9 +263,9 @@ export const App: React.FC = () => {
         : null;
       updateLocation(project.slug, tab, selectedDocId, selectedEntityId, boardSlug);
     }
-  };
+  }, [boards, projects, selectedDocId, selectedEntityId, selectedProjectId]);
 
-  const handleSelectBoard = async (boardId: string) => {
+  const handleSelectBoard = useCallback(async (boardId: string) => {
     if (boardId === selectedBoardIdRef.current) return;
 
     rememberSelectedBoard(boardId);
@@ -287,15 +288,15 @@ export const App: React.FC = () => {
       console.error('Failed to select board:', err);
       loadProjectData();
     }
-  };
+  }, [boards, loadProjectData, projects, rememberSelectedBoard, selectedProjectId]);
 
-  const handleSelectDoc = (docId: string) => {
+  const handleSelectDoc = useCallback((docId: string) => {
     setSelectedDocId(docId);
     const project = projects.find((candidate) => candidate.id === selectedProjectId);
     if (project) {
       updateLocation(project.slug, 'docs', docId, null);
     }
-  };
+  }, [projects, selectedProjectId]);
 
   // Handle Browser Back / Forward buttons (popstate)
   useEffect(() => {
@@ -439,7 +440,7 @@ export const App: React.FC = () => {
     setNotificationState(permission);
   }, []);
 
-  const handleMoveCard = async (cardId: string, targetColumnId: string, position?: string) => {
+  const handleMoveCard = useCallback(async (cardId: string, targetColumnId: string, position?: string) => {
     setBoardActionError(null);
     try {
       await api.moveCard(cardId, targetColumnId, position);
@@ -449,41 +450,41 @@ export const App: React.FC = () => {
       setBoardActionError(`Card move refused: ${message}`);
       console.error('Failed to move card:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleMoveColumn = async (columnId: string, position: string) => {
+  const handleMoveColumn = useCallback(async (columnId: string, position: string) => {
     try {
       await api.moveColumn(columnId, position);
       loadProjectData();
     } catch (err) {
       console.error('Failed to move column:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleAgentHeartbeat = async (agentId: string) => {
+  const handleAgentHeartbeat = useCallback(async (agentId: string) => {
     try {
       await api.agentHeartbeat(agentId);
       loadProjectData();
     } catch (err) {
       console.error('Failed to send heartbeat:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleUnregisterAgent = async (agentId: string) => {
+  const handleUnregisterAgent = useCallback(async (agentId: string) => {
     try {
       await api.unregisterAgent(agentId);
       loadProjectData();
     } catch (err) {
       console.error('Failed to unregister agent:', err);
     }
-  };
+  }, [loadProjectData]);
 
-  const handleOpenNewCardModal = (colId?: string) => {
+  const handleOpenNewCardModal = useCallback((colId?: string) => {
     requestNewCard(colId);
     if (activeTab !== 'board') {
       handleSelectTab('board');
     }
-  };
+  }, [activeTab, handleSelectTab, requestNewCard]);
 
   const handleDeleteProject = async (projectId: string) => {
     try {
@@ -497,7 +498,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleDeleteBoard = async (boardId: string) => {
+  const handleDeleteBoard = useCallback(async (boardId: string) => {
     try {
       await api.deleteBoard(boardId);
       if (selectedBoardIdRef.current === boardId) {
@@ -507,60 +508,58 @@ export const App: React.FC = () => {
     } catch (err) {
       console.error('Failed to delete board:', err);
     }
-  };
+  }, [loadProjectData, rememberSelectedBoard]);
 
-  const workspaceController: WorkspaceViewController = {
-    navigation: {
-      activeTab,
-      activeViewTitle: activeViewTitle[activeTab],
-      selectedProjectId,
-      selectedBoardId,
-      selectedDocId,
-      selectedEntityId,
-    },
-    data: {
-      projects,
-      boards,
-      board,
-      columns,
-      cards,
-      agents,
-      users,
-      currentUser,
-      authMode,
-      documents,
-      events,
-      workspaceId,
-    },
-    requests: {
-      newCard: newCardRequest,
-      openCard: openCardRequest,
-    },
-    actions: {
-      agentHeartbeat: handleAgentHeartbeat,
-      unregisterAgent: handleUnregisterAgent,
-      requestRegisterAgent: () => setShowRegisterAgentModal(true),
-      refresh: loadProjectData,
-      selectBoard: handleSelectBoard,
-      moveCard: handleMoveCard,
-      moveColumn: handleMoveColumn,
-      newCardRequestHandled: () => setNewCardRequest(null),
-      openCardRequestHandled: () => setOpenCardRequest(null),
-      requestNewColumn: () => setShowNewColumnModal(true),
-      requestNewBoard: () => setShowNewBoardModal(true),
-      deleteBoard: handleDeleteBoard,
-      openDocumentInVault: (docId) => {
-        setActiveTab('docs');
-        handleSelectDoc(docId);
-      },
-      selectDoc: handleSelectDoc,
-      requestNewDoc: () => setShowNewDocModal(true),
-      selectEntity: (entityId) => {
-        setSelectedEntityId(entityId);
-        if (selectedProjectId) updateLocation(selectedProjectId, 'kb', null, entityId);
+  const requestRegisterAgent = useCallback(() => setShowRegisterAgentModal(true), []);
+  const handleNewCardRequestHandled = useCallback(() => setNewCardRequest(null), []);
+  const handleOpenCardRequestHandled = useCallback(() => setOpenCardRequest(null), []);
+  const requestNewColumn = useCallback(() => setShowNewColumnModal(true), []);
+  const requestNewBoard = useCallback(() => setShowNewBoardModal(true), []);
+  const requestNewDocument = useCallback(() => setShowNewDocModal(true), []);
+  const handleOpenDocumentInVault = useCallback((docId: string) => {
+    setActiveTab('docs');
+    handleSelectDoc(docId);
+  }, [handleSelectDoc]);
+  const handleSelectEntity = useCallback((entityId: string | null) => {
+    setSelectedEntityId(entityId);
+    if (selectedProjectId) updateLocation(selectedProjectId, 'kb', null, entityId);
+  }, [selectedProjectId]);
+
+  const currentProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
+  );
+  const workspaceControllers = useWorkspaceViewControllers({
+    navigation: { activeTab, activeViewTitle: ACTIVE_VIEW_TITLE[activeTab] },
+    board: {
+      data: { boards, board, selectedBoardId, columns, cards, agents, users, currentUser, documents, projectId: selectedProjectId },
+      requests: { newCard: newCardRequest, openCard: openCardRequest },
+      actions: {
+        selectBoard: handleSelectBoard, moveCard: handleMoveCard, moveColumn: handleMoveColumn,
+        newCardRequestHandled: handleNewCardRequestHandled,
+        openCardRequestHandled: handleOpenCardRequestHandled,
+        requestNewColumn, requestNewBoard, deleteBoard: handleDeleteBoard,
+        openDocumentInVault: handleOpenDocumentInVault, refresh: loadProjectData,
       },
     },
-  };
+    agents: {
+      data: { agents, users, cards, workspaceId },
+      actions: {
+        heartbeat: handleAgentHeartbeat, unregister: handleUnregisterAgent,
+        requestRegister: requestRegisterAgent, refresh: loadProjectData,
+      },
+    },
+    documents: {
+      data: { documents, selectedDocId },
+      actions: { select: handleSelectDoc, requestNew: requestNewDocument, refresh: loadProjectData },
+    },
+    knowledge: {
+      data: { currentProject, selectedEntityId },
+      actions: { selectEntity: handleSelectEntity },
+    },
+    activity: { data: { events, agents, cards, documents }, actions: { refresh: loadProjectData } },
+    admin: { workspaceId, currentUser, authMode },
+  } satisfies WorkspaceViewControllers);
 
   return (
     <ThemeProvider userId={currentUser?.id ?? null}>
@@ -629,9 +628,9 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      <WorkspaceViewProvider controller={workspaceController}>
+      <WorkspaceViewProviders controllers={workspaceControllers}>
         <AppWorkspaceView />
-      </WorkspaceViewProvider>
+      </WorkspaceViewProviders>
       {/* Mobile Bottom Navigation Bar */}
       <MobileBottomNav activeTab={activeTab} onSelectTab={handleSelectTab} />
 

@@ -181,6 +181,9 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   // Keyboard navigation across columns and cards
   useEffect(() => {
     const handleBoardKeyDown = (e: KeyboardEvent) => {
+      // The drag sensor owns its keyboard sequence. Avoid letting board APG
+      // navigation steal focus after a lifted card handles an arrow/drop key.
+      if (e.defaultPrevented) return;
       const activeElement = document.activeElement;
       const isInsideModal = activeElement instanceof HTMLElement
         && Boolean(activeElement.closest('[role="dialog"][aria-modal="true"]'));
