@@ -87,210 +87,367 @@ type AliasMatch =
   | { kind: 'none' }
   | { kind: 'unknown'; reason: string };
 
-interface InitializerLookup {
-  expressions: ts.Expression[];
-  unknown?: string;
+type BuiltinValue = 'require' | 'Reflect' | 'Reflect.construct';
+
+type ResolvedValue =
+  | { kind: 'builtin'; name: BuiltinValue }
+  | { kind: 'symbol'; symbol: ts.Symbol }
+  | { kind: 'expression'; expression: ts.Expression };
+
+interface ResolutionIssue {
+  reason: string;
+  conditional: boolean;
 }
 
-function propertyNameText(name: ts.PropertyName | ts.Expression | undefined): InitializerLookup & { text?: string } {
-  if (!name) return { expressions: [], unknown: 'Property selector is missing' };
+interface ValueResolution {
+  values: ResolvedValue[];
+  issues: ResolutionIssue[];
+}
+
+interface ResolutionState {
+  symbols: Set<ts.Symbol>;
+  members: Set<ts.Node>;
+}
+
+function emptyResolution(): ValueResolution {
+  return { values: [], issues: [] };
+}
+
+function mergeResolutions(resolutions: ValueResolution[]): ValueResolution {
+  return {
+    values: resolutions.flatMap(resolution => resolution.values),
+    issues: resolutions.flatMap(resolution => resolution.issues),
+  };
+}
+
+function propertySelector(name: ts.PropertyName | ts.Expression | undefined): {
+  text?: string;
+  issue?: ResolutionIssue;
+} {
+  if (!name) return { issue: { reason: 'Property selector is missing', conditional: false } };
   if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)) {
-    return { expressions: [], text: name.text };
+    return { text: name.text };
   }
   if (ts.isComputedPropertyName(name)) {
     const text = moduleText(name.expression);
     return text === undefined
-      ? { expressions: [], unknown: `Computed property selector "${name.expression.getText()}" is not literal` }
-      : { expressions: [], text };
+      ? {
+          issue: {
+            reason: `Computed property selector "${name.expression.getText()}" is not literal`,
+            conditional: false,
+          },
+        }
+      : { text };
   }
-  return { expressions: [], unknown: `Cannot classify property selector "${name.getText()}"` };
-}
-
-function mergeLookups(lookups: InitializerLookup[]): InitializerLookup {
-  const unknown = lookups.map(lookup => lookup.unknown).find(Boolean);
   return {
-    expressions: lookups.flatMap(lookup => lookup.expressions),
-    ...(unknown ? { unknown } : {}),
+    issue: {
+      reason: `Cannot classify property selector "${name.getText()}"`,
+      conditional: false,
+    },
   };
 }
 
-function propertyInitializers(
-  expression: ts.Expression,
-  property: string,
-  checker: ts.TypeChecker,
-  seen: Set<ts.Symbol>,
-): InitializerLookup {
-  const current = unwrappedExpression(expression);
-  if (ts.isObjectLiteralExpression(current)) {
-    const matches: ts.Expression[] = [];
-    for (const member of current.properties) {
-      if (ts.isSpreadAssignment(member)) {
-        return {
-          expressions: [],
-          unknown: `Cannot normalize property "${property}" through an object spread`,
-        };
-      }
-      if (!('name' in member) || !member.name) continue;
-      const key = propertyNameText(member.name);
-      if (key.unknown) return { expressions: [], unknown: key.unknown };
-      if (key.text !== property) continue;
-      if (ts.isPropertyAssignment(member)) matches.push(member.initializer);
-      else if (ts.isShorthandPropertyAssignment(member)) matches.push(member.name);
-      else {
-        return {
-          expressions: [],
-          unknown: `Property "${property}" is not a value assignment`,
-        };
-      }
-    }
-    if (matches.length === 1) return { expressions: matches };
-    if (matches.length === 0) return { expressions: [] };
-    return { expressions: [], unknown: `Property "${property}" has multiple assignments` };
-  }
-
-  const symbol = resolvedSymbol(current, checker);
-  if (!symbol) return { expressions: [] };
-  if (seen.has(symbol)) {
-    return {
-      expressions: [],
-      unknown: `Alias cycle reaches "${symbol.getName()}"`,
-    };
-  }
-  const nextSeen = new Set(seen).add(symbol);
-  const lookup = symbolInitializers(symbol, checker, nextSeen);
-  if (lookup.unknown) return lookup;
-  if (lookup.expressions.length === 0) return { expressions: [] };
-  return mergeLookups(lookup.expressions.map(initializer => (
-    propertyInitializers(initializer, property, checker, nextSeen)
-  )));
-}
-
-function bindingElementInitializers(
+function resolveBindingElement(
   declaration: ts.BindingElement,
   checker: ts.TypeChecker,
-  seen: Set<ts.Symbol>,
-): InitializerLookup {
+  state: ResolutionState,
+): ValueResolution {
   const selectorName = declaration.propertyName
     ?? (ts.isIdentifier(declaration.name) ? declaration.name : undefined);
-  const key = propertyNameText(selectorName);
-  if (key.unknown || key.text === undefined) return key;
-  const pattern = declaration.parent;
-  if (!ts.isObjectBindingPattern(pattern)) {
-    return { expressions: [] };
+  const selector = propertySelector(selectorName);
+  if (selector.issue || selector.text === undefined) {
+    return { values: [], issues: selector.issue ? [selector.issue] : [] };
   }
+  const pattern = declaration.parent;
+  if (!ts.isObjectBindingPattern(pattern)) return emptyResolution();
 
   const owner = pattern.parent;
-  let sources: InitializerLookup;
+  let source: ValueResolution;
   if (ts.isVariableDeclaration(owner) || ts.isParameter(owner)) {
-    sources = owner.initializer
-      ? { expressions: [owner.initializer] }
-      : { expressions: [] };
+    source = owner.initializer
+      ? resolveValue(owner.initializer, checker, state)
+      : emptyResolution();
   } else if (ts.isBindingElement(owner)) {
-    sources = bindingElementInitializers(owner, checker, seen);
+    source = resolveBindingElement(owner, checker, state);
   } else {
-    sources = { expressions: [] };
+    source = emptyResolution();
   }
-  if (sources.unknown) return sources;
-
-  const selected = mergeLookups(sources.expressions.map(source => (
-    propertyInitializers(source, key.text!, checker, seen)
-  )));
-  if (declaration.initializer) selected.expressions.push(declaration.initializer);
-  return selected;
+  const selected = selectProperty(source, selector.text, checker, state);
+  return declaration.initializer && selected.values.length === 0
+    ? mergeResolutions([selected, resolveValue(declaration.initializer, checker, state)])
+    : selected;
 }
 
-function symbolInitializers(
-  symbol: ts.Symbol | undefined,
+function resolveSymbolValue(
+  symbol: ts.Symbol,
   checker: ts.TypeChecker,
-  seen = new Set<ts.Symbol>(),
-): InitializerLookup {
-  if (!symbol) return { expressions: [] };
-  const lookups = (symbol.declarations ?? []).map((declaration): InitializerLookup => {
-    if (ts.isVariableDeclaration(declaration)) {
-      return declaration.initializer ? { expressions: [declaration.initializer] } : { expressions: [] };
+  state: ResolutionState,
+): ValueResolution {
+  if (state.symbols.has(symbol)) {
+    return {
+      values: [],
+      issues: [{ reason: `Alias cycle reaches "${symbol.getName()}"`, conditional: false }],
+    };
+  }
+  const nextState = { ...state, symbols: new Set(state.symbols).add(symbol) };
+  const declarations = symbol.declarations ?? [];
+  const initializers = declarations.flatMap((declaration): ValueResolution[] => {
+    if (
+      (ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration))
+      && declaration.initializer
+    ) {
+      return [resolveValue(declaration.initializer, checker, nextState)];
     }
-    if (ts.isPropertyAssignment(declaration)) return { expressions: [declaration.initializer] };
+    if (ts.isPropertyAssignment(declaration)) {
+      return [resolveValue(declaration.initializer, checker, nextState)];
+    }
     if (ts.isBindingElement(declaration)) {
-      return bindingElementInitializers(declaration, checker, seen);
+      return [resolveBindingElement(declaration, checker, nextState)];
     }
-    return { expressions: [] };
+    return [];
   });
-  return mergeLookups(lookups);
+  if (initializers.length === 0) return { values: [{ kind: 'symbol', symbol }], issues: [] };
+  const resolution = mergeResolutions(initializers);
+  return resolution.values.length === 0 && resolution.issues.length === 0
+    ? { values: [{ kind: 'symbol', symbol }], issues: [] }
+    : resolution;
 }
 
-function combineAliasMatches(matches: AliasMatch[], subject: string): AliasMatch {
-  const unknown = matches.find(match => match.kind === 'unknown');
-  if (unknown?.kind === 'unknown') return unknown;
-  const matched = matches.filter(match => match.kind === 'match').length;
-  if (matched === matches.length && matched > 0) return { kind: 'match' };
-  if (matched === 0) return { kind: 'none' };
-  return { kind: 'unknown', reason: `Alias "${subject}" has ambiguous initializers` };
-}
-
-function aliasedIdentifierMatch(
-  expression: ts.Expression,
-  expected: 'require' | 'Reflect',
+function objectPropertyValues(
+  object: ts.ObjectLiteralExpression,
+  property: string,
   checker: ts.TypeChecker,
-  seen = new Set<ts.Symbol>(),
-): AliasMatch {
-  const current = unwrappedExpression(expression);
-  if (ts.isIdentifier(current) && current.text === expected) return { kind: 'match' };
-  const symbol = resolvedSymbol(current, checker);
-  if (!symbol) return { kind: 'none' };
-  if (seen.has(symbol)) {
-    return { kind: 'unknown', reason: `Alias cycle reaches "${symbol.getName()}"` };
+  state: ResolutionState,
+): ValueResolution {
+  const resolutions: ValueResolution[] = [];
+  for (const member of object.properties) {
+    if (ts.isSpreadAssignment(member)) {
+      const spread = selectProperty(resolveValue(member.expression, checker, state), property, checker, state);
+      resolutions.push({
+        ...spread,
+        issues: [
+          ...spread.issues,
+          { reason: `Property "${property}" may be supplied by an object spread`, conditional: true },
+        ],
+      });
+      continue;
+    }
+    if (!('name' in member) || !member.name) continue;
+    const selector = propertySelector(member.name);
+    if (selector.issue) return { values: [], issues: [selector.issue] };
+    if (selector.text !== property) continue;
+    if (ts.isPropertyAssignment(member)) {
+      resolutions.push(resolveValue(member.initializer, checker, state));
+    } else if (ts.isShorthandPropertyAssignment(member)) {
+      const valueSymbol = checker.getShorthandAssignmentValueSymbol(member);
+      resolutions.push(valueSymbol
+        ? resolveSymbolValue(valueSymbol, checker, state)
+        : resolveValue(member.name, checker, state));
+    } else {
+      resolutions.push({
+        values: [],
+        issues: [{ reason: `Property "${property}" is not a value assignment`, conditional: false }],
+      });
+    }
   }
-  const nextSeen = new Set(seen).add(symbol);
-  const lookup = symbolInitializers(symbol, checker, nextSeen);
-  if (lookup.unknown) return { kind: 'unknown', reason: lookup.unknown };
-  if (lookup.expressions.length === 0) return { kind: 'none' };
-  return combineAliasMatches(
-    lookup.expressions.map(initializer => aliasedIdentifierMatch(initializer, expected, checker, nextSeen)),
-    current.getText(),
-  );
+  return resolutions.length > 0 ? mergeResolutions(resolutions) : emptyResolution();
+}
+
+function symbolPropertyValue(
+  symbol: ts.Symbol,
+  property: string,
+  checker: ts.TypeChecker,
+  state: ResolutionState,
+): ValueResolution {
+  const exported = symbol.exports?.get(ts.escapeLeadingUnderscores(property));
+  if (exported) {
+    const target = (exported.flags & ts.SymbolFlags.Alias) !== 0
+      ? checker.getAliasedSymbol(exported)
+      : exported;
+    return resolveSymbolValue(target, checker, state);
+  }
+
+  const location = symbol.valueDeclaration ?? symbol.declarations?.[0];
+  if (!location) return emptyResolution();
+  const propertySymbol = checker.getTypeOfSymbolAtLocation(symbol, location).getProperty(property);
+  return propertySymbol ? resolveSymbolValue(propertySymbol, checker, state) : emptyResolution();
+}
+
+function selectProperty(
+  source: ValueResolution,
+  property: string,
+  checker: ts.TypeChecker,
+  state: ResolutionState,
+): ValueResolution {
+  const selected = source.values.map((value): ValueResolution => {
+    if (value.kind === 'builtin') {
+      return value.name === 'Reflect' && property === 'construct'
+        ? { values: [{ kind: 'builtin', name: 'Reflect.construct' }], issues: [] }
+        : emptyResolution();
+    }
+    if (value.kind === 'symbol') {
+      return symbolPropertyValue(value.symbol, property, checker, state);
+    }
+    const expression = unwrappedExpression(value.expression);
+    if (ts.isObjectLiteralExpression(expression)) {
+      return objectPropertyValues(expression, property, checker, state);
+    }
+    const propertySymbol = checker.getTypeAtLocation(expression).getProperty(property);
+    return propertySymbol ? resolveSymbolValue(propertySymbol, checker, state) : emptyResolution();
+  });
+  return mergeResolutions([{ values: [], issues: source.issues }, ...selected]);
+}
+
+function enumerateProperties(
+  source: ValueResolution,
+  checker: ts.TypeChecker,
+  state: ResolutionState,
+): ValueResolution {
+  const enumerated = source.values.map((value): ValueResolution => {
+    if (value.kind === 'builtin') {
+      return value.name === 'Reflect'
+        ? { values: [{ kind: 'builtin', name: 'Reflect.construct' }], issues: [] }
+        : emptyResolution();
+    }
+    if (value.kind === 'symbol') {
+      if (!value.symbol.exports) return emptyResolution();
+      return mergeResolutions([...value.symbol.exports.values()].map(exported => (
+        resolveSymbolValue(exported, checker, state)
+      )));
+    }
+    const expression = unwrappedExpression(value.expression);
+    if (!ts.isObjectLiteralExpression(expression)) return emptyResolution();
+    return mergeResolutions(expression.properties.map((member): ValueResolution => {
+      if (ts.isSpreadAssignment(member)) {
+        return enumerateProperties(resolveValue(member.expression, checker, state), checker, state);
+      }
+      if (ts.isPropertyAssignment(member)) return resolveValue(member.initializer, checker, state);
+      if (ts.isShorthandPropertyAssignment(member)) {
+        const valueSymbol = checker.getShorthandAssignmentValueSymbol(member);
+        return valueSymbol ? resolveSymbolValue(valueSymbol, checker, state) : emptyResolution();
+      }
+      return emptyResolution();
+    }));
+  });
+  return mergeResolutions([{ values: [], issues: source.issues }, ...enumerated]);
+}
+
+function resolvePropertyExpression(
+  expression: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  checker: ts.TypeChecker,
+  state: ResolutionState,
+): ValueResolution {
+  if (state.members.has(expression)) {
+    return {
+      values: [],
+      issues: [{
+        reason: `Property alias cycle reaches "${expression.getText()}"`,
+        conditional: false,
+      }],
+    };
+  }
+  const nextState = { ...state, members: new Set(state.members).add(expression) };
+  const source = resolveValue(expression.expression, checker, nextState);
+  const reflectSource = source.values.some(value => (
+    value.kind === 'builtin' && value.name === 'Reflect'
+  ));
+  if (ts.isPropertyAccessExpression(expression)) {
+    if (!reflectSource) {
+      const memberSymbol = resolvedSymbol(expression.name, checker);
+      if (memberSymbol) return resolveSymbolValue(memberSymbol, checker, nextState);
+    }
+    return selectProperty(source, expression.name.text, checker, nextState);
+  }
+  const selector = moduleText(expression.argumentExpression);
+  if (selector !== undefined) {
+    if (!reflectSource) {
+      const memberSymbol = resolvedSymbol(expression.argumentExpression, checker);
+      if (memberSymbol) return resolveSymbolValue(memberSymbol, checker, nextState);
+    }
+    return selectProperty(source, selector, checker, nextState);
+  }
+  const possible = enumerateProperties(source, checker, nextState);
+  return {
+    values: possible.values,
+    issues: [
+      ...possible.issues,
+      {
+        reason: `Computed selector "${expression.argumentExpression.getText()}" is not literal`,
+        conditional: true,
+      },
+    ],
+  };
+}
+
+function resolveValue(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+  state: ResolutionState = { symbols: new Set(), members: new Set() },
+): ValueResolution {
+  const current = unwrappedExpression(expression);
+  if (ts.isConditionalExpression(current)) {
+    return mergeResolutions([
+      resolveValue(current.whenTrue, checker, state),
+      resolveValue(current.whenFalse, checker, state),
+    ]);
+  }
+  if (
+    ts.isBinaryExpression(current)
+    && [
+      ts.SyntaxKind.BarBarToken,
+      ts.SyntaxKind.AmpersandAmpersandToken,
+      ts.SyntaxKind.QuestionQuestionToken,
+    ].includes(current.operatorToken.kind)
+  ) {
+    return mergeResolutions([
+      resolveValue(current.left, checker, state),
+      resolveValue(current.right, checker, state),
+    ]);
+  }
+  if (ts.isIdentifier(current) && current.text === 'require') {
+    return { values: [{ kind: 'builtin', name: 'require' }], issues: [] };
+  }
+  if (ts.isIdentifier(current) && current.text === 'Reflect') {
+    return { values: [{ kind: 'builtin', name: 'Reflect' }], issues: [] };
+  }
+  if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+    return resolvePropertyExpression(current, checker, state);
+  }
+  const symbol = resolvedSymbol(current, checker);
+  if (symbol) return resolveSymbolValue(symbol, checker, state);
+  return { values: [{ kind: 'expression', expression: current }], issues: [] };
+}
+
+function classifyResolvedValue(
+  resolution: ValueResolution,
+  matches: (value: ResolvedValue) => boolean,
+  subject: string,
+): AliasMatch {
+  const matched = resolution.values.filter(matches).length;
+  const unmatched = resolution.values.length - matched;
+  const unconditional = resolution.issues.find(issue => !issue.conditional);
+  if (unconditional) return { kind: 'unknown', reason: unconditional.reason };
+  const conditional = resolution.issues.find(issue => issue.conditional);
+  if (conditional && matched > 0) return { kind: 'unknown', reason: conditional.reason };
+  if (matched > 0 && unmatched > 0) {
+    return { kind: 'unknown', reason: `Alias "${subject}" has ambiguous values` };
+  }
+  return matched > 0 ? { kind: 'match' } : { kind: 'none' };
 }
 
 function isRequireLoader(expression: ts.Expression, checker: ts.TypeChecker): AliasMatch {
-  return aliasedIdentifierMatch(expression, 'require', checker);
+  return classifyResolvedValue(
+    resolveValue(expression, checker),
+    value => value.kind === 'builtin' && value.name === 'require',
+    expression.getText(),
+  );
 }
 
-function elementSelector(expression: ts.ElementAccessExpression): AliasMatch & { text?: string } {
-  const text = moduleText(expression.argumentExpression);
-  return text === undefined
-    ? { kind: 'unknown', reason: `Computed selector "${expression.argumentExpression.getText()}" is not literal` }
-    : { kind: 'match', text };
-}
-
-function isReflectConstruct(
-  expression: ts.Expression,
-  checker: ts.TypeChecker,
-  seen = new Set<ts.Symbol>(),
-): AliasMatch {
-  const current = unwrappedExpression(expression);
-  if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
-    const reflect = aliasedIdentifierMatch(current.expression, 'Reflect', checker, seen);
-    if (reflect.kind === 'unknown') return reflect;
-    if (reflect.kind === 'match') {
-      if (ts.isPropertyAccessExpression(current)) {
-        return current.name.text === 'construct' ? { kind: 'match' } : { kind: 'none' };
-      }
-      const selector = elementSelector(current);
-      if (selector.kind === 'unknown') return selector;
-      return selector.text === 'construct' ? { kind: 'match' } : { kind: 'none' };
-    }
-  }
-  const symbol = resolvedSymbol(current, checker);
-  if (!symbol) return { kind: 'none' };
-  if (seen.has(symbol)) {
-    return { kind: 'unknown', reason: `Reflect.construct alias cycle reaches "${symbol.getName()}"` };
-  }
-  const nextSeen = new Set(seen).add(symbol);
-  const lookup = symbolInitializers(symbol, checker, nextSeen);
-  if (lookup.unknown) return { kind: 'unknown', reason: lookup.unknown };
-  if (lookup.expressions.length === 0) return { kind: 'none' };
-  return combineAliasMatches(
-    lookup.expressions.map(initializer => isReflectConstruct(initializer, checker, nextSeen)),
-    current.getText(),
+function isReflectConstruct(expression: ts.Expression, checker: ts.TypeChecker): AliasMatch {
+  return classifyResolvedValue(
+    resolveValue(expression, checker),
+    value => value.kind === 'builtin' && value.name === 'Reflect.construct',
+    expression.getText(),
   );
 }
 
@@ -353,54 +510,36 @@ interface ConstructionTarget {
 function constructionTarget(
   expression: ts.Expression,
   checker: ts.TypeChecker,
-  seen = new Set<ts.Symbol>(),
-  strictAlias = false,
 ): ConstructionTarget {
   const current = unwrappedExpression(expression);
-  if (ts.isElementAccessExpression(current)) {
-    const selector = elementSelector(current);
-    if (selector.kind === 'unknown') return { unknown: selector.reason };
-  }
-  const symbol = resolvedSymbol(current, checker);
-  const symbolName = symbol?.getName();
-  const hasAliasDeclaration = symbol?.declarations?.some(declaration => (
-    ts.isVariableDeclaration(declaration)
-    || ts.isPropertyAssignment(declaration)
-    || ts.isBindingElement(declaration)
-  )) ?? false;
-  if (symbolName && DEPENDENCY_NAME.test(symbolName) && !hasAliasDeclaration) {
-    return { name: symbolName };
-  }
-  if (symbol) {
-    if (seen.has(symbol)) {
-      return { unknown: `Constructor alias cycle reaches "${symbolName ?? current.getText()}"` };
+  const resolution = resolveValue(current, checker);
+  const names = resolution.values.map((value): string => {
+    if (value.kind === 'builtin') return value.name;
+    if (value.kind === 'symbol') return value.symbol.getName();
+    const candidate = unwrappedExpression(value.expression);
+    if (ts.isIdentifier(candidate)) return candidate.text;
+    if (ts.isPropertyAccessExpression(candidate)) return candidate.name.text;
+    if (ts.isElementAccessExpression(candidate)) {
+      return moduleText(candidate.argumentExpression) ?? candidate.getText();
     }
-    const nextSeen = new Set(seen).add(symbol);
-    const lookup = symbolInitializers(symbol, checker, nextSeen);
-    if (lookup.unknown) return { unknown: lookup.unknown };
-    if (lookup.expressions.length > 0) {
-      const targets = lookup.expressions.map(initializer => (
-        constructionTarget(initializer, checker, nextSeen, true)
-      ));
-      const unknown = targets.map(target => target.unknown).find(Boolean);
-      if (unknown) return { unknown };
-      const names = [...new Set(targets.map(target => target.name).filter(Boolean))] as string[];
-      if (names.length === 1) return { name: names[0] };
-      if (names.length > 1) {
-        return { unknown: `Constructor alias "${current.getText()}" has ambiguous initializers` };
-      }
-    }
+    return candidate.getText();
+  }).filter(name => name !== '__type' && name !== '__class');
+  const dependencyNames = [...new Set(names.filter(name => DEPENDENCY_NAME.test(name)))];
+  const nonDependencyNames = names.filter(name => !DEPENDENCY_NAME.test(name));
+  const unconditional = resolution.issues.find(issue => !issue.conditional);
+  if (unconditional) return { unknown: unconditional.reason };
+  const conditional = resolution.issues.find(issue => issue.conditional);
+  if (conditional && dependencyNames.length > 0) return { unknown: conditional.reason };
+  if (dependencyNames.length > 1 || (dependencyNames.length === 1 && nonDependencyNames.length > 0)) {
+    return { unknown: `Constructor alias "${current.getText()}" has ambiguous values` };
   }
-  if (symbolName && symbolName !== '__type' && symbolName !== '__class') return { name: symbolName };
+  if (dependencyNames.length === 1) return { name: dependencyNames[0] };
   if (ts.isIdentifier(current)) return { name: current.text };
   if (ts.isPropertyAccessExpression(current)) return { name: current.name.text };
   if (ts.isElementAccessExpression(current)) {
-    const selector = elementSelector(current);
-    if (selector.kind === 'match') return { name: selector.text };
+    return { name: moduleText(current.argumentExpression) ?? current.getText() };
   }
-  return strictAlias
-    ? { unknown: `Cannot normalize constructor alias expression "${current.getText()}"` }
-    : { name: current.getText() };
+  return { name: current.getText() };
 }
 
 function constructionName(expression: ts.Expression, checker: ts.TypeChecker): string {
@@ -563,13 +702,7 @@ export function inspectArchitecture({
       if (ts.isNewExpression(node)) {
         const target = constructionTarget(node.expression, checker);
         if (target.name && DEPENDENCY_NAME.test(target.name)) recordConstruction(target.name, node);
-        else if (
-          target.unknown
-          && (
-            ts.isElementAccessExpression(unwrappedExpression(node.expression))
-            || DEPENDENCY_NAME.test(constructionName(node.expression, checker))
-          )
-        ) {
+        else if (target.unknown) {
           violations.push({
             kind: 'unknown-construction',
             file: displayFile,

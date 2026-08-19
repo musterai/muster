@@ -43,6 +43,12 @@ function kinds(root: string): ArchitectureViolationKind[] {
   return inspectArchitecture({ projectRoot: root }).violations.map(violation => violation.kind);
 }
 
+function guarded(root: string): boolean {
+  const violations = kinds(root);
+  return violations.includes('construction-outside-root')
+    || violations.includes('unknown-construction');
+}
+
 describe('resolved architecture and construction inventory', () => {
   afterEach(() => {
     for (const root of temporaryProjects.splice(0)) {
@@ -253,6 +259,79 @@ describe('resolved architecture and construction inventory', () => {
   });
 
   it.each([
+    ['string-literal constructor property', 'const catalog = { Audit: AuditService }; new catalog["Audit"]();'],
+    ['template constructor property', 'const catalog = { Audit: AuditService }; new catalog[`Audit`]();'],
+    [
+      'nested string-literal constructor property',
+      'const registry = { catalog: { Audit: AuditService } }; new registry.catalog["Audit"]();',
+    ],
+    [
+      'nested template constructor property',
+      'const registry = { catalog: { Audit: AuditService } }; new registry["catalog"][`Audit`]();',
+    ],
+    [
+      'renamed namespace destructuring',
+      'const { AuditService: LocalAudit } = Services; new LocalAudit();',
+    ],
+    [
+      'direct namespace destructuring',
+      'const { AuditService } = Services; new AuditService();',
+    ],
+    [
+      'nested renamed destructuring',
+      'const { services: { Audit: LocalAudit } } = { services: { Audit: Services.AuditService } }; new LocalAudit();',
+    ],
+    [
+      'defaulted renamed destructuring',
+      'const { Audit: LocalAudit = Date } = { Audit: Services.AuditService }; new LocalAudit();',
+    ],
+  ])('guards reviewed constructor resolution through %s', (_name, source) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import * as Services from "../services/audit.service.js";',
+        source,
+      ].join('\n'),
+    });
+    expect(guarded(root)).toBe(true);
+  });
+
+  it.each([
+    [
+      'property constructor cycle',
+      [
+        'const first = { AuditService: second.AuditService };',
+        'const second = { AuditService: first.AuditService };',
+        'new first.AuditService();',
+      ].join('\n'),
+      'cycle',
+    ],
+    [
+      'ambiguous conditional constructor',
+      'const Local = Math.random() > 0.5 ? AuditService : Date; new Local();',
+      'ambiguous',
+    ],
+    [
+      'nonliteral computed constructor',
+      'declare const key: string; const catalog = { AuditService }; new catalog[key]();',
+      'Computed selector',
+    ],
+  ])('fails closed with an actionable diagnostic for %s', (_name, source, diagnostic) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService } from "../services/audit.service.js";',
+        source,
+      ].join('\n'),
+    });
+    const violations = inspectArchitecture({ projectRoot: root }).violations;
+    expect(violations.some(violation => (
+      violation.kind === 'unknown-construction'
+      && violation.message.toLowerCase().includes(diagnostic.toLowerCase())
+    ))).toBe(true);
+  });
+
+  it.each([
     [
       'direct destructuring',
       'const { load } = { load: require }; load("../mcp/server.js");',
@@ -298,6 +377,108 @@ describe('resolved architecture and construction inventory', () => {
       ].join('\n'),
     });
     expect(kinds(computedRoot)).toContain('unknown-dependency');
+  });
+
+  it.each([
+    ['string-literal loader property', 'const loaders = { load: require }; loaders["load"]("../mcp/server.js");', 'api-to-mcp'],
+    ['template loader property', 'const loaders = { load: require }; loaders[`load`]("../mcp/server.js");', 'api-to-mcp'],
+    [
+      'nested string-literal loader property',
+      'const runtime = { loaders: { load: require } }; runtime.loaders["load"]("../mcp/server.js");',
+      'api-to-mcp',
+    ],
+    [
+      'nested destructured loader property',
+      'const { runtime: { load } } = { runtime: { load: require } }; load("../mcp/server.js");',
+      'api-to-mcp',
+    ],
+    [
+      'direct nonliteral loader property',
+      'declare const key: string; const loaders = { load: require }; loaders[key]("../mcp/server.js");',
+      'unknown-dependency',
+    ],
+    [
+      'nested nonliteral loader property',
+      'declare const key: string; const runtime = { loaders: { load: require } }; runtime.loaders[key]("../mcp/server.js");',
+      'unknown-dependency',
+    ],
+    [
+      'conditional loader alias',
+      'const load = Math.random() > 0.5 ? require : JSON.parse; load("../mcp/server.js");',
+      'unknown-dependency',
+    ],
+    [
+      'logical-or loader alias',
+      'const load = require || JSON.parse; load("../mcp/server.js");',
+      'unknown-dependency',
+    ],
+    [
+      'logical-and loader alias',
+      'const load = require && JSON.parse; load("../mcp/server.js");',
+      'unknown-dependency',
+    ],
+    [
+      'nullish loader alias',
+      'const load = require ?? JSON.parse; load("../mcp/server.js");',
+      'unknown-dependency',
+    ],
+    [
+      'cyclic property loader alias',
+      [
+        'const first = { load: second.load };',
+        'const second = { load: first.load };',
+        'first.load("../mcp/server.js");',
+      ].join('\n'),
+      'unknown-dependency',
+    ],
+  ])('guards reviewed loader resolution through %s', (_name, source, expectedKind) => {
+    const root = fixture({ 'src/api/probe.ts': source });
+    expect(kinds(root)).toContain(expectedKind as ArchitectureViolationKind);
+  });
+
+  it.each([
+    [
+      'object-held computed Reflect function',
+      'const operations = { construct: Reflect.construct }; operations["construct"](AuditService, []);',
+    ],
+    [
+      'object-held template Reflect function',
+      'const operations = { construct: Reflect.construct }; operations[`construct`](AuditService, []);',
+    ],
+    [
+      'nested object-held Reflect function',
+      'const runtime = { operations: { construct: Reflect.construct } }; runtime.operations.construct(AuditService, []);',
+    ],
+  ])('rejects reviewed Reflect construction through %s', (_name, source) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService } from "../services/audit.service.js";',
+        source,
+      ].join('\n'),
+    });
+    expect(kinds(root)).toContain('construction-outside-root');
+  });
+
+  it.each([
+    ['conditional Reflect alias', 'const construct = Math.random() > 0.5 ? Reflect.construct : JSON.parse;'],
+    ['logical-or Reflect alias', 'const construct = Reflect.construct || JSON.parse;'],
+    ['logical-and Reflect alias', 'const construct = Reflect.construct && JSON.parse;'],
+    ['nullish Reflect alias', 'const construct = Reflect.construct ?? JSON.parse;'],
+  ])('fails closed for %s', (_name, declaration) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService } from "../services/audit.service.js";',
+        declaration,
+        'construct(AuditService, []);',
+      ].join('\n'),
+    });
+    const violations = inspectArchitecture({ projectRoot: root }).violations;
+    expect(violations.some(violation => (
+      violation.kind === 'unknown-construction'
+      && violation.message.includes('ambiguous values')
+    ))).toBe(true);
   });
 
   it.each([
@@ -374,6 +555,38 @@ describe('resolved architecture and construction inventory', () => {
     expect(kinds(root)).not.toContain('construction-outside-root');
     expect(kinds(root)).not.toContain('unknown-construction');
     expect(kinds(root)).not.toContain('unknown-dependency');
+  });
+
+  it.each([
+    ['literal JSON property', 'const parsers = { load: JSON.parse }; parsers["load"]("{}");'],
+    ['template JSON property', 'const parsers = { load: JSON.parse }; parsers[`load`]("{}");'],
+    ['computed JSON property', 'declare const key: string; const parsers = { load: JSON.parse }; parsers[key]("{}");'],
+    [
+      'nested computed JSON property',
+      'declare const key: string; const runtime = { parsers: { load: JSON.parse } }; runtime.parsers[key]("{}");',
+    ],
+    ['safe conditional function alias', 'const parse = Math.random() > 0.5 ? JSON.parse : Number; parse("1");'],
+    ['safe logical function alias', 'const parse = JSON.parse || Number; parse("1");'],
+    ['dynamic history method', 'declare const operation: "pushState" | "replaceState"; window.history[operation](null, "", "/");'],
+    [
+      'nested destructured JSON function',
+      'const { runtime: { parse } } = { runtime: { parse: JSON.parse } }; parse("{}");',
+    ],
+  ])('does not report legitimate loader/Reflect behavior through %s', (_name, source) => {
+    const root = fixture({ 'src/api/probe.ts': source });
+    expect(kinds(root)).not.toContain('unknown-dependency');
+    expect(kinds(root)).not.toContain('unknown-construction');
+  });
+
+  it.each([
+    ['literal Date property', 'const catalog = { Date }; new catalog["Date"]();'],
+    ['template Date property', 'const catalog = { Date }; new catalog[`Date`]();'],
+    ['nested Date property', 'const registry = { catalog: { Date } }; new registry.catalog.Date();'],
+    ['safe dynamic constructor alias', 'declare const vis: any; const Local = vis.Network || vis; new Local();'],
+  ])('does not report legitimate constructor behavior through %s', (_name, source) => {
+    const root = fixture({ 'src/api/probe.ts': source });
+    expect(kinds(root)).not.toContain('construction-outside-root');
+    expect(kinds(root)).not.toContain('unknown-construction');
   });
 
   it.each([
