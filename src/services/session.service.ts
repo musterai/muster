@@ -46,6 +46,7 @@ export class SessionService {
   async create(
     userId: string,
     opts?: { userAgent?: string | null; ip?: string | null; ttlMs?: number },
+    adapter: DatabaseAdapter = this.db,
   ): Promise<CreatedSession> {
     const id = ulid();
     const secret = crypto.randomBytes(SECRET_BYTES).toString('hex');
@@ -53,7 +54,7 @@ export class SessionService {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + (opts?.ttlMs ?? DEFAULT_SESSION_TTL_MS));
 
-    await this.db.execute(
+    await adapter.execute(
       `INSERT INTO session (id, user_id, token_hash, expires_at, last_seen_at, user_agent, ip, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, userId, tokenHash, expiresAt.toISOString(), null, opts?.userAgent || null, opts?.ip || null, now.toISOString()],

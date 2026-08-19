@@ -79,20 +79,58 @@ export class UserService {
     };
   }
 
-  async findById(id: string): Promise<AppUser | null> {
-    const rows = await this.db.query<AppUser>(
+  async findById(id: string, adapter: DatabaseAdapter = this.db): Promise<AppUser | null> {
+    const rows = await adapter.query<AppUser>(
       'SELECT id, email, display_name, avatar_url, status, created_at FROM app_user WHERE id = ?',
       [id],
     );
     return rows[0] || null;
   }
 
-  async findByDisplayName(displayName: string): Promise<AppUser | null> {
-    const rows = await this.db.query<AppUser>(
+  async findByDisplayName(displayName: string, adapter: DatabaseAdapter = this.db): Promise<AppUser | null> {
+    const rows = await adapter.query<AppUser>(
       'SELECT id, email, display_name, avatar_url, status, created_at FROM app_user WHERE LOWER(display_name) = LOWER(?) LIMIT 1',
       [displayName.trim()],
     );
     return rows[0] || null;
+  }
+
+  /**
+   * Resolve the open-mode display-name selector, creating it exactly once.
+   * SQLite serializes write transactions through its adapter queue. Postgres
+   * needs an explicit workspace lock so two first-use requests cannot both
+   * observe the same name as absent before inserting duplicate users.
+   *
+   * The caller may pass its transaction adapter to keep membership, audit and
+   * session writes in the same commit as first-use creation.
+   */
+  async findOrCreateLocalUser(
+    displayName: string,
+    workspaceId: string | null,
+    adapter?: DatabaseAdapter,
+  ): Promise<{ user: AppUser; isNewUser: boolean }> {
+    if (!adapter) {
+      return this.db.transaction(tx => this.findOrCreateLocalUser(displayName, workspaceId, tx));
+    }
+
+    const normalizedName = displayName.trim();
+    if (normalizedName.length === 0 || normalizedName.length > 80) {
+      throw new ValidationError('display_name must be between 1 and 80 characters');
+    }
+    if (adapter.dialect === 'postgres') {
+      if (workspaceId) {
+        await adapter.query('SELECT id FROM workspace WHERE id = ? FOR UPDATE', [workspaceId]);
+      } else {
+        // A bootstrapped server always has a workspace. Keep an embedding
+        // caller without one race-safe rather than relying on an empty-row
+        // SELECT lock, which would protect nothing.
+        await adapter.query('LOCK TABLE app_user IN SHARE ROW EXCLUSIVE MODE');
+      }
+    }
+
+    const existing = await this.findByDisplayName(normalizedName, adapter);
+    if (existing) return { user: existing, isNewUser: false };
+    return { user: await this.createLocalUser(normalizedName, adapter), isNewUser: true };
   }
 
   /**
