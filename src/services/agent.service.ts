@@ -4,8 +4,10 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { Agent, RegisterAgent, UpdateAgent } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { ValidationError } from '../shared/errors.js';
-import type { PrincipalRef } from '../shared/auth-context.js';
-import type { AuthContext } from '../shared/auth-context.js';
+import type { AuthContext, PrincipalRef } from '../shared/auth-context.js';
+import { PermissionDeniedError, WORKSPACE_READ } from '../shared/permission-enforcer.js';
+import { config } from '../config/index.js';
+import { assertAgentSelectorScope } from './agent-scope.authorization.js';
 import { assertResourceWorkspace, assertWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
 
 export class AgentService {
@@ -13,6 +15,23 @@ export class AgentService {
     private db: DatabaseAdapter,
     private eventService?: EventService
   ) {}
+
+  /**
+   * Authorize a credential-derived principal against an agent selector.
+   * Workspace resolution deliberately precedes every admin/self bypass so a
+   * missing ID and a cross-workspace ID produce the same stable refusal.
+   */
+  async assertAgentScope(
+    agentId: string,
+    auth: AuthContext | undefined,
+    bypassPermission = 'agent.manage_others',
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<Agent> {
+    await assertAgentSelectorScope(adapter, agentId, auth, bypassPermission);
+    const target = await this.getById(agentId, adapter);
+    if (!target) throw new Error(`Agent with ID ${agentId} not found`);
+    return target;
+  }
 
   /**
    * Register a new agent or re-bind an existing session.
@@ -29,14 +48,19 @@ export class AgentService {
     operatorUserId?: string,
     restrictToRoleId?: string,
     workspaceId?: string | null,
-    actor?: PrincipalRef | null,
+    actorOrAuth?: PrincipalRef | AuthContext | null,
     adapter?: DatabaseAdapter,
     auth?: AuthContext,
   ): Promise<Agent> {
     if (!adapter) {
-      return this.db.transaction(tx => this.register(data, operatorUserId, restrictToRoleId, workspaceId, actor, tx, auth));
+      return this.db.transaction(tx => this.register(data, operatorUserId, restrictToRoleId, workspaceId, actorOrAuth, tx, auth));
     }
     const db = adapter;
+    const requestAuth = auth || (actorOrAuth && 'principal' in actorOrAuth ? actorOrAuth : undefined);
+    const actor = requestAuth?.principal || (actorOrAuth as PrincipalRef | null | undefined);
+    if (config.auth.mode === 'enforced' && !requestAuth) {
+      throw new PermissionDeniedError(WORKSPACE_READ, null);
+    }
     const id = data.agent_id || data.id || ulid();
     const now = new Date().toISOString();
     const membershipRows = operatorUserId && !workspaceId
@@ -46,16 +70,16 @@ export class AgentService {
         )
       : [];
     const resolvedWorkspaceId = workspaceId || membershipRows[0]?.workspace_id || null;
-    if (auth && resolvedWorkspaceId) assertWorkspace(auth, resolvedWorkspaceId);
-    if (auth && !resolvedWorkspaceId && workspaceIdFor(auth)) {
+    if (requestAuth && resolvedWorkspaceId) assertWorkspace(requestAuth, resolvedWorkspaceId);
+    if (requestAuth && !resolvedWorkspaceId && workspaceIdFor(requestAuth)) {
       throw new ValidationError('Agent registration requires the authenticated workspace');
     }
-    if (restrictToRoleId && auth) await assertResourceWorkspace(db, auth, 'role', restrictToRoleId);
+    if (restrictToRoleId && requestAuth) await assertResourceWorkspace(db, requestAuth, 'role', restrictToRoleId);
 
     // Check if re-binding an existing agent
     const existing = await this.getById(id, db);
     if (existing) {
-      if (auth) await assertResourceWorkspace(db, auth, 'agent', id);
+      if (requestAuth) await this.assertAgentScope(id, requestAuth, 'agent.manage_others', db);
       if (actor?.kind === 'agent') {
         if (existing.id !== actor.id || !existing.workspace_id || existing.workspace_id !== resolvedWorkspaceId) {
           throw new ValidationError('Agent registration is outside the authenticated agent scope');
@@ -95,7 +119,26 @@ export class AgentService {
         [name, capabilitiesStr, status, now, finalOperatorUserId, finalRoleId, finalWorkspaceId, id]
       );
 
-      return (await this.getById(id, db, auth))!;
+      return (await this.getById(id, db, requestAuth))!;
+    }
+
+    // In authenticated mode explicit IDs are selectors for re-binding only,
+    // never caller-selected identities for newly created principals.
+    if (requestAuth && config.auth.mode === 'enforced' && (data.agent_id || data.id)) {
+      throw new PermissionDeniedError('agent.manage_others', requestAuth.role_name);
+    }
+
+    if (requestAuth && config.auth.mode === 'enforced') {
+      if (!requestAuth.principal || requestAuth.principal.kind !== 'user' || !requestAuth.workspace_id || !requestAuth.is_workspace_member) {
+        throw new PermissionDeniedError(WORKSPACE_READ, requestAuth.role_name);
+      }
+      const memberships = await db.query<{ user_id: string }>(
+        'SELECT user_id FROM workspace_member WHERE workspace_id = ? AND user_id = ?',
+        [requestAuth.workspace_id, requestAuth.principal.id],
+      );
+      if (memberships.length === 0) {
+        throw new PermissionDeniedError(WORKSPACE_READ, requestAuth.role_name);
+      }
     }
 
     // An agent credential identifies an already-registered principal. It may
@@ -145,6 +188,7 @@ export class AgentService {
 
   async unregister(id: string, actorId?: string, adapter?: DatabaseAdapter, auth?: AuthContext): Promise<void> {
     if (!adapter) return this.db.transaction(tx => this.unregister(id, actorId, tx, auth));
+    await this.assertAgentScope(id, auth, 'agent.manage_others', adapter);
     const existing = await this.getById(id, adapter, auth);
     if (!existing) throw new Error(`Agent with ID ${id} not found`);
     await (async tx => {
@@ -176,32 +220,33 @@ export class AgentService {
     data: UpdateAgent,
     options: { workspaceId?: string; allowIdentityChanges?: boolean; auth?: AuthContext } = {},
   ): Promise<Agent> {
-    const existing = await this.getById(id, this.db, options.auth);
-    if (!existing) throw new Error(`Agent with ID ${id} not found`);
+    return this.db.transaction(async tx => {
+      await this.assertAgentScope(id, options.auth, 'agent.manage_others', tx);
+      const existing = await this.getById(id, tx, options.auth);
+      if (!existing) throw new Error(`Agent with ID ${id} not found`);
 
-    const changesIdentity = data.operator_user_id !== undefined || data.role_id !== undefined;
-    if (changesIdentity && !options.allowIdentityChanges) {
-      throw new ValidationError('Changing an agent owner or role requires workspace administrator authority');
-    }
-    if (options.workspaceId && existing.workspace_id !== options.workspaceId) {
-      throw new ValidationError('Agent belongs to a different workspace');
-    }
-
-    const name = data.name !== undefined ? data.name : existing.name;
-    const status = data.status !== undefined ? data.status : existing.status;
-    const operator_user_id = data.operator_user_id !== undefined ? data.operator_user_id : existing.operator_user_id;
-    const role_id = data.role_id !== undefined ? data.role_id : existing.role_id;
-
-    let capabilitiesStr: string | null = existing.capabilities ? JSON.stringify(existing.capabilities) : null;
-    if (data.capabilities !== undefined) {
-      if (typeof data.capabilities === 'string') {
-        capabilitiesStr = JSON.stringify(data.capabilities.split(',').map(s => s.trim()).filter(Boolean));
-      } else if (Array.isArray(data.capabilities)) {
-        capabilitiesStr = JSON.stringify(data.capabilities);
+      const changesIdentity = data.operator_user_id !== undefined || data.role_id !== undefined;
+      if (changesIdentity && !options.allowIdentityChanges) {
+        throw new ValidationError('Changing an agent owner or role requires workspace administrator authority');
       }
-    }
+      if (options.workspaceId && existing.workspace_id !== options.workspaceId) {
+        throw new ValidationError('Agent belongs to a different workspace');
+      }
 
-    await this.db.transaction(async tx => {
+      const name = data.name !== undefined ? data.name : existing.name;
+      const status = data.status !== undefined ? data.status : existing.status;
+      const operator_user_id = data.operator_user_id !== undefined ? data.operator_user_id : existing.operator_user_id;
+      const role_id = data.role_id !== undefined ? data.role_id : existing.role_id;
+
+      let capabilitiesStr: string | null = existing.capabilities ? JSON.stringify(existing.capabilities) : null;
+      if (data.capabilities !== undefined) {
+        if (typeof data.capabilities === 'string') {
+          capabilitiesStr = JSON.stringify(data.capabilities.split(',').map(s => s.trim()).filter(Boolean));
+        } else if (Array.isArray(data.capabilities)) {
+          capabilitiesStr = JSON.stringify(data.capabilities);
+        }
+      }
+
       if (role_id) {
         const roles = await tx.query<{ workspace_id: string }>('SELECT workspace_id FROM role WHERE id = ?', [role_id]);
         if (roles.length === 0 || roles[0].workspace_id !== existing.workspace_id) {
@@ -233,9 +278,8 @@ export class AgentService {
         await tx.execute('DELETE FROM oauth_authorization_code WHERE agent_principal_id = ?', [id]);
         await tx.execute('UPDATE oauth_refresh_token SET revoked = 1 WHERE agent_principal_id = ?', [id]);
       }
+      return (await this.getById(id, tx, options.auth))!;
     });
-
-    return (await this.getById(id, this.db, options.auth))!;
   }
 
   async getById(id: string, adapter: DatabaseAdapter = this.db, auth?: AuthContext): Promise<Agent | null> {
@@ -276,16 +320,19 @@ export class AgentService {
   }
 
   async heartbeat(id: string, auth?: AuthContext): Promise<Agent> {
-    const existing = await this.getById(id, this.db, auth);
-    if (!existing) throw new Error(`Agent with ID ${id} not found`);
+    return this.db.transaction(async tx => {
+      await this.assertAgentScope(id, auth, 'agent.manage_others', tx);
+      const existing = await this.getById(id, tx, auth);
+      if (!existing) throw new Error(`Agent with ID ${id} not found`);
 
-    const last_seen_at = new Date().toISOString();
-    await this.db.execute(
-      'UPDATE agent SET last_seen_at = ?, status = ? WHERE id = ?',
-      [last_seen_at, 'active', id]
-    );
+      const last_seen_at = new Date().toISOString();
+      await tx.execute(
+        'UPDATE agent SET last_seen_at = ?, status = ? WHERE id = ?',
+        [last_seen_at, 'active', id]
+      );
 
-    return { ...existing, last_seen_at, status: 'active' };
+      return { ...existing, last_seen_at, status: 'active' };
+    });
   }
 
   async updateStatus(agentId?: string, status?: 'active' | 'idle' | 'offline'): Promise<void> {

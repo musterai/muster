@@ -30,8 +30,12 @@ import {
   projectIdParamsSchema,
 } from '../schemas.js';
 
+function getAuth(req: Request): AuthContext | undefined {
+  return (req as any).authContext;
+}
+
 function getActorId(req: Request): string | undefined {
-  const auth: AuthContext | undefined = (req as any).authContext;
+  const auth = getAuth(req);
   return auth?.principal?.id;
 }
 
@@ -77,7 +81,10 @@ async function requireCommentOwnershipOrAdmin(
   return commentService.validateCommentOwnership(commentId, auth.principal.id);
 }
 
-export function createCardRouter(cardService: CardService, commentService: CommentService): Router {
+export function createCardRouter(
+  cardService: CardService,
+  commentService: CommentService,
+): Router {
   const router = Router();
 
   router.get('/projects/:projectId/cards/search', ...validateRequest({ query: cardSearchQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {

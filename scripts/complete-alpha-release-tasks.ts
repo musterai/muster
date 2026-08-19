@@ -53,7 +53,14 @@ async function main() {
   // Update design document status to Approved
   const docs = await documentService.list(project.id);
   if (docs[0]) {
-    await documentService.setStatus(docs[0].id, 'approved');
+    await documentService.setStatus(docs[0].id, {
+      status: 'in_review',
+      expected_version: docs[0].version,
+    });
+    await documentService.setStatus(docs[0].id, {
+      status: 'approved',
+      expected_version: docs[0].version,
+    });
     console.log(`✓ Design document "${docs[0].title}" approved!`);
   }
 

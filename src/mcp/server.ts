@@ -515,32 +515,6 @@ function requireActor(auth: AuthContext, context: string): string | undefined {
 }
 
 /**
- * Validate that the caller owns the given agent_id, or has a bypass permission.
- * In open mode, always passes.
- */
-async function validateAgentOwnershipOrAdmin(
-  agentService: AgentService,
-  auth: AuthContext,
-  agentId: string,
-  bypassPermission: string,
-): Promise<void> {
-  if (config.auth.mode === 'open') return;
-  if (!auth.principal || !auth.is_workspace_member || !auth.workspace_id) {
-    throw new Error('Forbidden: requires an authenticated principal to operate on an agent.');
-  }
-  const target = await agentService.getById(agentId);
-  if (!target || target.workspace_id !== auth.workspace_id) {
-    throw new Error('Forbidden: agent is outside the authenticated workspace scope.');
-  }
-  if (auth.permissions.includes(bypassPermission)) return;
-  if (auth.principal.kind === 'agent' && auth.principal.id === agentId) return;
-  if (auth.principal.kind !== 'user') {
-    throw new Error('Forbidden: requires authority to manage another agent.');
-  }
-  await agentService.validateAgentOwnership(agentId, auth.principal.id, auth.workspace_id);
-}
-
-/**
  * Row-level scope check for comment.update/comment.delete: a principal may
  * only edit/delete their own comments unless they hold workspace.admin.
  * Mirrors the update_card/move_card "own resource" pattern for junior_engineer
@@ -780,15 +754,6 @@ All AI agents and human operators collaborating within Muster must follow this p
     is_epic: z.boolean().optional().describe('Marks this card as a container for related work'),
     operator_override: z.boolean().optional().describe('Explicitly bypass card WIP rules when the authenticated caller has operator override authority'),
   }, withPermission('update_card', auth, async ({ card_id, operator_override, ...data }) => {
-    // Layer 2 scope check: if the principal doesn't have card.assign_others,
-    // they may only update cards they are assigned to.
-    if (!auth.permissions.includes('card.assign_others') && auth.principal) {
-      const agentIds = await services.agentService.getAgentIdsForPrincipal(auth.principal.id);
-      const hasScope = await services.cardService.validateCardScope(card_id, agentIds);
-      if (!hasScope) {
-        throw new Error(`Forbidden: you may only update cards you are assigned to (principal: ${auth.principal.id})`);
-      }
-    }
     const details = await services.cardService.update(card_id, data, resolveActor(auth), {
       operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
@@ -796,15 +761,6 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.registerTool('move_card', { inputSchema: moveCardInputSchema }, withPermission('move_card', auth, async ({ card_id, target_column_id, position, operator_override }) => {
-    // Layer 2 scope check: if the principal doesn't have card.assign_others,
-    // they may only move cards they are assigned to.
-    if (!auth.permissions.includes('card.assign_others') && auth.principal) {
-      const agentIds = await services.agentService.getAgentIdsForPrincipal(auth.principal.id);
-      const hasScope = await services.cardService.validateCardScope(card_id, agentIds);
-      if (!hasScope) {
-        throw new Error(`Forbidden: you may only move cards you are assigned to (principal: ${auth.principal.id})`);
-      }
-    }
     const details = await services.cardService.move(card_id, { target_column_id, position }, resolveActor(auth), {
       operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
@@ -817,7 +773,6 @@ All AI agents and human operators collaborating within Muster must follow this p
     ttl_seconds: z.number().optional().describe('Lease duration in seconds; defaults to 600 (10 minutes)'),
     operator_override: z.boolean().optional().describe('Explicitly bypass blocker rules when the authenticated caller has operator override authority'),
   }, withPermission('claim_card', auth, async ({ card_id, agent_id, ttl_seconds, operator_override }) => {
-    await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'card.assign_others');
     const result = await services.cardService.claim(card_id, agent_id, ttl_seconds, resolveActor(auth) || agent_id, {
       operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
@@ -831,14 +786,12 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   server.tool('assign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('assign_card', auth, async ({ card_id, agent_id }) => {
-    await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'card.assign_others');
     await services.cardService.assign(card_id, agent_id, resolveActor(auth), auth);
     const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
   }));
 
   server.tool('unassign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('unassign_card', auth, async ({ card_id, agent_id }) => {
-    await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'card.assign_others');
     await services.cardService.unassign(card_id, agent_id, resolveActor(auth), auth);
     const details = await services.cardService.getById(card_id, undefined, auth);
     return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
@@ -998,14 +951,10 @@ All AI agents and human operators collaborating within Muster must follow this p
 
   server.tool('set_document_status', {
     document_id: z.string(),
-    status: z.enum(['draft', 'in_review', 'approved'])
-  }, withPermission('set_document_status', auth, async ({ document_id, status }) => {
-    const result = await withMutationAudit(services, auth, (result: Awaited<ReturnType<DocumentService['setStatus']>>) => ({
-      action: status === 'approved' ? 'document.approve' : 'document.status_changed',
-      target_type: 'document',
-      target_id: result.id,
-      payload: { status, title: result.title, project_id: result.project_id },
-    }), tx => services.documentService.setStatus(document_id, status, resolveActor(auth), tx, auth));
+    status: z.enum(['in_review', 'approved']),
+    expected_version: z.number().int().positive(),
+  }, withPermission('set_document_status', auth, async ({ document_id, status, expected_version }) => {
+    const result = await services.documentService.setStatus(document_id, { status, expected_version }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -1057,9 +1006,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       operatorUserId,
       undefined,
       auth.workspace_id || undefined,
-      config.auth.mode === 'enforced' ? auth.principal : null,
-      undefined,
-      auth,
+      config.auth.mode === 'enforced' ? auth : null,
     );
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
@@ -1070,13 +1017,15 @@ All AI agents and human operators collaborating within Muster must follow this p
     capabilities: z.union([z.string(), z.array(z.string())]).optional(),
     status: z.enum(['active', 'idle', 'offline']).optional(),
   }, withPermission('update_agent', auth, async ({ agent_id, ...data }) => {
-    await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'agent.manage_others');
-    const agent = await services.agentService.update(agent_id, data, { workspaceId: auth.workspace_id || undefined, auth });
+    const agent = await services.agentService.update(agent_id, data, {
+      workspaceId: auth.workspace_id || undefined,
+      auth,
+    });
     return { content: [{ type: 'text', text: JSON.stringify(agent, null, 2) }] };
   }));
 
   server.tool('unregister_agent', { agent_id: z.string() }, withPermission('unregister_agent', auth, async ({ agent_id }) => {
-    await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'agent.manage_others');
+    await services.agentService.assertAgentScope(agent_id, auth, 'agent.manage_others');
     await withMutationAudit(services, auth, {
       action: 'agent.unregister',
       target_type: 'agent',
@@ -1090,7 +1039,6 @@ All AI agents and human operators collaborating within Muster must follow this p
       'REQUIRED. Use the exact id returned by register_agent. In open mode, registration does not bind later MCP requests, so this ID must be sent with every heartbeat.'
     ),
   }, withPermission('heartbeat', auth, async ({ agent_id }) => {
-    await validateAgentOwnershipOrAdmin(services.agentService, auth, agent_id, 'agent.manage_others');
     const result = await services.agentService.heartbeat(agent_id, auth);
     await services.cardService.renewClaims(agent_id);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };

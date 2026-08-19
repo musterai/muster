@@ -287,12 +287,14 @@ async function runMcpAgentTestSuite() {
     const inReviewDoc = await callMCPTool('set_document_status', {
       document_id: doc.id,
       status: 'in_review',
+      expected_version: updatedDoc.version,
     });
     console.log(`  ✓ Status set to: ${inReviewDoc.status}`);
 
     const approvedDoc = await callMCPTool('set_document_status', {
       document_id: doc.id,
       status: 'approved',
+      expected_version: inReviewDoc.version,
     });
     console.log(`  ✓ Status set to: ${approvedDoc.status}`);
 

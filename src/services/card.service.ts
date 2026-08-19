@@ -12,6 +12,8 @@ import { canonicalizeCardLink } from './helpers/card-links.helper.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { assertResourceWorkspace, assertResourcesShareWorkspace, assertResourcesWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
+import { PermissionDeniedError, WORKSPACE_READ } from '../shared/permission-enforcer.js';
+import { assertActiveWorkspacePrincipal, assertAgentSelectorScope } from './agent-scope.authorization.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
 const MAX_MOVE_RETRIES = 3;
@@ -94,6 +96,108 @@ export class CardService {
       });
     }
     this.assertPosition(data.position);
+  }
+
+  private denyCardScope(auth: AuthContext): never {
+    throw new PermissionDeniedError('card.assign_others', auth.role_name);
+  }
+
+  /**
+   * Resolve a card only when it belongs to the credential-selected workspace.
+   * Missing and cross-workspace references intentionally share one refusal so
+   * callers cannot enumerate cards outside their workspace.
+   */
+  async assertCardWorkspaceScope(
+    cardIdOrKey: string,
+    auth: AuthContext | undefined,
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<string> {
+    if (config.auth.mode === 'open') {
+      return resolveCardId(adapter, cardIdOrKey);
+    }
+    auth = await assertActiveWorkspacePrincipal(adapter, auth);
+
+    const rows = await adapter.query<{ id: string; workspace_id: string }>(
+      `SELECT c.id, p.workspace_id
+       FROM card c
+       JOIN "column" col ON col.id = c.column_id
+       JOIN board b ON b.id = col.board_id
+       JOIN project p ON p.id = b.project_id
+       WHERE c.id = ? OR c.key = ?
+       LIMIT 1`,
+      [cardIdOrKey, cardIdOrKey],
+    );
+    if (rows.length === 0 || rows[0].workspace_id !== auth.workspace_id) {
+      return this.denyCardScope(auth);
+    }
+    return rows[0].id;
+  }
+
+  /**
+   * Resolve a move target only when its board belongs to the credential's
+   * workspace. Missing and foreign column IDs deliberately produce the same
+   * refusal so target selectors cannot be used for workspace enumeration.
+   */
+  async assertColumnWorkspaceScope(
+    columnId: string,
+    auth: AuthContext | undefined,
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<string> {
+    if (config.auth.mode === 'open') return columnId;
+    auth = await assertActiveWorkspacePrincipal(adapter, auth);
+
+    const rows = await adapter.query<{ id: string; workspace_id: string }>(
+      `SELECT col.id, p.workspace_id
+       FROM "column" col
+       JOIN board b ON b.id = col.board_id
+       JOIN project p ON p.id = b.project_id
+       WHERE col.id = ?
+       LIMIT 1`,
+      [columnId],
+    );
+    if (rows.length === 0 || rows[0].workspace_id !== auth.workspace_id) {
+      return this.denyCardScope(auth);
+    }
+    return rows[0].id;
+  }
+
+  /**
+   * Enforce the assignment rule for update/move at the service boundary.
+   * A user is in scope when assigned directly or through an agent they
+   * operate; an agent is in scope only through its own live registration.
+   */
+  async assertCardMutationScope(
+    cardIdOrKey: string,
+    auth: AuthContext | undefined,
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<string> {
+    const cardId = await this.assertCardWorkspaceScope(cardIdOrKey, auth, adapter);
+    if (config.auth.mode === 'open') return cardId;
+    if (!auth?.principal) throw new PermissionDeniedError(WORKSPACE_READ, auth?.role_name || null);
+    if (auth.permissions.includes('card.assign_others')) return cardId;
+
+    let scopedPrincipalIds: string[] = [];
+    if (auth.principal.kind === 'user') {
+      const operated = await adapter.query<{ id: string }>(
+        `SELECT id FROM agent
+         WHERE operator_user_id = ? AND workspace_id = ?`,
+        [auth.principal.id, auth.workspace_id],
+      );
+      scopedPrincipalIds = [auth.principal.id, ...operated.map(row => row.id)];
+    } else {
+      scopedPrincipalIds = [auth.principal.id];
+    }
+
+    if (scopedPrincipalIds.length === 0) return this.denyCardScope(auth);
+    const placeholders = scopedPrincipalIds.map(() => '?').join(',');
+    const assignments = await adapter.query<{ card_id: string }>(
+      `SELECT card_id FROM card_assignee
+       WHERE card_id = ? AND principal_id IN (${placeholders})
+       LIMIT 1`,
+      [cardId, ...scopedPrincipalIds],
+    );
+    if (assignments.length === 0) return this.denyCardScope(auth);
+    return cardId;
   }
 
   /** Apply deterministic canonical ranks to an already ordered lane. */
@@ -593,8 +697,8 @@ export class CardService {
   async update(id: string, data: UpdateCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
     assertMaxLength(data.description, CARD_TEXT_MAX_CHARS, 'Card description');
     return this.db.transaction(async tx => {
-      const existing = await this.getById(id, tx, options.auth || OPEN_AUTH_CONTEXT);
-      const cardId = existing.id;
+      const cardId = await this.assertCardMutationScope(id, options.auth, tx);
+      const existing = await this.getById(cardId, tx, options.auth || OPEN_AUTH_CONTEXT);
       const title = data.title !== undefined ? data.title : existing.title;
       const description = data.description !== undefined ? data.description : existing.description;
       const priority = data.priority !== undefined ? data.priority : existing.priority;
@@ -629,8 +733,10 @@ export class CardService {
     // Validate before resolving the card or opening a transaction so an empty
     // move is observably a no-op across every caller.
     this.assertMoveIntent(data);
-    const cardId = await resolveCardId(this.db, id);
     const auth = options.auth || OPEN_AUTH_CONTEXT;
+    const cardId = config.auth.mode === 'enforced'
+      ? await this.assertCardMutationScope(id, options.auth)
+      : await resolveCardId(this.db, id);
     await assertResourceWorkspace(this.db, auth, 'card', cardId);
     if (data.target_column_id) {
       await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['column', data.target_column_id]]);
@@ -671,7 +777,12 @@ export class CardService {
       const initialRows = await tx.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
       const initial = initialRows[0];
       if (!initial) throw new NotFoundError(`Card with ID ${cardId} not found`);
+      await this.assertCardMutationScope(cardId, options.auth, tx);
       const initialTarget = data.target_column_id ?? initial.column_id;
+      // The target selector is independently scoped on every serialization
+      // attempt. Do this before lane locks, capacity reads, rank rewrites, or
+      // events so a missing/foreign target is an observable no-op.
+      await this.assertColumnWorkspaceScope(initialTarget, options.auth, tx);
       if (tx.dialect === 'postgres') {
         const laneIds = [...new Set([initial.column_id, initialTarget])].sort();
         for (const laneId of laneIds) {
@@ -828,9 +939,12 @@ export class CardService {
 
   async assign(idOrKey: string, agentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     await this.db.transaction(async tx => {
-      const cardId = await resolveCardId(tx, idOrKey);
+      const cardId = config.auth.mode === 'enforced'
+        ? await this.assertCardWorkspaceScope(idOrKey, auth, tx)
+        : await resolveCardId(tx, idOrKey);
       await assertResourcesWorkspace(tx, auth, [['card', cardId], ['agent', agentId]]);
       await assertResourcesShareWorkspace(tx, [['card', cardId], ['agent', agentId]]);
+      await assertAgentSelectorScope(tx, agentId, auth, 'card.assign_others');
       const result = await tx.execute(
         `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
         [cardId, agentId]
@@ -854,12 +968,18 @@ export class CardService {
   }
 
   async unassign(idOrKey: string, agentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    const cardId = await resolveCardId(this.db, idOrKey);
-    await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['agent', agentId]]);
-    await this.db.execute(
-      `DELETE FROM card_assignee WHERE card_id = ? AND principal_id = ?`,
-      [cardId, agentId]
-    );
+    await this.db.transaction(async tx => {
+      const cardId = config.auth.mode === 'enforced'
+        ? await this.assertCardWorkspaceScope(idOrKey, auth, tx)
+        : await resolveCardId(tx, idOrKey);
+      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['agent', agentId]]);
+      await assertResourcesShareWorkspace(tx, [['card', cardId], ['agent', agentId]]);
+      await assertAgentSelectorScope(tx, agentId, auth, 'card.assign_others');
+      await tx.execute(
+        `DELETE FROM card_assignee WHERE card_id = ? AND principal_id = ?`,
+        [cardId, agentId]
+      );
+    });
   }
 
   /**
@@ -874,8 +994,10 @@ export class CardService {
     actorId?: string,
     options: CardOperationOptions = {},
   ): Promise<CardDetails | ClaimRefusal> {
-    const canonicalCardId = await resolveCardId(this.db, cardId);
     const auth = options.auth || OPEN_AUTH_CONTEXT;
+    const canonicalCardId = config.auth.mode === 'enforced'
+      ? await this.assertCardWorkspaceScope(cardId, options.auth)
+      : await resolveCardId(this.db, cardId);
     await assertResourcesWorkspace(this.db, auth, [['card', canonicalCardId], ['agent', agentId]]);
     await assertResourcesShareWorkspace(this.db, [['card', canonicalCardId], ['agent', agentId]]);
     let overrideBlockers: UnresolvedBlocker[] = [];
@@ -896,6 +1018,8 @@ export class CardService {
       const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [canonicalCardId]);
       const card = rows[0];
       if (!card) throw new NotFoundError(`Card with ID ${canonicalCardId} not found`);
+      await this.assertCardWorkspaceScope(canonicalCardId, options.auth, tx);
+      await assertAgentSelectorScope(tx, agentId, options.auth, 'card.assign_others');
 
       const now = new Date();
       const nowIso = now.toISOString();

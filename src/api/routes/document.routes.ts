@@ -2,7 +2,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { DocumentService } from '../../services/document.service.js';
 import { AuditService } from '../../services/audit.service.js';
-import { AuthContext } from '../../shared/auth-context.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { validateRequest } from '../middleware/validate.js';
 import { documentCreateSchema, documentListQuerySchema, documentQuerySchema, documentStatusSchema, documentUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
@@ -22,7 +22,7 @@ function getActorId(req: Request, openModeClaim?: unknown): string | undefined {
   return undefined;
 }
 
-export function createDocumentRouter(db: DatabaseAdapter, documentService: DocumentService, auditService: AuditService): Router {
+export function createDocumentRouter(_db: DatabaseAdapter, documentService: DocumentService, _auditService: AuditService): Router {
   const router = Router();
 
   router.get('/projects/:projectId/documents', ...validateRequest({ query: documentListQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
@@ -81,21 +81,12 @@ export function createDocumentRouter(db: DatabaseAdapter, documentService: Docum
 
   router.patch('/documents/:id/status', ...validateRequest({ body: documentStatusSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      let doc: Awaited<ReturnType<DocumentService['setStatus']>> | undefined;
-      await db.transaction(async tx => {
-        doc = await documentService.setStatus(req.params.id, req.body.status, getActorId(req), tx, req.authContext);
-        if (req.body.status === 'approved') {
-          const auth: AuthContext | undefined = (req as any).authContext;
-          await auditService.logAs(auth, {
-            action: 'document.approve',
-            target_type: 'document',
-            target_id: doc.id,
-            payload: { title: doc.title, project_id: doc.project_id },
-            ip: req.ip,
-          }, tx);
-        }
-      });
-      if (!doc) throw new Error('Document status update did not return a document');
+      const auth: AuthContext = (req as any).authContext || OPEN_AUTH_CONTEXT;
+      const doc = await documentService.setStatus(req.params.id, {
+        status: req.body.status,
+        expected_version: req.body.expected_version,
+        ip: req.ip,
+      }, auth);
       res.json(doc);
     } catch (err) {
       next(err);

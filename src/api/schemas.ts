@@ -195,7 +195,10 @@ export const documentUpdateSchema = nonEmptyUpdate(strictObject({
   change_summary: textSchema(MAX_QUERY, 0).optional(),
   author_id: optionalId,
 }));
-export const documentStatusSchema = strictObject({ status: documentStatus });
+export const documentStatusSchema = strictObject({
+  status: z.enum(['in_review', 'approved']),
+  expected_version: z.number().int().positive(),
+});
 
 // Agents, roles, members, tokens, and invitations.
 const capabilities = z.union([

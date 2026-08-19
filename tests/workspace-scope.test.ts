@@ -44,7 +44,7 @@ describe('MUS-66 workspace isolation', () => {
     principal: { id: principalId, kind: 'user' },
     workspace_id: workspaceId,
     is_workspace_member: true,
-    permissions: ['workspace.read', 'workspace.admin', 'project.create', 'card.create', 'card.move', 'card.link', 'doc.create', 'kb.create', 'kb.update', 'role.manage'],
+    permissions: ['workspace.read', 'workspace.admin', 'project.create', 'card.create', 'card.move', 'card.assign_others', 'card.link', 'doc.create', 'kb.create', 'kb.update', 'role.manage'],
     is_operator_override: false,
     role_name: 'owner',
   });
