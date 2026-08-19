@@ -1,16 +1,23 @@
-import React, { Component, createContext, Suspense, useEffect, useRef } from 'react';
-
-export interface LazyDialogFocusHandoff {
-  opener: HTMLElement | null;
-  claimed: boolean;
-}
-
-export const LazyDialogFocusHandoffContext = createContext<LazyDialogFocusHandoff | null>(null);
+import React, { Component, Suspense, useContext, useEffect, useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  LazyDialogLayerContext,
+  activateDialogLayer,
+  attachDialogLayerSurface,
+  createDialogLayerToken,
+  deactivateDialogLayer,
+  detachDialogLayerSurface,
+  isTopDialogLayer,
+  updateDialogLayerCancel,
+  type DialogLayerToken,
+} from './DialogLayer.js';
 
 interface LazyBoundaryProps {
   label: string;
   resetKey: string;
   variant?: 'view' | 'dialog';
+  onCancel?: () => void;
+  cancelOnShortcutToggle?: boolean;
   children: React.ReactNode;
 }
 
@@ -33,64 +40,116 @@ class LazyLoadErrorBoundary extends Component<LazyBoundaryProps, LazyBoundarySta
 
   render() {
     if (this.state.failed) {
-      const alert = (
-        <div
-          role="alert"
-          tabIndex={-1}
-          autoFocus={this.props.variant === 'dialog'}
-          className={`${this.props.variant === 'dialog' ? 'muster-dialog' : 'muster-panel m-auto'} max-w-lg p-6 text-center space-y-3`}
-        >
-          <h1 className="text-base font-bold muster-text-primary">{this.props.label} could not be loaded</h1>
-          <p className="text-sm muster-text-secondary">
-            The application may have been updated or the connection may have been interrupted.
-          </p>
-          <button
-            type="button"
-            className="muster-btn muster-btn-primary"
-            onClick={() => window.location.reload()}
-          >
-            Reload {this.props.label}
-          </button>
+      if (this.props.variant === 'dialog') {
+        return <LazyDialogSurface label={this.props.label} failed />;
+      }
+      return (
+        <div role="alert" tabIndex={-1} className="muster-panel m-auto max-w-lg p-6 text-center space-y-3">
+          <LazyLoadFailure label={this.props.label} />
         </div>
       );
-      return this.props.variant === 'dialog' ? <div className="muster-scrim">{alert}</div> : alert;
     }
 
     return this.props.children;
   }
 }
 
-export const LazyBoundary: React.FC<LazyBoundaryProps> = ({ label, resetKey, variant = 'view', children }) => {
-  const focusHandoffRef = useRef<LazyDialogFocusHandoff>({ opener: null, claimed: false });
-  if (
-    variant === 'dialog'
-    && focusHandoffRef.current.opener === null
-    && typeof document !== 'undefined'
-    && document.activeElement instanceof HTMLElement
-  ) {
-    // Capture before Suspense mounts and focuses its loading fallback. The
-    // first AccessibleDialog claims this opener; nested dialogs then capture
-    // their own trigger normally.
-    focusHandoffRef.current.opener = document.activeElement;
+const LazyLoadFailure: React.FC<{ label: string }> = ({ label }) => (
+  <>
+    <h1 className="text-base font-bold muster-text-primary">{label} could not be loaded</h1>
+    <p className="text-sm muster-text-secondary">
+      The application may have been updated or the connection may have been interrupted.
+    </p>
+    <button
+      type="button"
+      className="muster-btn muster-btn-primary"
+      onClick={() => window.location.reload()}
+    >
+      Reload {label}
+    </button>
+  </>
+);
+
+const LazyDialogSurface: React.FC<{ label: string; failed?: boolean }> = ({ label, failed = false }) => {
+  const handoff = useContext(LazyDialogLayerContext);
+  const scrimRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const scrim = scrimRef.current;
+    if (!handoff || !scrim) return;
+    attachDialogLayerSurface(handoff.token, scrim);
+    return () => detachDialogLayerSurface(handoff.token, scrim);
+  }, [handoff]);
+
+  if (!handoff) return null;
+  return createPortal(
+    <div
+      ref={scrimRef}
+      className="muster-scrim"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && isTopDialogLayer(handoff.token)) {
+          handoff.token.onCancel();
+        }
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={failed ? 'Lazy dialog load error' : 'Loading lazy dialog'}
+        tabIndex={-1}
+        className="muster-dialog max-w-lg p-6 text-center space-y-3"
+      >
+        {failed ? (
+          <div role="alert">
+            <LazyLoadFailure label={label} />
+          </div>
+        ) : (
+          <div role="status" aria-live="polite" aria-busy="true" className="text-sm muster-text-secondary">
+            Loading {label}…
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+};
+
+export const LazyBoundary: React.FC<LazyBoundaryProps> = ({
+  label,
+  resetKey,
+  variant = 'view',
+  onCancel,
+  cancelOnShortcutToggle = false,
+  children,
+}) => {
+  const dialogTokenRef = useRef<DialogLayerToken | null>(null);
+  const dialogHandoffRef = useRef<{ token: DialogLayerToken } | null>(null);
+  if (variant === 'dialog' && dialogTokenRef.current === null) {
+    const opener = typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    dialogTokenRef.current = createDialogLayerToken(
+      opener,
+      onCancel ?? (() => undefined),
+      cancelOnShortcutToggle,
+    );
+    dialogHandoffRef.current = { token: dialogTokenRef.current };
   }
+  const dialogToken = dialogTokenRef.current;
+  if (dialogToken && onCancel) updateDialogLayerCancel(dialogToken, onCancel);
+
+  useLayoutEffect(() => {
+    if (variant !== 'dialog' || !dialogToken) return;
+    activateDialogLayer(dialogToken);
+    return () => deactivateDialogLayer(dialogToken);
+  }, [dialogToken, variant]);
 
   return (
-    <LazyLoadErrorBoundary label={label} resetKey={resetKey} variant={variant}>
-      <LazyDialogFocusHandoffContext.Provider value={variant === 'dialog' ? focusHandoffRef.current : null}>
+    <LazyDialogLayerContext.Provider value={variant === 'dialog' ? dialogHandoffRef.current : null}>
+      <LazyLoadErrorBoundary label={label} resetKey={resetKey} variant={variant} onCancel={onCancel}>
         <Suspense
           fallback={variant === 'dialog' ? (
-            <div className="muster-scrim">
-              <div
-                role="status"
-                tabIndex={-1}
-                autoFocus
-                aria-live="polite"
-                aria-busy="true"
-                className="muster-dialog max-w-lg p-6 text-center text-sm muster-text-secondary"
-              >
-                Loading {label}…
-              </div>
-            </div>
+            <LazyDialogSurface label={label} />
           ) : (
             <div
               role="status"
@@ -104,8 +163,8 @@ export const LazyBoundary: React.FC<LazyBoundaryProps> = ({ label, resetKey, var
         >
           {children}
         </Suspense>
-      </LazyDialogFocusHandoffContext.Provider>
-    </LazyLoadErrorBoundary>
+      </LazyLoadErrorBoundary>
+    </LazyDialogLayerContext.Provider>
   );
 };
 

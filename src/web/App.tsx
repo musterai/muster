@@ -746,7 +746,7 @@ export const App: React.FC = () => {
 
       {/* Modals */}
       {showNewProjectModal && (
-        <LazyBoundary label="New Project dialog" resetKey="new-project" variant="dialog">
+        <LazyBoundary label="New Project dialog" resetKey="new-project" variant="dialog" onCancel={() => setShowNewProjectModal(false)}>
           <NewProjectModal
             onClose={() => setShowNewProjectModal(false)}
             onSuccess={(newId) => {
@@ -758,7 +758,7 @@ export const App: React.FC = () => {
       )}
 
       {showEditProjectModal && selectedProjectId && projects.some((p) => p.id === selectedProjectId) && (
-        <LazyBoundary label="Edit Project dialog" resetKey={`edit-project:${selectedProjectId}`} variant="dialog">
+        <LazyBoundary label="Edit Project dialog" resetKey={`edit-project:${selectedProjectId}`} variant="dialog" onCancel={() => setShowEditProjectModal(false)}>
           <EditProjectModal
             project={projects.find((p) => p.id === selectedProjectId)!}
             onClose={() => setShowEditProjectModal(false)}
@@ -772,7 +772,7 @@ export const App: React.FC = () => {
       )}
 
       {showNewBoardModal && selectedProjectId && (
-        <LazyBoundary label="New Board dialog" resetKey={`new-board:${selectedProjectId}`} variant="dialog">
+        <LazyBoundary label="New Board dialog" resetKey={`new-board:${selectedProjectId}`} variant="dialog" onCancel={() => setShowNewBoardModal(false)}>
           <NewBoardModal
             projectId={selectedProjectId}
             onClose={() => setShowNewBoardModal(false)}
@@ -782,7 +782,7 @@ export const App: React.FC = () => {
       )}
 
       {showNewColumnModal && board && (
-        <LazyBoundary label="New Column dialog" resetKey={`new-column:${board.id}`} variant="dialog">
+        <LazyBoundary label="New Column dialog" resetKey={`new-column:${board.id}`} variant="dialog" onCancel={() => setShowNewColumnModal(false)}>
           <NewColumnModal
             boardId={board.id}
             onClose={() => setShowNewColumnModal(false)}
@@ -792,7 +792,7 @@ export const App: React.FC = () => {
       )}
 
       {showRegisterAgentModal && (
-        <LazyBoundary label="Register Agent dialog" resetKey="register-agent" variant="dialog">
+        <LazyBoundary label="Register Agent dialog" resetKey="register-agent" variant="dialog" onCancel={() => setShowRegisterAgentModal(false)}>
           <NewAgentModal
             onClose={() => setShowRegisterAgentModal(false)}
             onSuccess={loadProjectData}
@@ -801,7 +801,7 @@ export const App: React.FC = () => {
       )}
 
       {showNewDocModal && selectedProjectId && (
-        <LazyBoundary label="New Document dialog" resetKey={`new-document:${selectedProjectId}`} variant="dialog">
+        <LazyBoundary label="New Document dialog" resetKey={`new-document:${selectedProjectId}`} variant="dialog" onCancel={() => setShowNewDocModal(false)}>
           <NewDocModal
             projectId={selectedProjectId}
             onClose={() => setShowNewDocModal(false)}
@@ -816,7 +816,7 @@ export const App: React.FC = () => {
       )}
 
       {showUserAccountModal && (
-        <LazyBoundary label="User Account dialog" resetKey={`account:${userAccountInitialTab}`} variant="dialog">
+        <LazyBoundary label="User Account dialog" resetKey={`account:${userAccountInitialTab}`} variant="dialog" onCancel={() => setShowUserAccountModal(false)}>
           <UserAccountModal
             currentUser={currentUser}
             workspaceId={workspaceId}
@@ -829,7 +829,13 @@ export const App: React.FC = () => {
       )}
 
       {showShortcutsHelpModal && (
-        <LazyBoundary label="Keyboard Shortcuts dialog" resetKey="shortcuts" variant="dialog">
+        <LazyBoundary
+          label="Keyboard Shortcuts dialog"
+          resetKey="shortcuts"
+          variant="dialog"
+          onCancel={() => setShowShortcutsHelpModal(false)}
+          cancelOnShortcutToggle
+        >
           <ShortcutsHelpModal onClose={() => setShowShortcutsHelpModal(false)} />
         </LazyBoundary>
       )}

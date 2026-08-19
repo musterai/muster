@@ -187,6 +187,35 @@ async function assertAccessibleDialog(page: any, accessibleName: string | RegExp
   return dialog;
 }
 
+async function assertPendingDialogIsolation(page: any, label: string) {
+  const status = page.getByRole('status').filter({ hasText: `Loading ${label}` });
+  await status.waitFor();
+  const state = await status.evaluate((element: HTMLElement) => {
+    const root = document.getElementById('root');
+    const scrim = element.closest<HTMLElement>('.muster-scrim');
+    const dialog = element.closest<HTMLElement>('[role="dialog"]');
+    return {
+      rootInert: Boolean(root?.inert),
+      rootHidden: root?.getAttribute('aria-hidden'),
+      bodyOverflow: document.body.style.overflow,
+      ariaModal: dialog?.getAttribute('aria-modal'),
+      topInteractive: Boolean(scrim && !scrim.inert && scrim.getAttribute('aria-hidden') !== 'true'),
+      focusInside: Boolean(scrim?.contains(document.activeElement)),
+    };
+  });
+  if (
+    !state.rootInert
+    || state.rootHidden !== 'true'
+    || state.bodyOverflow !== 'hidden'
+    || state.ariaModal !== 'true'
+    || !state.topInteractive
+    || !state.focusInside
+  ) {
+    throw new Error(`Pending ${label} did not own the modal layer: ${JSON.stringify(state)}`);
+  }
+  return status;
+}
+
 async function assertNestedDialogIsolation(page: any, topDialog: any) {
   const state = await topDialog.evaluate((element: HTMLElement) => {
     const scrims = Array.from(document.querySelectorAll<HTMLElement>('.muster-scrim'));
@@ -869,8 +898,179 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
       .map((card) => card.getAttribute('data-rfd-draggable-id')));
     if (cancelOrder.join(',') !== afterOrder.join(',')) throw new Error('Keyboard drag cancel mutated card order');
 
-    const shortcutTrigger = page.getByRole('button', { name: 'Keyboard shortcuts' });
     const shortcutsChunkPattern = '**/assets/ShortcutsHelpModal-*.js';
+    const accountChunkPattern = '**/assets/UserAccountModal-*.js';
+
+    // A lazy dialog owns a real modal layer before its chunk resolves. Toggling
+    // that pending invocation off must release isolation and restore the exact
+    // trigger; a disconnected trigger must be ignored safely on a later abort.
+    const cancelContext = await browser.newContext();
+    const cancelPage = await cancelContext.newPage();
+    let releaseCancelledChunk!: () => void;
+    const cancelledChunkGate = new Promise<void>((resolve) => { releaseCancelledChunk = resolve; });
+    await cancelPage.route(shortcutsChunkPattern, async (route) => {
+      await cancelledChunkGate;
+      await route.continue();
+    });
+    await cancelPage.goto(appUrl, { waitUntil: 'domcontentloaded' });
+    const cancelTrigger = cancelPage.getByRole('button', { name: 'Keyboard shortcuts' });
+    await cancelTrigger.focus();
+    await cancelTrigger.click();
+    let cancelledStatus = await assertPendingDialogIsolation(cancelPage, 'Keyboard Shortcuts dialog');
+    await cancelPage.keyboard.press('Shift+/');
+    await cancelledStatus.waitFor({ state: 'detached' });
+    const cancelledState = await cancelPage.evaluate((trigger: HTMLElement) => {
+      const root = document.getElementById('root');
+      return {
+        exactFocus: document.activeElement === trigger,
+        activeTag: document.activeElement?.tagName,
+        activeLabel: document.activeElement instanceof HTMLElement
+          ? document.activeElement.getAttribute('aria-label') || document.activeElement.getAttribute('placeholder') || document.activeElement.textContent?.trim().slice(0, 80)
+          : null,
+        triggerConnected: trigger.isConnected,
+        rootInert: Boolean(root?.inert),
+        rootHidden: root?.getAttribute('aria-hidden'),
+        bodyOverflow: document.body.style.overflow,
+      };
+    }, await cancelTrigger.elementHandle());
+    if (
+      !cancelledState.exactFocus
+      || cancelledState.rootInert
+      || cancelledState.rootHidden === 'true'
+      || cancelledState.bodyOverflow === 'hidden'
+    ) {
+      throw new Error(`Pending lazy cancel did not restore its trigger/root state: ${JSON.stringify(cancelledState)}`);
+    }
+    const removedTriggerHandle = await cancelTrigger.elementHandle();
+    if (!removedTriggerHandle) throw new Error('Unable to retain the shortcuts trigger for removal probe');
+    await cancelTrigger.click();
+    cancelledStatus = await assertPendingDialogIsolation(cancelPage, 'Keyboard Shortcuts dialog');
+    await removedTriggerHandle.evaluate((element: HTMLElement) => element.remove());
+    await cancelPage.keyboard.press('Escape');
+    await cancelledStatus.waitFor({ state: 'detached' });
+    const removedTriggerState = await cancelPage.evaluate(() => {
+      const root = document.getElementById('root');
+      return {
+        activeConnected: document.activeElement instanceof HTMLElement && document.activeElement.isConnected,
+        rootInert: Boolean(root?.inert),
+        rootHidden: root?.getAttribute('aria-hidden'),
+        bodyOverflow: document.body.style.overflow,
+      };
+    });
+    if (
+      !removedTriggerState.activeConnected
+      || removedTriggerState.rootInert
+      || removedTriggerState.rootHidden === 'true'
+      || removedTriggerState.bodyOverflow === 'hidden'
+    ) {
+      throw new Error(`Removed lazy-dialog trigger left stale focus/isolation: ${JSON.stringify(removedTriggerState)}`);
+    }
+    releaseCancelledChunk();
+    await cancelPage.unroute(shortcutsChunkPattern, { behavior: 'wait' });
+    await cancelContext.close();
+
+    // Invocation order, not chunk completion order, defines modal ownership.
+    // Account is invoked first, Shortcuts second, then their chunks resolve in
+    // reverse. Shortcuts must remain top and close first.
+    const concurrencyContext = await browser.newContext();
+    const concurrencyPage = await concurrencyContext.newPage();
+    let releaseAccountChunk!: () => void;
+    let releaseShortcutChunk!: () => void;
+    const accountChunkGate = new Promise<void>((resolve) => { releaseAccountChunk = resolve; });
+    const shortcutChunkGate = new Promise<void>((resolve) => { releaseShortcutChunk = resolve; });
+    await concurrencyPage.route(accountChunkPattern, async (route) => {
+      await accountChunkGate;
+      await route.continue();
+    });
+    await concurrencyPage.route(shortcutsChunkPattern, async (route) => {
+      await shortcutChunkGate;
+      await route.continue();
+    });
+    await concurrencyPage.goto(appUrl, { waitUntil: 'domcontentloaded' });
+    const concurrencyAccountTrigger = concurrencyPage.locator('header button[title*="Account"]');
+    await concurrencyAccountTrigger.click();
+    await assertPendingDialogIsolation(concurrencyPage, 'User Account dialog');
+    await concurrencyPage.keyboard.press('Shift+/');
+    await assertPendingDialogIsolation(concurrencyPage, 'Keyboard Shortcuts dialog');
+    releaseShortcutChunk();
+    const concurrentShortcuts = await assertAccessibleDialog(concurrencyPage, 'Keyboard Shortcuts');
+    releaseAccountChunk();
+    const concurrentAccount = concurrencyPage.locator('[role="dialog"]', {
+      has: concurrencyPage.locator('#account-dialog-title'),
+    });
+    await concurrentAccount.waitFor({ state: 'attached' });
+    const inverseResolutionState = await concurrencyPage.evaluate(() => {
+      const account = document.getElementById('account-dialog-title')?.closest<HTMLElement>('[role="dialog"]');
+      const shortcuts = document.getElementById('shortcuts-dialog-title')?.closest<HTMLElement>('[role="dialog"]');
+      const accountScrim = account?.closest<HTMLElement>('.muster-scrim');
+      const shortcutsScrim = shortcuts?.closest<HTMLElement>('.muster-scrim');
+      return {
+        accountHidden: accountScrim?.getAttribute('aria-hidden'),
+        accountInert: Boolean(accountScrim?.inert),
+        shortcutsHidden: shortcutsScrim?.getAttribute('aria-hidden'),
+        shortcutsInert: Boolean(shortcutsScrim?.inert),
+        focusInsideShortcuts: Boolean(shortcuts?.contains(document.activeElement)),
+      };
+    });
+    if (
+      inverseResolutionState.accountHidden !== 'true'
+      || !inverseResolutionState.accountInert
+      || inverseResolutionState.shortcutsHidden === 'true'
+      || inverseResolutionState.shortcutsInert
+      || !inverseResolutionState.focusInsideShortcuts
+    ) {
+      throw new Error(`Inverse lazy resolution reordered the modal stack: ${JSON.stringify(inverseResolutionState)}`);
+    }
+    await concurrencyPage.keyboard.press('Escape');
+    await concurrentShortcuts.waitFor({ state: 'detached' });
+    if (!await concurrentAccount.isVisible() || !await concurrentAccount.evaluate((dialog: HTMLElement) => dialog.contains(document.activeElement))) {
+      throw new Error('First Escape after inverse resolution did not reveal/focus the older Account dialog');
+    }
+    await concurrencyPage.keyboard.press('Escape');
+    await concurrentAccount.waitFor({ state: 'detached' });
+    if (!await concurrencyAccountTrigger.evaluate((trigger: HTMLElement) => document.activeElement === trigger)) {
+      throw new Error('Inverse-resolution stack did not restore the original Account trigger');
+    }
+    await concurrencyContext.close();
+
+    // A newer pending layer above an already-resolved dialog must consume
+    // Escape itself and reveal the underlying dialog without closing it.
+    const pendingOverResolvedContext = await browser.newContext();
+    const pendingOverResolvedPage = await pendingOverResolvedContext.newPage();
+    let releaseOverlayShortcut!: () => void;
+    const overlayShortcutGate = new Promise<void>((resolve) => { releaseOverlayShortcut = resolve; });
+    await pendingOverResolvedPage.route(shortcutsChunkPattern, async (route) => {
+      await overlayShortcutGate;
+      await route.continue();
+    });
+    await pendingOverResolvedPage.goto(appUrl, { waitUntil: 'domcontentloaded' });
+    await pendingOverResolvedPage.locator('header button[title*="Account"]').click();
+    const resolvedAccount = await assertAccessibleDialog(pendingOverResolvedPage, /Account|Operator/);
+    await pendingOverResolvedPage.keyboard.press('Shift+/');
+    const overlayPendingStatus = await assertPendingDialogIsolation(pendingOverResolvedPage, 'Keyboard Shortcuts dialog');
+    await pendingOverResolvedPage.keyboard.press('Escape');
+    await overlayPendingStatus.waitFor({ state: 'detached' });
+    if (!await resolvedAccount.isVisible() || !await resolvedAccount.evaluate((dialog: HTMLElement) => dialog.contains(document.activeElement))) {
+      throw new Error('Pending dialog Escape leaked through to its resolved underlying dialog');
+    }
+    releaseOverlayShortcut();
+    await pendingOverResolvedPage.unroute(shortcutsChunkPattern, { behavior: 'wait' });
+    await pendingOverResolvedPage.keyboard.press('Escape');
+    await resolvedAccount.waitFor({ state: 'detached' });
+    const overlayCleanupState = await pendingOverResolvedPage.evaluate(() => {
+      const root = document.getElementById('root');
+      return {
+        rootInert: Boolean(root?.inert),
+        rootHidden: root?.getAttribute('aria-hidden'),
+        bodyOverflow: document.body.style.overflow,
+      };
+    });
+    if (overlayCleanupState.rootInert || overlayCleanupState.rootHidden === 'true' || overlayCleanupState.bodyOverflow === 'hidden') {
+      throw new Error(`Pending-over-resolved cleanup left isolation behind: ${JSON.stringify(overlayCleanupState)}`);
+    }
+    await pendingOverResolvedContext.close();
+
+    const shortcutTrigger = page.getByRole('button', { name: 'Keyboard shortcuts' });
     await page.route(shortcutsChunkPattern, async (route) => {
       await sleep(400);
       await route.continue();
