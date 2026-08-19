@@ -104,6 +104,21 @@ describe('resolved architecture and construction inventory', () => {
     expect(kinds(root)).toContain('api-to-mcp');
   });
 
+  it.each([
+    ['identifier alias', 'const load = require; load("../mcp/server.js");'],
+    ['property alias', 'const loaders = { load: require }; loaders.load("../mcp/server.js");'],
+  ])('resolves an aliased require through %s', (_name, source) => {
+    const root = fixture({ 'src/api/probe.ts': source });
+    expect(kinds(root)).toContain('api-to-mcp');
+  });
+
+  it('fails closed when an aliased require selector is not literal', () => {
+    const root = fixture({
+      'src/api/probe.ts': 'const load = require; const target = "../mcp/server.js"; load(target);',
+    });
+    expect(kinds(root)).toContain('unknown-dependency');
+  });
+
   it('resolves constructor aliases and rejects service or policy construction outside the root', () => {
     const root = fixture({
       'src/services/audit.service.ts': 'export class AuditService {}',
@@ -119,6 +134,93 @@ describe('resolved architecture and construction inventory', () => {
       line: 2,
     });
     expect(kinds(root)).toContain('construction-outside-root');
+  });
+
+  it.each([
+    [
+      'namespace alias',
+      'const Runtime = Reflect; Runtime.construct(LocalAudit, []);',
+    ],
+    [
+      'function alias',
+      'const construct = Reflect.construct; construct(LocalAudit, []);',
+    ],
+  ])('rejects Reflect.construct through a %s', (_name, construction) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService as LocalAudit } from "../services/audit.service.js";',
+        construction,
+      ].join('\n'),
+    });
+    const inventory = inspectArchitecture({ projectRoot: root });
+    expect(inventory.constructions.map(site => site.name)).toContain('AuditService');
+    expect(kinds(root)).toContain('construction-outside-root');
+  });
+
+  it('fails closed when Reflect.construct receives an unknown target', () => {
+    const root = fixture({
+      'src/api/probe.ts': 'declare const target: any; Reflect.construct(target, []);',
+    });
+    expect(kinds(root)).toContain('unknown-construction');
+  });
+
+  it.each([
+    [
+      'generic constructor parameter',
+      [
+        'const instantiate = <T>(Constructor: new () => T): T => new Constructor();',
+        'instantiate(LocalAudit);',
+      ].join('\n'),
+    ],
+    [
+      'namespace factory alias',
+      [
+        'const factories = { instantiate: <T>(Constructor: new () => T): T => Reflect.construct(Constructor, []) };',
+        'factories.instantiate(LocalAudit);',
+      ].join('\n'),
+    ],
+    [
+      'typed return helper',
+      [
+        'function provideAuditService(): AuditService { throw new Error("probe"); }',
+        'provideAuditService();',
+      ].join('\n'),
+    ],
+  ])('rejects an unowned dependency factory through %s', (_name, factory) => {
+    const root = fixture({
+      'src/services/audit.service.ts': 'export class AuditService {}',
+      'src/api/probe.ts': [
+        'import { AuditService as LocalAudit } from "../services/audit.service.js";',
+        'type AuditService = LocalAudit;',
+        factory,
+      ].join('\n'),
+    });
+    expect(kinds(root)).toContain('construction-outside-root');
+  });
+
+  it('allows a root-owned and explicitly transaction-scoped dependency factory', () => {
+    const root = fixture({
+      'src/services/token.service.ts': 'export class TokenService {}',
+      'src/services/transaction-service.factory.ts': [
+        'import type { TokenService } from "./token.service.js";',
+        'export interface TransactionServiceProviders { createToken(): TokenService; }',
+      ].join('\n'),
+      'src/services/consumer.ts': [
+        'import type { TransactionServiceProviders } from "./transaction-service.factory.js";',
+        'declare const providers: TransactionServiceProviders;',
+        'providers.createToken();',
+      ].join('\n'),
+      'src/application/composition.ts': [
+        'import { TokenService } from "../services/token.service.js";',
+        'export function createTokenService(): TokenService { return new TokenService(); }',
+      ].join('\n'),
+      'src/api/probe.ts': [
+        'import { createTokenService } from "../application/composition.js";',
+        'void createTokenService();',
+      ].join('\n'),
+    });
+    expect(kinds(root)).not.toContain('construction-outside-root');
   });
 
   it.each([

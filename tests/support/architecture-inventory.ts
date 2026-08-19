@@ -5,6 +5,7 @@ import ts from 'typescript';
 export type ArchitectureViolationKind =
   | 'parse-error'
   | 'unknown-dependency'
+  | 'unknown-construction'
   | 'unresolved-internal-dependency'
   | 'api-to-mcp'
   | 'composition-to-transport'
@@ -60,8 +61,77 @@ function moduleText(node: ts.Expression | ts.ModuleReference | ts.TypeNode | und
   return undefined;
 }
 
+function unwrappedExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isNonNullExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function resolvedSymbol(node: ts.Node, checker: ts.TypeChecker): ts.Symbol | undefined {
+  let symbol = checker.getSymbolAtLocation(node);
+  if (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    symbol = checker.getAliasedSymbol(symbol);
+  }
+  return symbol;
+}
+
+function symbolInitializers(symbol: ts.Symbol | undefined): ts.Expression[] {
+  if (!symbol) return [];
+  return (symbol.declarations ?? []).flatMap(declaration => {
+    if (ts.isVariableDeclaration(declaration) && declaration.initializer) return [declaration.initializer];
+    if (ts.isPropertyAssignment(declaration)) return [declaration.initializer];
+    if (ts.isBindingElement(declaration) && declaration.initializer) return [declaration.initializer];
+    return [];
+  });
+}
+
+function isAliasedIdentifier(
+  expression: ts.Expression,
+  expected: 'require' | 'Reflect',
+  checker: ts.TypeChecker,
+  seen = new Set<ts.Symbol>(),
+): boolean {
+  const current = unwrappedExpression(expression);
+  if (ts.isIdentifier(current) && current.text === expected) return true;
+  const symbol = resolvedSymbol(current, checker);
+  if (!symbol || seen.has(symbol)) return false;
+  seen.add(symbol);
+  return symbolInitializers(symbol).some(initializer => (
+    isAliasedIdentifier(initializer, expected, checker, seen)
+  ));
+}
+
+function isRequireLoader(expression: ts.Expression, checker: ts.TypeChecker): boolean {
+  return isAliasedIdentifier(expression, 'require', checker);
+}
+
+function isReflectConstruct(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+  seen = new Set<ts.Symbol>(),
+): boolean {
+  const current = unwrappedExpression(expression);
+  if (
+    ts.isPropertyAccessExpression(current)
+    && current.name.text === 'construct'
+    && isAliasedIdentifier(current.expression, 'Reflect', checker)
+  ) return true;
+  const symbol = resolvedSymbol(current, checker);
+  if (!symbol || seen.has(symbol)) return false;
+  seen.add(symbol);
+  return symbolInitializers(symbol).some(initializer => isReflectConstruct(initializer, checker, seen));
+}
+
 function importedSelectors(
   sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
   violations: ArchitectureViolation[],
   displayFile: string,
 ): string[] {
@@ -94,8 +164,7 @@ function importedSelectors(
       recordCall(node, 'dynamic import');
     } else if (
       ts.isCallExpression(node)
-      && ts.isIdentifier(node.expression)
-      && node.expression.text === 'require'
+      && isRequireLoader(node.expression, checker)
     ) {
       recordCall(node, 'require');
     }
@@ -107,18 +176,58 @@ function importedSelectors(
 }
 
 function constructionName(
-  node: ts.NewExpression,
+  expression: ts.Expression,
   checker: ts.TypeChecker,
 ): string {
-  let symbol = checker.getSymbolAtLocation(node.expression);
-  if (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
-    symbol = checker.getAliasedSymbol(symbol);
-  }
+  const current = unwrappedExpression(expression);
+  const symbol = resolvedSymbol(current, checker);
   const symbolName = symbol?.getName();
   if (symbolName && symbolName !== '__type' && symbolName !== '__class') return symbolName;
-  if (ts.isIdentifier(node.expression)) return node.expression.text;
-  if (ts.isPropertyAccessExpression(node.expression)) return node.expression.name.text;
-  return node.expression.getText();
+  if (ts.isIdentifier(current)) return current.text;
+  if (ts.isPropertyAccessExpression(current)) return current.name.text;
+  return current.getText();
+}
+
+const DEPENDENCY_NAME = /(?:Service|Policy|Operations|Queries|Factory)$/;
+const FACTORY_HELPER_NAME = /^(?:create|make|build|provide|construct|instantiate|factory)/i;
+
+function dependencyTypeName(type: ts.Type, checker: ts.TypeChecker): string | undefined {
+  const symbol = type.aliasSymbol ?? type.getSymbol();
+  const name = symbol?.getName();
+  if (name && DEPENDENCY_NAME.test(name)) return name;
+  if (type.isUnionOrIntersection()) {
+    return type.types.map(candidate => dependencyTypeName(candidate, checker)).find(Boolean);
+  }
+  const text = checker.typeToString(type).replace(/\s*\|\s*(?:undefined|null)/g, '');
+  return DEPENDENCY_NAME.test(text) ? text : undefined;
+}
+
+function parameterConstructionIndexes(
+  declaration: ts.SignatureDeclaration,
+  checker: ts.TypeChecker,
+): number[] {
+  if (!declaration.body) return [];
+  const parameterIndexes = new Map<ts.Symbol, number>();
+  declaration.parameters.forEach((parameter, index) => {
+    const symbol = resolvedSymbol(parameter.name, checker);
+    if (symbol) parameterIndexes.set(symbol, index);
+  });
+  const indexes = new Set<number>();
+  const visit = (node: ts.Node): void => {
+    let target: ts.Expression | undefined;
+    if (ts.isNewExpression(node)) target = node.expression;
+    else if (ts.isCallExpression(node) && isReflectConstruct(node.expression, checker)) {
+      target = node.arguments[0];
+    }
+    if (target) {
+      const symbol = resolvedSymbol(unwrappedExpression(target), checker);
+      const index = symbol ? parameterIndexes.get(symbol) : undefined;
+      if (index !== undefined) indexes.add(index);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(declaration.body);
+  return [...indexes];
 }
 
 function aliasSelector(selector: string, compilerOptions: ts.CompilerOptions): boolean {
@@ -183,7 +292,7 @@ export function inspectArchitecture({
       });
     }
 
-    for (const selector of importedSelectors(sourceFile, violations, displayFile)) {
+    for (const selector of importedSelectors(sourceFile, checker, violations, displayFile)) {
       const resolution = ts.resolveModuleName(
         selector,
         sourceFile.fileName,
@@ -214,19 +323,84 @@ export function inspectArchitecture({
       if (sourceNames.has(to)) edges.push({ from, to, selector });
     }
 
+    const recordConstruction = (name: string, node: ts.Node): void => {
+      const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+      const site = { file: displayFile, name, line };
+      constructions.push(site);
+      if (from !== allowedCompositionRoot) {
+        violations.push({
+          kind: 'construction-outside-root',
+          file: displayFile,
+          message: `${name} is constructed outside ${compositionRoot} at line ${line}`,
+        });
+      }
+    };
+
     const visitConstructions = (node: ts.Node): void => {
       if (ts.isNewExpression(node)) {
-        const name = constructionName(node, checker);
-        if (/(?:Service|Policy|Operations|Queries|Factory)$/.test(name)) {
-          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-          const site = { file: displayFile, name, line };
-          constructions.push(site);
-          if (from !== allowedCompositionRoot) {
-            violations.push({
-              kind: 'construction-outside-root',
-              file: displayFile,
-              message: `${name} is constructed outside ${compositionRoot} at line ${line}`,
-            });
+        const name = constructionName(node.expression, checker);
+        if (DEPENDENCY_NAME.test(name)) recordConstruction(name, node);
+      } else if (ts.isCallExpression(node) && isReflectConstruct(node.expression, checker)) {
+        const target = node.arguments[0];
+        if (!target) {
+          violations.push({
+            kind: 'unknown-construction',
+            file: displayFile,
+            message: 'Reflect.construct must declare its constructor target',
+          });
+        } else {
+          const name = constructionName(target, checker);
+          if (DEPENDENCY_NAME.test(name)) {
+            recordConstruction(name, node);
+          } else {
+            const type = checker.getTypeAtLocation(target);
+            if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+              violations.push({
+                kind: 'unknown-construction',
+                file: displayFile,
+                message: `Cannot classify Reflect.construct target "${target.getText(sourceFile)}"`,
+              });
+            }
+          }
+        }
+      } else if (ts.isCallExpression(node)) {
+        const signature = checker.getResolvedSignature(node);
+        const declaration = signature?.getDeclaration();
+        if (signature && declaration) {
+          const declarationFile = normalized(declaration.getSourceFile().fileName);
+          const allowedFactoryDeclaration = declarationFile === allowedCompositionRoot
+            || declarationFile === normalized(path.join(sourceRoot, 'services/transaction-service.factory.ts'));
+          const parameterIndexes = parameterConstructionIndexes(declaration, checker);
+          for (const index of parameterIndexes) {
+            const argument = node.arguments[index];
+            if (!argument) {
+              violations.push({
+                kind: 'unknown-construction',
+                file: displayFile,
+                message: `Factory call omits constructor argument ${index + 1}`,
+              });
+              continue;
+            }
+            const name = constructionName(argument, checker);
+            if (DEPENDENCY_NAME.test(name)) recordConstruction(name, node);
+            else {
+              violations.push({
+                kind: 'unknown-construction',
+                file: displayFile,
+                message: `Cannot classify factory constructor argument "${argument.getText(sourceFile)}"`,
+              });
+            }
+          }
+
+          const factoryName = constructionName(node.expression, checker);
+          const returnName = dependencyTypeName(checker.getReturnTypeOfSignature(signature), checker);
+          if (
+            returnName
+            && FACTORY_HELPER_NAME.test(factoryName)
+            && !allowedFactoryDeclaration
+            && parameterIndexes.length === 0
+          ) {
+            recordConstruction(returnName, node);
           }
         }
       }
