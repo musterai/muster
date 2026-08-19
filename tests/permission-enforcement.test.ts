@@ -536,7 +536,8 @@ describe('MUS-22: Permission enforcement', () => {
     }, {});
     const cards = JSON.parse(result.content[0].text);
 
-    expect(cards.map((card: { id: string }) => card.id)).toEqual([second.id]);
+    expect(cards.items.map((card: { id: string }) => card.id)).toEqual([second.id]);
+    expect(cards.page).toMatchObject({ has_more: false, next_cursor: null });
   });
 
   // ================================================================

@@ -1,7 +1,7 @@
 // File: src/services/document.service.ts
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
-import { Document, DocumentVersion, CreateDocument, UpdateDocument } from '../shared/types.js';
+import { Document, DocumentSummary, DocumentVersion, DocumentVersionSummary, CreateDocument, UpdateDocument } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { assertMaxLength, DOCUMENT_CONTENT_MAX_CHARS } from '../shared/content-limits.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
@@ -9,6 +9,7 @@ import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
 import { requirePermission } from '../shared/permission-enforcer.js';
 import { DocumentStateError, ValidationError } from '../shared/errors.js';
 import { AuditService } from './audit.service.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 export type DocumentTransitionStatus = 'in_review' | 'approved';
 
@@ -130,6 +131,34 @@ export class DocumentService {
 
     sql += ' ORDER BY title ASC';
     return this.db.query<Document>(sql, params);
+  }
+
+  async listPage(
+    projectId: string,
+    filters: { status?: string; parent_id?: string | null } = {},
+    options: PageOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<Page<DocumentSummary>> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `documents:${JSON.stringify({ projectId, status: filters.status || null, parent_id: filters.parent_id ?? 'any' })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    let sql = `SELECT id, project_id, parent_id, title, status, author_id, version, created_at, updated_at
+      FROM document WHERE project_id = ?`;
+    const params: unknown[] = [projectId];
+    if (filters.status) { sql += ' AND status = ?'; params.push(filters.status); }
+    if (filters.parent_id !== undefined) {
+      if (filters.parent_id === null) sql += ' AND parent_id IS NULL';
+      else { sql += ' AND parent_id = ?'; params.push(filters.parent_id); }
+    }
+    if (cursor) {
+      sql += ' AND (title > ? OR (title = ? AND id > ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY title ASC, id ASC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<DocumentSummary>(sql, params);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.title, row.id]));
   }
 
   async update(id: string, data: UpdateDocument, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Document> {
@@ -313,6 +342,38 @@ export class DocumentService {
        WHERE v.document_id = ? ORDER BY v.version DESC`,
       [id]
     );
+  }
+
+  async getHistoryPage(id: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<DocumentVersionSummary>> {
+    await assertResourceWorkspace(this.db, auth, 'document', id);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `document-versions:${id}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [id];
+    let cursorSql = '';
+    if (cursor) {
+      const cursorVersion = Number(cursor[0]);
+      if (!Number.isSafeInteger(cursorVersion) || cursorVersion < 1) {
+        throw new ValidationError('cursor is invalid, stale, or belongs to a different collection', {
+          field: 'cursor',
+          code: 'INVALID_CURSOR',
+        });
+      }
+      cursorSql = ' AND (dv.version < ? OR (dv.version = ? AND dv.id < ?))';
+      params.push(cursorVersion, cursorVersion, cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<DocumentVersionSummary>(
+      `SELECT dv.id, dv.document_id, dv.version, dv.title, dv.author_id,
+        dv.change_summary, dv.created_at, COALESCE(a.name, u.display_name) AS author_name
+       FROM document_version dv
+       LEFT JOIN principal p ON dv.author_id = p.id
+       LEFT JOIN agent a ON dv.author_id = a.id
+       LEFT JOIN app_user u ON dv.author_id = u.id
+       WHERE dv.document_id = ?${cursorSql}
+       ORDER BY dv.version DESC, dv.id DESC LIMIT ?`, params,
+    );
+    return toPage(rows, limit, row => encodeCursor(scope, [row.version, row.id]));
   }
 
   async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {

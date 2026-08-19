@@ -8,15 +8,20 @@ export function registerKnowledgeTools({ server, services, auth }: McpToolContex
     project_id: z.string(),
     entity_type: z.string().optional(),
     entity_id: z.string().optional(),
-    limit: z.number().optional()
-  }, withPermission('get_activity', auth, async ({ project_id, ...filters }) => {
-    const result = await services.eventService.list(project_id, filters, auth);
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('get_activity', auth, async ({ project_id, cursor, limit, ...filters }) => {
+    const result = await services.eventService.listPage(project_id, filters, { cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
   // --- Knowledge Base Tools ---
-  server.tool('list_knowledge_bases', { project_id: z.string().optional() }, withPermission('list_knowledge_bases', auth, async ({ project_id }) => {
-    const kbs = await services.kbService.list(project_id, auth);
+  server.tool('list_knowledge_bases', {
+    project_id: z.string().optional(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_knowledge_bases', auth, async ({ project_id, cursor, limit }) => {
+    const kbs = await services.kbService.listPage(project_id, { cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(kbs, null, 2) }] };
   }));
 
@@ -44,26 +49,30 @@ export function registerKnowledgeTools({ server, services, auth }: McpToolContex
     query: z.string(),
     kb_id: z.string().optional(),
     project_id: z.string().optional(),
-    limit: z.number().optional()
-  }, withPermission('search_knowledge', auth, async ({ query, kb_id, project_id, limit }) => {
-    let kbIds: string[] | undefined;
-    if (kb_id) {
-      kbIds = [kb_id];
-    } else if (project_id) {
-      const kbs = await services.kbService.list(project_id, auth);
-      kbIds = kbs.map(k => k.id);
-    }
-    const results = await services.kbService.searchKnowledge(query, kbIds, limit, auth);
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('search_knowledge', auth, async ({ query, kb_id, project_id, cursor, limit }) => {
+    const results = await services.kbService.searchKnowledgePage(query, kb_id ? [kb_id] : undefined, { cursor, limit }, project_id, auth);
     return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
   }));
 
   server.tool('get_entity_knowledge', {
     query: z.string().describe('Entity ID, canonical identifier (IP, email, hostname), or entity name'),
-    kb_id: z.string().optional()
-  }, withPermission('get_entity_knowledge', auth, async ({ query, kb_id }) => {
-    const result = await services.kbService.getEntityKnowledge(query, kb_id ? [kb_id] : undefined, auth);
+    kb_id: z.string().optional(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('get_entity_knowledge', auth, async ({ query, kb_id, cursor, limit }) => {
+    const result = await services.kbService.getEntityKnowledge(query, kb_id ? [kb_id] : undefined, { cursor, limit }, auth);
     if (!result) return { content: [{ type: 'text', text: `No entity knowledge found for \"${query}\"` }] };
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  }));
+
+  server.tool('get_gained_knowledge', {
+    fact_id: z.string().min(1).describe('Knowledge fact ID returned by list or search summaries'),
+  }, withPermission('get_gained_knowledge', auth, async ({ fact_id }) => {
+    const fact = await services.kbService.getFactById(fact_id, auth);
+    if (!fact) throw new Error(`Knowledge fact ${fact_id} not found`);
+    return { content: [{ type: 'text', text: JSON.stringify(fact, null, 2) }] };
   }));
 
   server.tool('add_gained_knowledge', {
@@ -140,4 +149,3 @@ export function registerKnowledgeTools({ server, services, auth }: McpToolContex
   }));
 
 }
-

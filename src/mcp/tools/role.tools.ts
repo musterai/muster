@@ -5,8 +5,12 @@ import { withMutationAudit, type McpToolContext } from '../tool-context.js';
 
 export function registerRoleTools({ server, services, auth }: McpToolContext): void {
   // --- Role Management Tools ---
-  server.tool('list_roles', { workspace_id: z.string() }, withPermission('list_roles', auth, async ({ workspace_id }) => {
-    const roles = await services.roleService.list(workspace_id, auth);
+  server.tool('list_roles', {
+    workspace_id: z.string(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_roles', auth, async ({ workspace_id, cursor, limit }) => {
+    const roles = await services.roleService.listPage(workspace_id, { cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(roles, null, 2) }] };
   }));
 
@@ -72,4 +76,3 @@ export function registerRoleTools({ server, services, auth }: McpToolContext): v
     return { content: [{ type: 'text', text: JSON.stringify(role, null, 2) }] };
   }));
 }
-

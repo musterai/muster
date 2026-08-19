@@ -334,6 +334,6 @@ describe('MUS-61: transport-neutral card and agent row scope', () => {
     expect(listed.map(agent => agent.id)).toContain(agentA);
     expect(listed.map(agent => agent.id)).not.toContain(agentB);
     const restListed = await rest('GET', '/agents');
-    expect((await restListed.json()).map((agent: { id: string }) => agent.id)).not.toContain(agentB);
+    expect((await restListed.json()).items.map((agent: { id: string }) => agent.id)).not.toContain(agentB);
   });
 });

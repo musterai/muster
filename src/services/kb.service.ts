@@ -7,6 +7,7 @@ import {
   KBEntity,
   UpsertKBEntity,
   KBFact,
+  KBFactSummary,
   AddGainedKnowledge,
   KBRelation,
   AddKBRelation,
@@ -16,6 +17,7 @@ import {
   KBGraphLink
 } from '../shared/types.js';
 import { EventService } from './event.service.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageInfo, PageOptions, toPage } from '../shared/pagination.js';
 import type { AuthContext } from '../shared/auth-context.js';
 import { OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { NotFoundError, ValidationError } from '../shared/errors.js';
@@ -178,6 +180,35 @@ export class KBService {
     return kbs;
   }
 
+  async listPage(projectId?: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<KnowledgeBase>> {
+    if (projectId) await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const scopedWorkspace = workspaceIdFor(auth);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `knowledge-bases:${projectId || 'global'}:${scopedWorkspace || 'open'}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [];
+    let sql = projectId
+      ? `SELECT DISTINCT kb.* FROM knowledge_base kb
+         LEFT JOIN project_knowledge_base pkb ON kb.id = pkb.kb_id
+         WHERE (kb.is_global = 1 OR pkb.project_id = ?)`
+      : 'SELECT kb.* FROM knowledge_base kb WHERE 1 = 1';
+    if (projectId) params.push(projectId);
+    if (scopedWorkspace) {
+      sql += ` AND EXISTS (SELECT 1 FROM project_knowledge_base owner_link JOIN project owner_project ON owner_project.id=owner_link.project_id WHERE owner_link.kb_id=kb.id AND owner_project.workspace_id=?)
+        AND NOT EXISTS (SELECT 1 FROM project_knowledge_base foreign_link JOIN project foreign_project ON foreign_project.id=foreign_link.project_id WHERE foreign_link.kb_id=kb.id AND foreign_project.workspace_id<>?)`;
+      params.push(scopedWorkspace, scopedWorkspace);
+    }
+    if (cursor) {
+      sql += ' AND (kb.created_at < ? OR (kb.created_at = ? AND kb.id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY kb.created_at DESC, kb.id DESC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<KnowledgeBase>(sql, params);
+    for (const kb of rows.slice(0, limit)) kb.linked_project_ids = await this.getLinkedProjectIds(kb.id, auth);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
   async linkProject(kbId: string, projectId: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     if (!adapter) return this.db.transaction(tx => this.linkProject(kbId, projectId, actorId, tx, auth));
     const db = adapter;
@@ -322,6 +353,25 @@ export class KBService {
       );
     }
     return this.db.query<KBEntity>('SELECT * FROM kb_entity WHERE kb_id = ? ORDER BY name ASC', [kbId]);
+  }
+
+  async listEntitiesPage(kbId: string, type?: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<KBEntity>> {
+    await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `kb-entities:${JSON.stringify({ kbId, type: type || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const clauses = ['kb_id = ?'];
+    const params: unknown[] = [kbId];
+    if (type) { clauses.push('type = ?'); params.push(type); }
+    if (cursor) {
+      clauses.push('(name > ? OR (name = ? AND id > ?))');
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<KBEntity>(
+      `SELECT * FROM kb_entity WHERE ${clauses.join(' AND ')} ORDER BY name ASC, id ASC LIMIT ?`, params,
+    );
+    return toPage(rows, limit, row => encodeCursor(scope, [row.name, row.id]));
   }
 
   async deleteEntity(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
@@ -509,6 +559,42 @@ export class KBService {
     return this.db.query<KBFact>(sql, params);
   }
 
+  async listFactsPage(
+    kbId: string,
+    filters: { entityId?: string; category?: string } = {},
+    options: PageOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<Page<KBFactSummary>> {
+    await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `kb-facts:${JSON.stringify({ kbId, entityId: filters.entityId || null, category: filters.category || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    let sql = `SELECT f.id, f.kb_id, f.entity_id, f.title, f.category, f.confidence,
+      f.source_principal_id, f.created_at, f.updated_at, e.name as entity_name,
+      e.identifier as entity_identifier
+      FROM kb_fact f LEFT JOIN kb_entity e ON f.entity_id = e.id WHERE f.kb_id = ?`;
+    const params: unknown[] = [kbId];
+    if (filters.entityId) { sql += ' AND f.entity_id = ?'; params.push(filters.entityId); }
+    if (filters.category) { sql += ' AND f.category = ?'; params.push(filters.category); }
+    if (cursor) {
+      sql += ' AND (f.created_at < ? OR (f.created_at = ? AND f.id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY f.created_at DESC, f.id DESC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<KBFactSummary>(sql, params);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
+  async getFactById(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBFact | null> {
+    await assertResourceWorkspace(this.db, auth, 'kb_fact', id);
+    const rows = await this.db.query<KBFact>(
+      `SELECT f.*, e.name as entity_name, e.identifier as entity_identifier
+       FROM kb_fact f LEFT JOIN kb_entity e ON f.entity_id = e.id WHERE f.id = ?`, [id],
+    );
+    return rows[0] || null;
+  }
+
   async deleteFact(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
     if (!adapter) return this.db.transaction(tx => this.deleteFact(id, actorId, tx, auth));
     const db = adapter;
@@ -646,50 +732,99 @@ export class KBService {
 
   // --- Aggregated Knowledge & Graph Queries ---
 
-  async getEntityKnowledge(queryStr: string, kbIds?: string[], auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<EntityKnowledgeResult | null> {
-    const accessibleKbIds = kbIds?.length ? kbIds : (await this.list(undefined, auth)).map(kb => kb.id);
-    await assertResourcesWorkspace(this.db, auth, accessibleKbIds.map(id => ['knowledge_base', id]));
-    let sql = 'SELECT * FROM kb_entity WHERE (id = ? OR identifier = ? OR LOWER(name) = LOWER(?))';
+  async getEntityKnowledge(queryStr: string, kbIds?: string[], optionsOrAuth: PageOptions | AuthContext = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<EntityKnowledgeResult | null> {
+    const isAuth = 'principal' in optionsOrAuth || 'workspace_id' in optionsOrAuth;
+    const options: PageOptions = isAuth ? {} : optionsOrAuth as PageOptions;
+    if (isAuth) auth = optionsOrAuth as AuthContext;
+    if (kbIds?.length) await assertResourcesWorkspace(this.db, auth, kbIds.map(id => ['knowledge_base', id]));
+    let sql = 'SELECT id, kb_id, name, type, identifier, created_at, updated_at FROM kb_entity WHERE (id = ? OR identifier = ? OR LOWER(name) = LOWER(?))';
     const params: unknown[] = [queryStr, queryStr, queryStr];
 
-    if (accessibleKbIds.length > 0) {
-      sql += ` AND kb_id IN (${accessibleKbIds.map(() => '?').join(',')})`;
-      params.push(...accessibleKbIds);
-    } else if (workspaceIdFor(auth)) {
-      return null;
+    if (kbIds?.length) {
+      sql += ` AND kb_id IN (${kbIds.map(() => '?').join(',')})`;
+      params.push(...kbIds);
     }
 
     const entities = await this.db.query<KBEntity>(sql, params);
     if (!entities[0]) return null;
 
     const entity = entities[0];
-    const facts = await this.listFacts(undefined, entity.id, undefined, auth);
-
-    const outgoing = await this.db.query<KBRelation>(
-      `SELECT r.*, e.name as target_entity_name 
-       FROM kb_relation r 
-       JOIN kb_entity e ON r.target_entity_id = e.id AND e.kb_id = r.kb_id
-       WHERE r.source_entity_id = ? AND r.kb_id = ?`,
-      [entity.id, entity.kb_id]
-    );
-
-    const incoming = await this.db.query<KBRelation>(
-      `SELECT r.*, e.name as source_entity_name 
-       FROM kb_relation r 
-       JOIN kb_entity e ON r.source_entity_id = e.id AND e.kb_id = r.kb_id
-       WHERE r.target_entity_id = ? AND r.kb_id = ?`,
-      [entity.id, entity.kb_id]
-    );
+    await assertResourceWorkspace(this.db, auth, 'kb_entity', entity.id);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `entity-knowledge:${entity.id}`;
+    const cursor = decodeCursor(options.cursor, scope, 3);
+    const phase = cursor?.[0] || 'facts';
+    const afterCreated = cursor?.[1] || '';
+    const afterId = cursor?.[2] || '';
+    let facts: KBFactSummary[] = [];
+    let outgoing: Array<Omit<KBRelation, 'description'>> = [];
+    let incoming: Array<Omit<KBRelation, 'description'>> = [];
+    let rows: Array<KBFactSummary | Omit<KBRelation, 'description'>>;
+    if (phase === 'facts') {
+      const params: unknown[] = [entity.id];
+      let factSql = `SELECT f.id, f.kb_id, f.entity_id, f.title, f.category, f.confidence,
+        f.source_principal_id, f.created_at, f.updated_at, e.name as entity_name,
+        e.identifier as entity_identifier FROM kb_fact f LEFT JOIN kb_entity e ON f.entity_id=e.id AND f.kb_id=e.kb_id
+        WHERE f.entity_id = ?`;
+      if (afterCreated) { factSql += ' AND (f.created_at > ? OR (f.created_at = ? AND f.id > ?))'; params.push(afterCreated, afterCreated, afterId); }
+      factSql += ' ORDER BY f.created_at ASC, f.id ASC LIMIT ?'; params.push(limit + 1);
+      rows = await this.db.query<KBFactSummary>(factSql, params); facts = rows.slice(0, limit) as KBFactSummary[];
+    } else {
+      const outgoingPhase = phase === 'outgoing';
+      const params: unknown[] = [entity.id];
+      let relSql = `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at,
+        e.name as ${outgoingPhase ? 'target' : 'source'}_entity_name FROM kb_relation r
+        JOIN kb_entity e ON e.id=r.${outgoingPhase ? 'target' : 'source'}_entity_id AND e.kb_id=r.kb_id
+        WHERE r.${outgoingPhase ? 'source' : 'target'}_entity_id = ? AND r.kb_id = ?`;
+      params.push(entity.kb_id);
+      if (afterCreated) { relSql += ' AND (r.created_at > ? OR (r.created_at = ? AND r.id > ?))'; params.push(afterCreated, afterCreated, afterId); }
+      relSql += ' ORDER BY r.created_at ASC, r.id ASC LIMIT ?'; params.push(limit + 1);
+      rows = await this.db.query<Omit<KBRelation, 'description'>>(relSql, params);
+      if (outgoingPhase) outgoing = rows.slice(0, limit) as Array<Omit<KBRelation, 'description'>>;
+      else incoming = rows.slice(0, limit) as Array<Omit<KBRelation, 'description'>>;
+    }
+    let moreInPhase = rows.length > limit;
+    let nextPhase: string | null = moreInPhase ? phase : phase === 'facts' ? 'outgoing' : phase === 'outgoing' ? 'incoming' : null;
+    let last = rows.slice(0, limit).at(-1);
+    // Preserve the convenient legacy shape for small entity profiles while
+    // enforcing one shared row budget across all three collections.
+    if (!cursor && phase === 'facts' && !moreInPhase && facts.length < limit) {
+      let remaining = limit - facts.length;
+      const outgoingRows = await this.db.query<Omit<KBRelation, 'description'>>(
+        `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at,e.name target_entity_name
+         FROM kb_relation r JOIN kb_entity e ON e.id=r.target_entity_id AND e.kb_id=r.kb_id
+         WHERE r.source_entity_id=? AND r.kb_id=? ORDER BY r.created_at ASC,r.id ASC LIMIT ?`, [entity.id, entity.kb_id, remaining + 1]);
+      outgoing = outgoingRows.slice(0, remaining);
+      if (outgoingRows.length > remaining) {
+        moreInPhase = true; nextPhase = 'outgoing'; last = outgoing.at(-1);
+      } else {
+        remaining -= outgoing.length;
+        const incomingRows = await this.db.query<Omit<KBRelation, 'description'>>(
+          `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at,e.name source_entity_name
+           FROM kb_relation r JOIN kb_entity e ON e.id=r.source_entity_id AND e.kb_id=r.kb_id
+           WHERE r.target_entity_id=? AND r.kb_id=? ORDER BY r.created_at ASC,r.id ASC LIMIT ?`, [entity.id, entity.kb_id, remaining + 1]);
+        incoming = incomingRows.slice(0, remaining);
+        moreInPhase = incomingRows.length > remaining;
+        nextPhase = moreInPhase ? 'incoming' : null;
+        last = incoming.at(-1);
+      }
+    }
 
     return {
       entity,
       facts,
       outgoing_relations: outgoing,
       incoming_relations: incoming,
+      page: {
+        limit,
+        has_more: nextPhase !== null,
+        next_cursor: nextPhase ? encodeCursor(scope, [nextPhase, moreInPhase ? (last?.created_at || '') : '', moreInPhase ? (last?.id || '') : '']) : null,
+      },
     };
   }
 
   async searchKnowledge(query: string, kbIds?: string[], limit: number = 20, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<{ facts: KBFact[]; entities: KBEntity[] }> {
+    limit = normalizePageLimit(limit);
     const accessibleKbIds = kbIds?.length ? kbIds : (await this.list(undefined, auth)).map(kb => kb.id);
     await assertResourcesWorkspace(this.db, auth, accessibleKbIds.map(id => ['knowledge_base', id]));
     const scopedWorkspace = workspaceIdFor(auth);
@@ -737,41 +872,153 @@ export class KBService {
     return { facts, entities };
   }
 
-  async getGraphTree(kbId?: string, projectId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBGraphTree> {
-    let targetKbIds: string[] = [];
+  async searchKnowledgePage(
+    query: string,
+    kbIds?: string[],
+    options: PageOptions = {},
+    projectId?: string,
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<{ facts: KBFactSummary[]; entities: KBEntity[]; page: PageInfo }> {
+    if (projectId) await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    if (kbIds?.length) await assertResourcesWorkspace(this.db, auth, kbIds.map(id => ['knowledge_base', id]));
+    const scopedWorkspace = workspaceIdFor(auth);
+    const limit = normalizePageLimit(options.limit ?? 20);
+    const normalizedKbIds = kbIds ? [...kbIds].sort() : undefined;
+    const scope = `knowledge-search:${JSON.stringify({ query, kbIds: normalizedKbIds || null, projectId: projectId || null, workspace: scopedWorkspace || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 3);
+    const phase = cursor?.[0] || 'facts';
+    const pattern = `%${query}%`;
+    let facts: KBFactSummary[] = [];
+    let entities: KBEntity[] = [];
 
-    if (kbId) {
-      await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
-      targetKbIds = [kbId];
-    } else if (projectId) {
-      const kbs = await this.list(projectId, auth);
-      targetKbIds = kbs.map(k => k.id);
+    if (phase === 'facts') {
+      let sql = `SELECT f.id, f.kb_id, f.entity_id, f.title, f.category, f.confidence,
+        f.source_principal_id, f.created_at, f.updated_at, e.name as entity_name,
+        e.identifier as entity_identifier FROM kb_fact f
+        LEFT JOIN kb_entity e ON f.entity_id = e.id AND f.kb_id=e.kb_id
+        WHERE (f.title LIKE ? OR f.content LIKE ? OR f.category LIKE ?)`;
+      const params: unknown[] = [pattern, pattern, pattern];
+      if (normalizedKbIds?.length) {
+        sql += ` AND f.kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
+        params.push(...normalizedKbIds);
+      }
+      if (projectId) { sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=f.kb_id AND pkb.project_id=?)'; params.push(projectId); }
+      if (scopedWorkspace) {
+        sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=f.kb_id AND p.workspace_id=?) AND NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=f.kb_id AND p2.workspace_id<>?) AND (f.entity_id IS NULL OR EXISTS (SELECT 1 FROM kb_entity valid_entity WHERE valid_entity.id=f.entity_id AND valid_entity.kb_id=f.kb_id))';
+        params.push(scopedWorkspace, scopedWorkspace);
+      }
+      if (cursor && cursor[1]) {
+        sql += ' AND (f.created_at < ? OR (f.created_at = ? AND f.id < ?))';
+        params.push(cursor[1], cursor[1], cursor[2]);
+      }
+      sql += ' ORDER BY f.created_at DESC, f.id DESC LIMIT ?';
+      params.push(limit + 1);
+      facts = await this.db.query<KBFactSummary>(sql, params);
+    }
+
+    if (phase === 'entities') {
+      let sql = 'SELECT id,kb_id,name,type,identifier,created_at,updated_at FROM kb_entity WHERE (name LIKE ? OR identifier LIKE ? OR type LIKE ?)';
+      const params: unknown[] = [pattern, pattern, pattern];
+      if (normalizedKbIds?.length) {
+        sql += ` AND kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
+        params.push(...normalizedKbIds);
+      }
+      if (projectId) { sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=kb_entity.kb_id AND pkb.project_id=?)'; params.push(projectId); }
+      if (scopedWorkspace) {
+        sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=kb_entity.kb_id AND p.workspace_id=?) AND NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=kb_entity.kb_id AND p2.workspace_id<>?)';
+        params.push(scopedWorkspace, scopedWorkspace);
+      }
+      if (cursor && cursor[1]) {
+        sql += ' AND (updated_at < ? OR (updated_at = ? AND id < ?))';
+        params.push(cursor[1], cursor[1], cursor[2]);
+      }
+      sql += ' ORDER BY updated_at DESC, id DESC LIMIT ?';
+      params.push(limit + 1);
+      entities = await this.db.query<KBEntity>(sql, params);
+    }
+
+    let factMore = facts.length > limit;
+    let entityMore = entities.length > limit;
+    const factItems = facts.slice(0, limit);
+    const entityItems = entities.slice(0, limit);
+    // Row limits alone do not bound bytes when user-controlled summary fields
+    // approach their individual maxima. Keep headroom for the envelope/cursor.
+    while (Buffer.byteLength(JSON.stringify({ facts: factItems, entities: entityItems }), 'utf8') > 90_000
+      && factItems.length + entityItems.length > 1) {
+      if (entityItems.length) { entityItems.pop(); entityMore = true; }
+      else { factItems.pop(); factMore = true; }
+    }
+    const lastFact = factItems[factItems.length - 1];
+    const lastEntity = entityItems[entityItems.length - 1];
+    const hasMore = phase === 'facts' ? true : entityMore;
+    return {
+      facts: factItems,
+      entities: entityItems,
+      page: {
+        limit,
+        has_more: hasMore,
+        next_cursor: hasMore ? encodeCursor(scope, phase === 'facts' && factMore
+          ? ['facts', lastFact?.created_at || '', lastFact?.id || '']
+          : ['entities', phase === 'entities' ? (lastEntity?.updated_at || '') : '', phase === 'entities' ? (lastEntity?.id || '') : '']) : null,
+      },
+    };
+  }
+
+  async getGraphTree(kbId?: string, projectId?: string, optionsOrAuth: PageOptions | AuthContext = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBGraphTree> {
+    const isAuth = 'principal' in optionsOrAuth || 'workspace_id' in optionsOrAuth;
+    const options: PageOptions = isAuth ? {} : optionsOrAuth as PageOptions;
+    if (isAuth) auth = optionsOrAuth as AuthContext;
+    if (kbId) await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
+    if (projectId) await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const scopedWorkspace = workspaceIdFor(auth);
+    const limit = normalizePageLimit(options.limit);
+    const scope = `kb-graph:${kbId || ''}:${projectId || ''}:${scopedWorkspace || 'open'}`;
+    const cursor = decodeCursor(options.cursor, scope, 3);
+    const phase = cursor?.[0] || 'nodes';
+    const params: unknown[] = [];
+    const filter = (alias: string) => {
+      const clauses: string[] = [];
+      if (kbId) { params.push(kbId); clauses.push(`${alias}.kb_id = ?`); }
+      if (projectId) { params.push(projectId); clauses.push(`EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=${alias}.kb_id AND pkb.project_id=?)`); }
+      if (scopedWorkspace) {
+        clauses.push(`EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=${alias}.kb_id AND p.workspace_id=?)`);
+        clauses.push(`NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=${alias}.kb_id AND p2.workspace_id<>?)`);
+        params.push(scopedWorkspace, scopedWorkspace);
+      }
+      return clauses.length ? clauses.join(' AND ') : '1=1';
+    };
+    let entities: Array<KBEntity & { fact_count: number }> = [];
+    let links: KBRelation[] = [];
+    if (phase === 'nodes') {
+      let sql = `SELECT e.id,e.kb_id,e.name,e.type,e.identifier,e.created_at,e.updated_at,COUNT(f.id) fact_count FROM kb_entity e LEFT JOIN kb_fact f ON e.id=f.entity_id AND e.kb_id=f.kb_id WHERE ${filter('e')}`;
+      if (cursor?.[1]) { sql += ' AND (e.name > ? OR (e.name=? AND e.id>?))'; params.push(cursor[1], cursor[1], cursor[2]); }
+      sql += ' GROUP BY e.id ORDER BY e.name ASC,e.id ASC LIMIT ?'; params.push(limit + 1);
+      entities = await this.db.query(sql, params);
     } else {
-      const kbs = await this.list(undefined, auth);
-      targetKbIds = kbs.map(k => k.id);
+      let sql = `SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at FROM kb_relation r JOIN kb_entity source ON source.id=r.source_entity_id AND source.kb_id=r.kb_id JOIN kb_entity target ON target.id=r.target_entity_id AND target.kb_id=r.kb_id WHERE ${filter('r')}`;
+      if (cursor?.[1]) { sql += ' AND (r.created_at > ? OR (r.created_at=? AND r.id>?))'; params.push(cursor[1], cursor[1], cursor[2]); }
+      sql += ' ORDER BY r.created_at ASC,r.id ASC LIMIT ?'; params.push(limit + 1);
+      links = await this.db.query(sql, params);
     }
-
-    if (targetKbIds.length === 0) {
-      return { nodes: [], links: [] };
+    // When a continued node page exhausts the node phase with spare capacity,
+    // start the link phase in that same response. Restricting this fill to the
+    // first request loses every link after a final partial node page.
+    if (phase === 'nodes' && entities.length <= limit && entities.length < limit) {
+      const remaining = limit - entities.length;
+      const linkParams: unknown[] = [];
+      const linkClauses: string[] = [];
+      if (kbId) { linkClauses.push('r.kb_id=?'); linkParams.push(kbId); }
+      if (projectId) { linkClauses.push('EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=r.kb_id AND pkb.project_id=?)'); linkParams.push(projectId); }
+      if (scopedWorkspace) {
+        linkClauses.push('EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=r.kb_id AND p.workspace_id=?)');
+        linkClauses.push('NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=r.kb_id AND p2.workspace_id<>?)');
+        linkParams.push(scopedWorkspace, scopedWorkspace);
+      }
+      linkParams.push(remaining + 1);
+      links = await this.db.query(`SELECT r.id,r.kb_id,r.source_entity_id,r.target_entity_id,r.relation_type,r.created_at
+        FROM kb_relation r JOIN kb_entity source ON source.id=r.source_entity_id AND source.kb_id=r.kb_id JOIN kb_entity target ON target.id=r.target_entity_id AND target.kb_id=r.kb_id
+        WHERE ${linkClauses.length ? linkClauses.join(' AND ') : '1=1'} ORDER BY r.created_at ASC,r.id ASC LIMIT ?`, linkParams);
     }
-
-    const inClause = targetKbIds.map(() => '?').join(',');
-    const entities = await this.db.query<KBEntity>(
-      `SELECT e.*, COUNT(f.id) as fact_count
-       FROM kb_entity e
-       LEFT JOIN kb_fact f ON e.id = f.entity_id
-       WHERE e.kb_id IN (${inClause})
-       GROUP BY e.id`,
-      targetKbIds
-    );
-
-    const links = await this.db.query<KBRelation>(
-      `SELECT r.* FROM kb_relation r
-       JOIN kb_entity source ON source.id = r.source_entity_id AND source.kb_id = r.kb_id
-       JOIN kb_entity target ON target.id = r.target_entity_id AND target.kb_id = r.kb_id
-       WHERE r.kb_id IN (${inClause})`,
-      targetKbIds
-    );
 
     const nodes: KBGraphNode[] = entities.map(e => ({
       id: e.id,
@@ -779,7 +1026,7 @@ export class KBService {
       type: e.type,
       identifier: e.identifier,
       kb_id: e.kb_id,
-      fact_count: (e as unknown as { fact_count: number }).fact_count || 0,
+      fact_count: e.fact_count || 0,
     }));
 
     const graphLinks: KBGraphLink[] = links.map(l => ({
@@ -787,10 +1034,23 @@ export class KBService {
       source: l.source_entity_id,
       target: l.target_entity_id,
       relation_type: l.relation_type,
-      description: l.description,
     }));
-
-    return { nodes, links: graphLinks };
+    const nodeItems = nodes.slice(0, limit);
+    const remaining = Math.max(0, limit - nodeItems.length);
+    const linkItems = graphLinks.slice(0, phase === 'nodes' ? remaining : limit);
+    const nodeMore = entities.length > limit;
+    const linkMore = links.length > (phase === 'nodes' ? remaining : limit);
+    const hasMore = nodeMore || linkMore || (phase === 'nodes' && nodeItems.length === limit && !nodeMore);
+    const nextPhase = nodeMore ? 'nodes' : 'links';
+    // Cursor keys come from the database row, not the public link summary
+    // (which intentionally omits created_at along with large descriptions).
+    const included = nodeMore
+      ? entities.slice(0, limit).at(-1)
+      : links.slice(0, phase === 'nodes' ? remaining : limit).at(-1);
+    return { nodes: nodeItems, links: linkItems, page: {
+      limit, has_more: hasMore,
+      next_cursor: hasMore ? encodeCursor(scope, [nextPhase, nodeMore ? (included as KBEntity).name : linkMore ? ((included as unknown as KBRelation)?.created_at || '') : '', (nodeMore || linkMore) ? included?.id || '' : '']) : null,
+    } };
   }
 
   private detectEntityType(str?: string | null): string {

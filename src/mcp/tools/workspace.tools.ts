@@ -4,8 +4,11 @@ import { resolveActor, withMutationAudit, type McpToolContext } from '../tool-co
 
 export function registerWorkspaceTools({ server, services, auth }: McpToolContext): void {
   // --- Project Tools ---
-  server.tool('list_projects', {}, withPermission('list_projects', auth, async () => {
-    const projects = await services.projectService.list(auth);
+  server.tool('list_projects', {
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_projects', auth, async ({ cursor, limit }) => {
+    const projects = await services.projectService.listPage({ cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(projects, null, 2) }] };
   }));
 
@@ -42,8 +45,12 @@ export function registerWorkspaceTools({ server, services, auth }: McpToolContex
   }));
 
   // --- Board & Column Tools ---
-  server.tool('list_boards', { project_id: z.string() }, withPermission('list_boards', auth, async ({ project_id }) => {
-    const boards = await services.boardService.list(project_id, auth);
+  server.tool('list_boards', {
+    project_id: z.string(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_boards', auth, async ({ project_id, cursor, limit }) => {
+    const boards = await services.boardService.listPage(project_id, { cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(boards, null, 2) }] };
   }));
 
@@ -76,10 +83,10 @@ export function registerWorkspaceTools({ server, services, auth }: McpToolContex
     if (!board) throw new Error(`Board ${board_id} not found`);
 
     const columns = await services.columnService.list(board_id, auth);
-    const cards = await services.cardService.list({ board_id }, auth);
+    const cards = await services.cardService.listPage({ board_id }, {}, auth);
 
     return {
-      content: [{ type: 'text', text: JSON.stringify({ ...board, columns, cards }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({ ...board, columns, cards: cards.items, card_page: cards.page }, null, 2) }],
     };
   }));
 

@@ -19,8 +19,10 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     assignee_id: z.string().optional(),
     label: z.string().optional(),
     archived: z.boolean().optional(),
-  }, withPermission('list_cards', auth, async (filters) => {
-    const cards = await services.cardService.list(filters, auth);
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional().describe('Opaque continuation cursor returned by the previous page'),
+    limit: z.number().int().min(1).max(100).optional().describe('Page size; defaults to 50 and cannot exceed 100'),
+  }, withPermission('list_cards', auth, async ({ cursor, limit, ...filters }) => {
+    const cards = await services.cardService.listPage(filters, { cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
   }));
 
@@ -29,10 +31,12 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     query: z.string().trim().min(1).describe('Literal, case-insensitive substring to match against card titles'),
     exclude_card_id: cardReferenceSchema.optional().describe('Optional card ULID or human-readable key to omit from results'),
     limit: z.number().int().min(1).max(100).optional().describe('Maximum results to return; defaults to 20 and cannot exceed 100'),
-  }, withPermission('search_cards', auth, async ({ project_id, query, exclude_card_id, limit }) => {
-    const cards = await services.cardService.searchByTitle(project_id, query, {
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional().describe('Opaque continuation cursor returned by the previous page'),
+  }, withPermission('search_cards', auth, async ({ project_id, query, exclude_card_id, limit, cursor }) => {
+    const cards = await services.cardService.searchByTitlePage(project_id, query, {
       excludeCardId: exclude_card_id,
       limit,
+      cursor,
     }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
   }));
@@ -175,14 +179,14 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     await services.cardService.removeWorkLink(card_id, link_id, resolveActor(auth), auth);
     return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
   }));
-  server.tool('list_work_links', { card_id: cardReferenceSchema }, withPermission('list_work_links', auth, async ({ card_id }) => {
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.listWorkLinks(card_id, undefined, auth), null, 2) }] };
+  server.tool('list_work_links', { card_id: cardReferenceSchema, cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(), limit: z.number().int().min(1).max(100).optional() }, withPermission('list_work_links', auth, async ({ card_id, cursor, limit }) => {
+    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.listWorkLinksPage(card_id, { cursor, limit }, undefined, auth), null, 2) }] };
   }));
 
   server.tool('create_label', { board_id: z.string(), name: z.string(), color: z.string() }, withPermission('create_label', auth, async (args) => {
     return { content: [{ type: 'text', text: JSON.stringify(await services.boardService.createLabel(args, auth), null, 2) }] };
   }));
-  server.tool('list_labels', { board_id: z.string() }, withPermission('list_labels', auth, async ({ board_id }) => {
-    return { content: [{ type: 'text', text: JSON.stringify(await services.boardService.listLabels(board_id, auth), null, 2) }] };
+  server.tool('list_labels', { board_id: z.string(), cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(), limit: z.number().int().min(1).max(100).optional() }, withPermission('list_labels', auth, async ({ board_id, cursor, limit }) => {
+    return { content: [{ type: 'text', text: JSON.stringify(await services.boardService.listLabelsPage(board_id, { cursor, limit }, auth), null, 2) }] };
   }));
 }

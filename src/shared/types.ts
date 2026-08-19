@@ -223,6 +223,9 @@ export interface Card {
   board_slug?: string;
 }
 
+/** Collection representation: large markdown bodies are detail-only. */
+export type CardSummary = Omit<Card, 'description'>;
+
 export interface ClaimCard {
   principal_id: string;
   ttl_seconds?: number;
@@ -345,6 +348,8 @@ export interface DocumentVersion {
   created_at: string;
   author_name?: string | null;
 }
+
+export type DocumentVersionSummary = Omit<DocumentVersion, 'content'>;
 
 /** Document without its markdown body — cards embed this, never the full content. */
 export type DocumentSummary = Omit<Document, 'content'>;
@@ -527,6 +532,9 @@ export interface KBFact {
   entity_identifier?: string;
 }
 
+/** Collection/search representation: potentially large fact content is detail-only. */
+export type KBFactSummary = Omit<KBFact, 'content'>;
+
 export interface AddGainedKnowledge {
   kb_id: string;
   title: string;
@@ -576,10 +584,11 @@ export interface AddKBRelation {
 // ============================================================
 
 export interface EntityKnowledgeResult {
-  entity: KBEntity;
-  facts: KBFact[];
-  outgoing_relations: KBRelation[];
-  incoming_relations: KBRelation[];
+  entity: Omit<KBEntity, 'metadata'>;
+  facts: KBFactSummary[];
+  outgoing_relations: Array<Omit<KBRelation, 'description'>>;
+  incoming_relations: Array<Omit<KBRelation, 'description'>>;
+  page: import('./pagination.js').PageInfo;
 }
 
 export interface KBGraphNode {
@@ -596,10 +605,10 @@ export interface KBGraphLink {
   source: string;
   target: string;
   relation_type: string;
-  description: string | null;
 }
 
 export interface KBGraphTree {
   nodes: KBGraphNode[];
   links: KBGraphLink[];
+  page: import('./pagination.js').PageInfo;
 }

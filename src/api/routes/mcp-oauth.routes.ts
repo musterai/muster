@@ -22,6 +22,7 @@ import { AuthContext } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { createRateLimiter } from '../middleware/generic-rate-limiter.js';
 import { validateRequest } from '../middleware/validate.js';
+import { decodeCursor, encodeCursor, normalizePageLimit } from '../../shared/pagination.js';
 import {
   oauthAuthorizeDetailsQuerySchema,
   oauthAuthorizeQuerySchema,
@@ -187,15 +188,28 @@ export function createMcpOAuthRouter(
         return;
       }
 
-      const agents = await agentService.list(auth);
-      const myAgents = agents.filter(a => a.operator_user_id === auth.principal!.id);
-      const roles = await roleService.list(auth.workspace_id, auth);
+      const limit = normalizePageLimit(req.query.limit as number | undefined);
+      const scope = `oauth-authorize-details:${clientId}:${auth.workspace_id}:${auth.principal.id}`;
+      const outer = decodeCursor(req.query.cursor as string | undefined, scope, 2);
+      const phase = outer?.[0] || 'agents';
+      const nestedCursor = outer?.[1] || undefined;
+      const agentPage = phase === 'agents' ? await agentService.listOwnedPage(auth.workspace_id, auth.principal.id, { cursor: nestedCursor, limit }) : null;
+      let rolePage = phase === 'roles' ? await roleService.listPage(auth.workspace_id, { cursor: nestedCursor, limit }, auth) : null;
+      if (phase === 'agents' && !agentPage?.page.has_more && (agentPage?.items.length || 0) < limit) {
+        rolePage = await roleService.listPage(auth.workspace_id, { limit: limit - (agentPage?.items.length || 0) }, auth);
+      }
+      const hasMore = Boolean(agentPage?.page.has_more || rolePage?.page.has_more || (phase === 'agents' && !rolePage));
+      const nextPhase = agentPage?.page.has_more ? 'agents' : 'roles';
+      const nextNested = agentPage?.page.has_more ? (agentPage.page.next_cursor || '') : (rolePage?.page.next_cursor || '');
 
       res.json({
         client_name: client.client_name || client.client_id,
         resource: canonicalMcpResource(),
-        agents: myAgents.map(a => ({ id: a.id, name: a.name, role_id: a.role_id })),
-        roles: roles.map(r => ({ id: r.id, name: r.name })),
+        agents: (agentPage?.items || []).map(a => ({ id: a.id, name: a.name, role_id: a.role_id })),
+        roles: (rolePage?.items || []).map(r => ({ id: r.id, name: r.name })),
+        // A mixed final-agent/first-role page has already consumed role rows;
+        // retain that nested role keyset when changing the outer phase.
+        page: { limit, has_more: hasMore, next_cursor: hasMore ? encodeCursor(scope, [nextPhase, nextNested]) : null },
       });
     } catch (err) {
       next(err);

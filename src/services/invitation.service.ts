@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 const DEFAULT_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -77,6 +78,24 @@ export class InvitationService {
       [workspaceId],
     );
     return rows;
+  }
+
+  async listPage(workspaceId: string, options: PageOptions = {}): Promise<Page<Invitation>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `invitations:${workspaceId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [workspaceId];
+    let cursorSql = '';
+    if (cursor) {
+      cursorSql = ' AND (created_at < ? OR (created_at = ? AND id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<Invitation>(
+      `SELECT id, workspace_id, email, role_id, expires_at, accepted_at, created_by, created_at
+       FROM invitation WHERE workspace_id = ?${cursorSql} ORDER BY created_at DESC, id DESC LIMIT ?`, params,
+    );
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
   async getById(id: string): Promise<Invitation | null> {

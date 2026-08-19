@@ -487,3 +487,4 @@ All AI agents and human operators collaborating within Muster must follow this p
   assertMcpToolPermissionInventory(server);
   return server;
 }
+

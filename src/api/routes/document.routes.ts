@@ -5,7 +5,7 @@ import { AuditService } from '../../services/audit.service.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
 import { config } from '../../config/index.js';
 import { validateRequest } from '../middleware/validate.js';
-import { documentCreateSchema, documentListQuerySchema, documentQuerySchema, documentStatusSchema, documentUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
+import { collectionQuerySchema, documentCreateSchema, documentListQuerySchema, documentQuerySchema, documentStatusSchema, documentUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
 import { DatabaseAdapter } from '../../db/adapter.js';
 
 /**
@@ -29,7 +29,10 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
     try {
       const status = req.query.status as string;
       const parent_id = req.query.parent_id === 'null' ? null : (req.query.parent_id as string);
-      const docs = await documentService.list(req.params.projectId, { status, parent_id }, req.authContext);
+      const docs = await documentService.listPage(req.params.projectId, { status, parent_id }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(docs);
     } catch (err) {
       next(err);
@@ -93,9 +96,12 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
     }
   });
 
-  router.get('/documents/:id/versions', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/documents/:id/versions', ...validateRequest({ query: collectionQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const history = await documentService.getHistory(req.params.id, req.authContext);
+      const history = await documentService.getHistoryPage(req.params.id, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
       res.json(history);
     } catch (err) {
       next(err);

@@ -170,7 +170,8 @@ async function runMcpAgentTestSuite() {
 
     // Step 4: List Boards & Default Columns
     console.log('\n[4/12] Listing Project Boards & Columns via MCP (list_boards & get_board)...');
-    const boards = await callMCPTool('list_boards', { project_id: project.id });
+    const boardPage = await callMCPTool('list_boards', { project_id: project.id });
+    const boards = boardPage.items;
     console.log(`  ✓ Found ${boards.length} board(s). Board Name: "${boards[0].name}"`);
 
     const boardDetails = await callMCPTool('get_board', { board_id: boards[0].id });
@@ -183,7 +184,7 @@ async function runMcpAgentTestSuite() {
       name: 'Release Board',
       template: 'simple',
     });
-    const boardsAfterCreate = await callMCPTool('list_boards', { project_id: project.id });
+    const boardsAfterCreate = (await callMCPTool('list_boards', { project_id: project.id })).items;
     if (!boardsAfterCreate.some((candidate: any) => candidate.id === releaseBoard.id)) {
       throw new Error('MCP list_boards did not return the newly created board');
     }
@@ -280,7 +281,7 @@ async function runMcpAgentTestSuite() {
     console.log(`  ✓ Document Updated! New Version: ${updatedDoc.version}, Title: "${updatedDoc.title}"`);
 
     const history = await callMCPTool('get_document_history', { document_id: doc.id });
-    console.log(`  ✓ Version History Retreived: ${history.length} historical version(s) archived.`);
+    console.log(`  ✓ Version History Retreived: ${history.items.length} historical version(s) archived.`);
 
     // Step 11: Transition Document Status
     console.log('\n[11/12] Transitioning Document Status via MCP (set_document_status)...');
@@ -324,6 +325,8 @@ async function runMcpAgentTestSuite() {
       category: 'constraint',
     });
     console.log(`  ✓ Gained Knowledge Fact Added! ID: ${fact.id}, Title: "${fact.title}"`);
+    const factDetail = await callMCPTool('get_gained_knowledge', { fact_id: fact.id });
+    if (factDetail.content !== fact.content) throw new Error('Knowledge fact detail did not preserve its content body.');
 
     const entityKnowledge = await callMCPTool('get_entity_knowledge', {
       query: '192.168.1.99',

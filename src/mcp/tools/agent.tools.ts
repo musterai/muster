@@ -80,10 +80,12 @@ export function registerAgentTools({ server, services, auth }: McpToolContext): 
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
-  server.tool('list_agents', {}, withPermission('list_agents', auth, async () => {
-    const result = await services.agentService.list(auth);
+  server.tool('list_agents', {
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_agents', auth, async ({ cursor, limit }) => {
+    const result = await services.agentService.listPage(config.auth.mode === 'enforced' ? auth.workspace_id : undefined, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
 }
-

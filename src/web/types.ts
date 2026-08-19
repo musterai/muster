@@ -60,6 +60,8 @@ export interface Card {
   board_slug?: string;
 }
 
+export type CardSummary = Omit<Card, 'description'>;
+
 export interface Label {
   id: string;
   board_id: string;
@@ -96,6 +98,17 @@ export type Principal = (User & { kind: 'user' }) | (Agent & { kind: 'agent' });
 
 /** Document without its markdown body — cards embed this, never the full content. */
 export type DocumentSummary = Omit<Document, 'content'>;
+
+export interface PageInfo {
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+export interface Page<T> {
+  items: T[];
+  page: PageInfo;
+}
 
 export interface CardDetails extends Card {
   assignees: CardAssignee[];
@@ -185,6 +198,8 @@ export interface DocumentVersion {
   created_at: string;
 }
 
+export type DocumentVersionSummary = Omit<DocumentVersion, 'content'>;
+
 export interface Event {
   id: string;
   project_id: string;
@@ -247,6 +262,8 @@ export interface KBFact {
   entity_identifier?: string;
 }
 
+export type KBFactSummary = Omit<KBFact, 'content'>;
+
 export interface KBRelation {
   id: string;
   kb_id: string;
@@ -264,6 +281,7 @@ export interface EntityKnowledgeResult {
   facts: KBFact[];
   outgoing_relations: KBRelation[];
   incoming_relations: KBRelation[];
+  page: Page<unknown>['page'];
 }
 
 export interface KBGraphNode {
@@ -280,12 +298,13 @@ export interface KBGraphLink {
   source: string;
   target: string;
   relation_type: string;
-  description: string | null;
+  description?: string | null;
 }
 
 export interface KBGraphTree {
   nodes: KBGraphNode[];
   links: KBGraphLink[];
+  page: Page<unknown>['page'];
 }
 
 /** Response shape of GET /auth/me — the signed-in state of the current browser session. */
@@ -338,6 +357,7 @@ export interface McpAuthorizeDetails {
   resource: string;
   agents: { id: string; name: string; role_id: string | null }[];
   roles: { id: string; name: string }[];
+  page: Page<unknown>['page'];
 }
 
 /** A privileged-action audit record (MUS-30) — security trail, never client-writable. */

@@ -33,7 +33,7 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [facts, setFacts] = useState<KBFact[]>([]);
-  const [graphTree, setGraphTree] = useState<KBGraphTree>({ nodes: [], links: [] });
+  const [graphTree, setGraphTree] = useState<KBGraphTree>({ nodes: [], links: [], page: { limit: 100, has_more: false, next_cursor: null } });
   const [selectedEntity, setSelectedEntity] = useState<EntityKnowledgeResult | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 

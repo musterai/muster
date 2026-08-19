@@ -7,9 +7,11 @@ export function registerDocumentTools({ server, services, auth }: McpToolContext
   server.tool('list_documents', {
     project_id: z.string(),
     status: z.string().optional(),
-    parent_id: z.string().nullable().optional()
-  }, withPermission('list_documents', auth, async ({ project_id, ...filters }) => {
-    const result = await services.documentService.list(project_id, filters, auth);
+    parent_id: z.string().nullable().optional(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_documents', auth, async ({ project_id, cursor, limit, ...filters }) => {
+    const result = await services.documentService.listPage(project_id, filters, { cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -24,8 +26,11 @@ export function registerDocumentTools({ server, services, auth }: McpToolContext
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
-  server.tool('get_document', { document_id: z.string() }, withPermission('get_document', auth, async ({ document_id }) => {
-    const result = await services.documentService.getById(document_id, undefined, auth);
+  server.tool('get_document', {
+    document_id: z.string(),
+    version: z.number().int().positive().optional(),
+  }, withPermission('get_document', auth, async ({ document_id, version }) => {
+    const result = await services.documentService.getById(document_id, version, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -49,8 +54,12 @@ export function registerDocumentTools({ server, services, auth }: McpToolContext
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
-  server.tool('get_document_history', { document_id: z.string() }, withPermission('get_document_history', auth, async ({ document_id }) => {
-    const result = await services.documentService.getHistory(document_id, auth);
+  server.tool('get_document_history', {
+    document_id: z.string(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('get_document_history', auth, async ({ document_id, cursor, limit }) => {
+    const result = await services.documentService.getHistoryPage(document_id, { cursor, limit }, auth);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -60,4 +69,3 @@ export function registerDocumentTools({ server, services, auth }: McpToolContext
   }));
 
 }
-
