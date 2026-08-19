@@ -2,6 +2,7 @@
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Event, CreateEvent } from '../shared/types.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 export type EventCallback = (event: Event) => void | Promise<void>;
 
@@ -174,5 +175,34 @@ export class EventService {
       ...r,
       payload: r.payload ? JSON.parse(r.payload) : null,
     }));
+  }
+
+  async listPage(
+    projectId: string,
+    filters: { entity_type?: string; entity_id?: string; since?: string } = {},
+    options: PageOptions = {},
+  ): Promise<Page<Event>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `events:${JSON.stringify({ projectId, entity_type: filters.entity_type || null, entity_id: filters.entity_id || null, since: filters.since || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    let sql = `SELECT e.*, COALESCE(a.name, u.display_name) as actor_name, p.kind as actor_kind
+      FROM event e
+      LEFT JOIN principal p ON e.actor_id = p.id
+      LEFT JOIN agent a ON e.actor_id = a.id
+      LEFT JOIN app_user u ON e.actor_id = u.id
+      WHERE e.project_id = ?`;
+    const params: unknown[] = [projectId];
+    if (filters.entity_type) { sql += ' AND e.entity_type = ?'; params.push(filters.entity_type); }
+    if (filters.entity_id) { sql += ' AND e.entity_id = ?'; params.push(filters.entity_id); }
+    if (filters.since) { sql += ' AND e.created_at >= ?'; params.push(filters.since); }
+    if (cursor) {
+      sql += ' AND (e.created_at < ? OR (e.created_at = ? AND e.id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY e.created_at DESC, e.id DESC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<any>(sql, params);
+    const events: Event[] = rows.map(row => ({ ...row, payload: row.payload ? JSON.parse(row.payload) : null }));
+    return toPage(events, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 }

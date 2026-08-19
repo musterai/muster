@@ -7,6 +7,7 @@ import {
   KBEntity,
   UpsertKBEntity,
   KBFact,
+  KBFactSummary,
   AddGainedKnowledge,
   KBRelation,
   AddKBRelation,
@@ -16,6 +17,7 @@ import {
   KBGraphLink
 } from '../shared/types.js';
 import { EventService } from './event.service.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageInfo, PageOptions, toPage } from '../shared/pagination.js';
 
 export class KBService {
   constructor(
@@ -120,6 +122,28 @@ export class KBService {
     }
 
     return kbs;
+  }
+
+  async listPage(projectId?: string, options: PageOptions = {}): Promise<Page<KnowledgeBase>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `knowledge-bases:${projectId || 'global'}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [];
+    let sql = projectId
+      ? `SELECT DISTINCT kb.* FROM knowledge_base kb
+         LEFT JOIN project_knowledge_base pkb ON kb.id = pkb.kb_id
+         WHERE (kb.is_global = 1 OR pkb.project_id = ?)`
+      : 'SELECT kb.* FROM knowledge_base kb WHERE 1 = 1';
+    if (projectId) params.push(projectId);
+    if (cursor) {
+      sql += ' AND (kb.created_at < ? OR (kb.created_at = ? AND kb.id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY kb.created_at DESC, kb.id DESC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<KnowledgeBase>(sql, params);
+    for (const kb of rows.slice(0, limit)) kb.linked_project_ids = await this.getLinkedProjectIds(kb.id);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
   async linkProject(kbId: string, projectId: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
@@ -240,6 +264,24 @@ export class KBService {
       );
     }
     return this.db.query<KBEntity>('SELECT * FROM kb_entity WHERE kb_id = ? ORDER BY name ASC', [kbId]);
+  }
+
+  async listEntitiesPage(kbId: string, type?: string, options: PageOptions = {}): Promise<Page<KBEntity>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `kb-entities:${JSON.stringify({ kbId, type: type || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const clauses = ['kb_id = ?'];
+    const params: unknown[] = [kbId];
+    if (type) { clauses.push('type = ?'); params.push(type); }
+    if (cursor) {
+      clauses.push('(name > ? OR (name = ? AND id > ?))');
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<KBEntity>(
+      `SELECT * FROM kb_entity WHERE ${clauses.join(' AND ')} ORDER BY name ASC, id ASC LIMIT ?`, params,
+    );
+    return toPage(rows, limit, row => encodeCursor(scope, [row.name, row.id]));
   }
 
   async deleteEntity(id: string): Promise<void> {
@@ -391,6 +433,39 @@ export class KBService {
     sql += ' ORDER BY f.created_at DESC';
 
     return this.db.query<KBFact>(sql, params);
+  }
+
+  async listFactsPage(
+    kbId: string,
+    filters: { entityId?: string; category?: string } = {},
+    options: PageOptions = {},
+  ): Promise<Page<KBFactSummary>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `kb-facts:${JSON.stringify({ kbId, entityId: filters.entityId || null, category: filters.category || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    let sql = `SELECT f.id, f.kb_id, f.entity_id, f.title, f.category, f.confidence,
+      f.source_principal_id, f.created_at, f.updated_at, e.name as entity_name,
+      e.identifier as entity_identifier
+      FROM kb_fact f LEFT JOIN kb_entity e ON f.entity_id = e.id WHERE f.kb_id = ?`;
+    const params: unknown[] = [kbId];
+    if (filters.entityId) { sql += ' AND f.entity_id = ?'; params.push(filters.entityId); }
+    if (filters.category) { sql += ' AND f.category = ?'; params.push(filters.category); }
+    if (cursor) {
+      sql += ' AND (f.created_at < ? OR (f.created_at = ? AND f.id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY f.created_at DESC, f.id DESC LIMIT ?';
+    params.push(limit + 1);
+    const rows = await this.db.query<KBFactSummary>(sql, params);
+    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+  }
+
+  async getFactById(id: string): Promise<KBFact | null> {
+    const rows = await this.db.query<KBFact>(
+      `SELECT f.*, e.name as entity_name, e.identifier as entity_identifier
+       FROM kb_fact f LEFT JOIN kb_entity e ON f.entity_id = e.id WHERE f.id = ?`, [id],
+    );
+    return rows[0] || null;
   }
 
   async deleteFact(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
@@ -547,6 +622,7 @@ export class KBService {
   }
 
   async searchKnowledge(query: string, kbIds?: string[], limit: number = 20): Promise<{ facts: KBFact[]; entities: KBEntity[] }> {
+    limit = normalizePageLimit(limit);
     const pattern = `%${query}%`;
     let factSql = `SELECT f.*, e.name as entity_name, e.identifier as entity_identifier
                    FROM kb_fact f
@@ -578,6 +654,82 @@ export class KBService {
     const entities = await this.db.query<KBEntity>(entitySql, entityParams);
 
     return { facts, entities };
+  }
+
+  async searchKnowledgePage(
+    query: string,
+    kbIds?: string[],
+    options: PageOptions = {},
+  ): Promise<{ facts: KBFactSummary[]; entities: KBEntity[]; page: PageInfo }> {
+    const limit = normalizePageLimit(options.limit ?? 20);
+    const normalizedKbIds = kbIds ? [...kbIds].sort() : undefined;
+    const scope = `knowledge-search:${JSON.stringify({ query, kbIds: normalizedKbIds || null })}`;
+    const cursor = decodeCursor(options.cursor, scope, 6);
+    const factDone = cursor?.[4] === '1';
+    const entityDone = cursor?.[5] === '1';
+    const pattern = `%${query}%`;
+    let facts: KBFactSummary[] = [];
+    let entities: KBEntity[] = [];
+
+    if (!factDone) {
+      let sql = `SELECT f.id, f.kb_id, f.entity_id, f.title, f.category, f.confidence,
+        f.source_principal_id, f.created_at, f.updated_at, e.name as entity_name,
+        e.identifier as entity_identifier FROM kb_fact f
+        LEFT JOIN kb_entity e ON f.entity_id = e.id
+        WHERE (f.title LIKE ? OR f.content LIKE ? OR f.category LIKE ?)`;
+      const params: unknown[] = [pattern, pattern, pattern];
+      if (normalizedKbIds?.length) {
+        sql += ` AND f.kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
+        params.push(...normalizedKbIds);
+      }
+      if (cursor && cursor[0]) {
+        sql += ' AND (f.created_at < ? OR (f.created_at = ? AND f.id < ?))';
+        params.push(cursor[0], cursor[0], cursor[1]);
+      }
+      sql += ' ORDER BY f.created_at DESC, f.id DESC LIMIT ?';
+      params.push(limit + 1);
+      facts = await this.db.query<KBFactSummary>(sql, params);
+    }
+
+    if (!entityDone) {
+      let sql = 'SELECT * FROM kb_entity WHERE (name LIKE ? OR identifier LIKE ? OR type LIKE ?)';
+      const params: unknown[] = [pattern, pattern, pattern];
+      if (normalizedKbIds?.length) {
+        sql += ` AND kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
+        params.push(...normalizedKbIds);
+      }
+      if (cursor && cursor[2]) {
+        sql += ' AND (updated_at < ? OR (updated_at = ? AND id < ?))';
+        params.push(cursor[2], cursor[2], cursor[3]);
+      }
+      sql += ' ORDER BY updated_at DESC, id DESC LIMIT ?';
+      params.push(limit + 1);
+      entities = await this.db.query<KBEntity>(sql, params);
+    }
+
+    const factMore = facts.length > limit;
+    const entityMore = entities.length > limit;
+    const factItems = facts.slice(0, limit);
+    const entityItems = entities.slice(0, limit);
+    const lastFact = factItems[factItems.length - 1];
+    const lastEntity = entityItems[entityItems.length - 1];
+    const hasMore = factMore || entityMore;
+    return {
+      facts: factItems,
+      entities: entityItems,
+      page: {
+        limit,
+        has_more: hasMore,
+        next_cursor: hasMore ? encodeCursor(scope, [
+          lastFact?.created_at || cursor?.[0] || '',
+          lastFact?.id || cursor?.[1] || '',
+          lastEntity?.updated_at || cursor?.[2] || '',
+          lastEntity?.id || cursor?.[3] || '',
+          factMore ? '0' : '1',
+          entityMore ? '0' : '1',
+        ]) : null,
+      },
+    };
   }
 
   async getGraphTree(kbId?: string, projectId?: string): Promise<KBGraphTree> {

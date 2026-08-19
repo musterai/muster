@@ -68,6 +68,10 @@ const documentStatus = z.enum(['draft', 'in_review', 'approved', 'archived']);
 const cardLinkType = z.enum(['blocks', 'blocked_by', 'relates_to', 'duplicates', 'parent_of', 'child_of']);
 const workLinkKind = z.enum(['branch', 'pull_request', 'commit', 'pipeline']);
 const workLinkProvider = z.enum(['forgejo', 'github', 'gitlab', 'other']);
+const paginationQuery = {
+  cursor: z.string().trim().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  limit: queryInteger(1, 100).optional(),
+};
 
 /** Empty inputs are still validated: `{ unexpected: true }` is rejected. */
 export const noBodySchema = z.preprocess((value) => value ?? {}, strictObject({}));
@@ -123,13 +127,16 @@ export const columnUpdateSchema = nonEmptyUpdate(strictObject({
 export const cardSearchQuerySchema = strictObject({
   q: textSchema(MAX_QUERY),
   exclude_card_id: optionalId,
+  ...paginationQuery,
 });
 export const cardListQuerySchema = strictObject({
   column_id: optionalId,
   assignee_id: optionalId,
   label: textSchema(MAX_LABEL).optional(),
   archived: queryBoolean.optional(),
+  ...paginationQuery,
 });
+export const collectionQuerySchema = strictObject({ ...paginationQuery });
 // Shared with MCP through `src/shared/card-input-schema.ts`; REST supplies
 // `column_id` through `columnIdParamsSchema` while MCP includes it in its
 // strict tool-input envelope.
@@ -181,6 +188,7 @@ export const cardWorkLinkSchema = strictObject({
 export const documentListQuerySchema = strictObject({
   status: documentStatus.optional(),
   parent_id: z.union([id, z.literal('null')]).optional(),
+  ...paginationQuery,
 });
 export const documentCreateSchema = strictObject({
   parent_id: optionalId,
@@ -246,7 +254,7 @@ export const tokenCreateSchema = strictObject({
 export const invitationCreateSchema = strictObject({ email: emailSchema, role_id: id });
 
 // Knowledge base.
-export const kbListQuerySchema = strictObject({ project_id: optionalId });
+export const kbListQuerySchema = strictObject({ project_id: optionalId, ...paginationQuery });
 export const kbCreateSchema = strictObject({
   name: textSchema(MAX_NAME),
   description: textSchema(200_000, 0).optional(),
@@ -258,6 +266,7 @@ export const kbSearchQuerySchema = strictObject({
   q: textSchema(MAX_QUERY),
   kb_id: optionalId,
   project_id: optionalId,
+  ...paginationQuery,
 });
 export const kbGraphQuerySchema = strictObject({ kb_id: optionalId, project_id: optionalId });
 export const kbEntityKnowledgeQuerySchema = strictObject({
@@ -267,8 +276,8 @@ export const kbEntityKnowledgeQuerySchema = strictObject({
 }).refine(value => value.q !== undefined || value.identifier !== undefined, {
   message: 'q or identifier is required',
 });
-export const kbEntityListQuerySchema = strictObject({ type: textSchema(MAX_LABEL).optional() });
-export const kbFactsQuerySchema = strictObject({ entity_id: optionalId, category: textSchema(MAX_LABEL).optional() });
+export const kbEntityListQuerySchema = strictObject({ type: textSchema(MAX_LABEL).optional(), ...paginationQuery });
+export const kbFactsQuerySchema = strictObject({ entity_id: optionalId, category: textSchema(MAX_LABEL).optional(), ...paginationQuery });
 export const kbEntityCreateSchema = strictObject({
   kb_id: id,
   name: textSchema(MAX_NAME),
@@ -323,13 +332,13 @@ export const kbRelationCreateSchema = strictObject({
 export const auditQuerySchema = strictObject({
   actor_id: optionalId,
   action: textSchema(MAX_LABEL).optional(),
-  limit: queryInteger(1, 1_000).optional(),
+  ...paginationQuery,
 });
 export const eventQuerySchema = strictObject({
   entity_type: z.enum(['project', 'board', 'column', 'card', 'document', 'agent', 'knowledge_base']).optional(),
   entity_id: optionalId,
   since: isoDateSchema.optional(),
-  limit: queryInteger(1, 1_000).optional(),
+  ...paginationQuery,
 });
 
 // OIDC, device authorization, and MCP-native OAuth.

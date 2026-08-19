@@ -8,6 +8,7 @@ import type { AuthContext, PrincipalRef } from '../shared/auth-context.js';
 import { PermissionDeniedError, WORKSPACE_READ } from '../shared/permission-enforcer.js';
 import { config } from '../config/index.js';
 import { assertAgentSelectorScope } from './agent-scope.authorization.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 export class AgentService {
   constructor(
@@ -308,6 +309,35 @@ export class AgentService {
       workspace_id: row.workspace_id,
       created_at: row.created_at,
     }));
+  }
+
+  async listPage(workspaceId?: string | null, options: PageOptions = {}): Promise<Page<Agent>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `agents:${workspaceId || 'global'}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (workspaceId) { clauses.push('workspace_id = ?'); params.push(workspaceId); }
+    if (cursor) {
+      clauses.push('(created_at > ? OR (created_at = ? AND id > ?))');
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    const sql = `SELECT * FROM agent${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''}
+      ORDER BY created_at ASC, id ASC LIMIT ?`;
+    params.push(limit + 1);
+    const rows = await this.db.query<any>(sql, params);
+    const agents: Agent[] = rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      capabilities: row.capabilities ? JSON.parse(row.capabilities) : [],
+      status: row.status,
+      last_seen_at: row.last_seen_at,
+      operator_user_id: row.operator_user_id,
+      role_id: row.role_id,
+      workspace_id: row.workspace_id,
+      created_at: row.created_at,
+    }));
+    return toPage(agents, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
   async heartbeat(id: string, auth?: AuthContext): Promise<Agent> {

@@ -7,6 +7,7 @@
 import crypto from 'node:crypto';
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 import { ApiToken, CreatedApiToken } from '../shared/types.js';
 import { AuthContext, PrincipalKind } from '../shared/auth-context.js';
 import { ValidationError } from '../shared/errors.js';
@@ -509,6 +510,24 @@ export class TokenService {
     }
 
     return rows.map(this.mapRow);
+  }
+
+  async listPage(principalId: string, options: PageOptions = {}): Promise<Page<ApiToken>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `tokens:${principalId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [principalId];
+    let cursorSql = '';
+    if (cursor) {
+      cursorSql = ' AND (created_at < ? OR (created_at = ? AND id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<any>(
+      `SELECT id, principal_id, workspace_id, name, prefix, expires_at, revoked_at, last_used_at, created_at
+       FROM api_token WHERE principal_id = ?${cursorSql} ORDER BY created_at DESC, id DESC LIMIT ?`, params,
+    );
+    return toPage(rows.map(this.mapRow), limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
   /**

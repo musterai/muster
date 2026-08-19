@@ -4,15 +4,18 @@ import { ProjectService } from '../../services/project.service.js';
 import { AuditService } from '../../services/audit.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
 import { validateRequest } from '../middleware/validate.js';
-import { idParamsSchema, projectCreateSchema, projectUpdateSchema } from '../schemas.js';
+import { collectionQuerySchema, idParamsSchema, projectCreateSchema, projectUpdateSchema } from '../schemas.js';
 import { DatabaseAdapter } from '../../db/adapter.js';
 
 export function createProjectRouter(db: DatabaseAdapter, projectService: ProjectService, auditService: AuditService): Router {
   const router = Router();
 
-  router.get('/', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/', ...validateRequest({ query: collectionQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const projects = await projectService.list();
+      const projects = await projectService.listPage({
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(projects);
     } catch (err) {
       next(err);

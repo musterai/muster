@@ -1,5 +1,5 @@
 // File: src/web/api.ts
-import { Project, Board, Column, Card, CardDetails, Document, DocumentVersion, Agent, User, AuthMe, Role, Invitation, CreatedInvitation, DeviceGrantInfo, McpAuthorizeDetails, AuditRecord, Event, ProjectSummary, Label, KnowledgeBase, KBEntity, KBFact, KBRelation, EntityKnowledgeResult, KBGraphTree, CardLinkRelationType, CreateCardWorkLink, ApiToken, CreatedApiToken } from './types.js';
+import { Project, Board, Column, Card, CardSummary, CardDetails, Document, DocumentSummary, DocumentVersion, DocumentVersionSummary, Agent, User, AuthMe, Role, Invitation, CreatedInvitation, DeviceGrantInfo, McpAuthorizeDetails, AuditRecord, Event, ProjectSummary, Label, KnowledgeBase, KBEntity, KBFact, KBFactSummary, KBRelation, EntityKnowledgeResult, KBGraphTree, CardLinkRelationType, CreateCardWorkLink, ApiToken, CreatedApiToken, Page } from './types.js';
 
 const API_BASE = '/api/v1';
 
@@ -62,9 +62,23 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/** Follow only server-issued opaque cursors; every individual response stays bounded. */
+async function fetchAllPages<T>(url: string): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | null = null;
+  do {
+    const separator = url.includes('?') ? '&' : '?';
+    const response: Page<T> = await fetchJSON<Page<T>>(`${url}${separator}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    items.push(...response.items);
+    cursor = response.page.has_more ? response.page.next_cursor : null;
+    if (response.page.has_more && !cursor) throw new Error('Paginated response omitted its continuation cursor');
+  } while (cursor);
+  return items;
+}
+
 export const api = {
   // Projects
-  getProjects: () => fetchJSON<Project[]>('/projects'),
+  getProjects: () => fetchAllPages<Project>('/projects'),
   createProject: (data: { name: string; description?: string }) => fetchJSON<Project>('/projects', { method: 'POST', body: JSON.stringify(data) }),
   getProjectSummary: (id: string) => fetchJSON<ProjectSummary>(`/projects/${id}/summary`),
   updateProject: (id: string, data: { name?: string; description?: string }) =>
@@ -72,16 +86,24 @@ export const api = {
   deleteProject: (id: string) => fetchJSON<void>(`/projects/${id}`, { method: 'DELETE' }),
 
   // Boards
-  getBoards: (projectId: string) => fetchJSON<Board[]>(`/projects/${projectId}/boards`),
+  getBoards: (projectId: string) => fetchAllPages<Board>(`/projects/${projectId}/boards`),
   createBoard: (projectId: string, name: string, template?: 'simple' | 'standard', columns?: string[]) =>
     fetchJSON<Board>(`/projects/${projectId}/boards`, { method: 'POST', body: JSON.stringify({ name, template, columns }) }),
-  getBoardDetails: (id: string, projectId?: string) => {
+  getBoardDetails: async (id: string, projectId?: string) => {
     if (id === 'all' && projectId) {
-      return fetchJSON<Board & { columns: Column[]; cards: Card[] }>(`/projects/${projectId}/all-boards`);
+      const details = await fetchJSON<Board & { columns: Column[]; cards: CardSummary[] }>(`/projects/${projectId}/all-boards?limit=100`);
+      const cards = await fetchAllPages<CardSummary>(`/projects/${projectId}/cards`);
+      return { ...details, cards: cards as Card[] };
     }
-    return fetchJSON<Board & { columns: Column[]; cards: Card[] }>(`/boards/${id}`);
+    const details = await fetchJSON<Board & { columns: Column[]; cards: CardSummary[] }>(`/boards/${id}?limit=100`);
+    const cards = await fetchAllPages<CardSummary>(`/boards/${id}/cards`);
+    return { ...details, cards: cards as Card[] };
   },
-  getAllBoardsDetails: (projectId: string) => fetchJSON<Board & { columns: Column[]; cards: Card[] }>(`/projects/${projectId}/all-boards`),
+  getAllBoardsDetails: async (projectId: string) => {
+    const details = await fetchJSON<Board & { columns: Column[]; cards: CardSummary[] }>(`/projects/${projectId}/all-boards?limit=100`);
+    const cards = await fetchAllPages<CardSummary>(`/projects/${projectId}/cards`);
+    return { ...details, cards: cards as Card[] };
+  },
   updateBoard: (id: string, name: string) => fetchJSON<Board>(`/boards/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
   deleteBoard: (id: string) => fetchJSON<void>(`/boards/${id}`, { method: 'DELETE' }),
 
@@ -92,7 +114,7 @@ export const api = {
   deleteColumn: (id: string) => fetchJSON<void>(`/columns/${id}`, { method: 'DELETE' }),
 
   // Cards
-  getCards: (boardId: string) => fetchJSON<Card[]>(`/boards/${boardId}/cards`),
+  getCards: (boardId: string) => fetchAllPages<CardSummary>(`/boards/${boardId}/cards`) as Promise<Card[]>,
   createCard: (columnId: string, data: { title: string; description?: string; priority?: string; labels?: string[]; assignees?: string[]; is_epic?: boolean; operator_override?: boolean }) =>
     fetchJSON<Card>(`/columns/${columnId}/cards`, { method: 'POST', body: JSON.stringify(data) }),
   getCardDetails: (id: string) => fetchJSON<CardDetails>(`/cards/${id}`),
@@ -111,7 +133,7 @@ export const api = {
   searchCards: (projectId: string, query: string, excludeCardId?: string) => {
     let url = `/projects/${projectId}/cards/search?q=${encodeURIComponent(query)}`;
     if (excludeCardId) url += `&exclude_card_id=${excludeCardId}`;
-    return fetchJSON<Card[]>(url);
+    return fetchAllPages<CardSummary>(url) as Promise<Card[]>;
   },
   linkCard: (cardId: string, targetCardId: string, relationType: CardLinkRelationType) =>
     fetchJSON<CardDetails>(`/cards/${cardId}/links`, { method: 'POST', body: JSON.stringify({ target_card_id: targetCardId, relation_type: relationType }) }),
@@ -123,7 +145,10 @@ export const api = {
 
 
   // Documents
-  getDocuments: (projectId: string) => fetchJSON<Document[]>(`/projects/${projectId}/documents`),
+  getDocuments: async (projectId: string) => {
+    const summaries = await fetchAllPages<DocumentSummary>(`/projects/${projectId}/documents`);
+    return Promise.all(summaries.map(summary => api.getDocumentDetails(summary.id)));
+  },
   createDocument: (projectId: string, data: { title: string; content: string; parent_id?: string; author_id?: string }) =>
     fetchJSON<Document>(`/projects/${projectId}/documents`, { method: 'POST', body: JSON.stringify(data) }),
   getDocumentDetails: (id: string) => fetchJSON<Document>(`/documents/${id}`),
@@ -131,7 +156,13 @@ export const api = {
     fetchJSON<Document>(`/documents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteDocument: (id: string) => fetchJSON<{ success: boolean }>(`/documents/${id}`, { method: 'DELETE' }),
   setDocumentStatus: (id: string, status: 'in_review' | 'approved', expectedVersion: number) => fetchJSON<Document>(`/documents/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status, expected_version: expectedVersion }) }),
-  getDocumentHistory: (id: string) => fetchJSON<DocumentVersion[]>(`/documents/${id}/versions`),
+  getDocumentHistory: async (id: string) => {
+    const summaries = await fetchAllPages<DocumentVersionSummary>(`/documents/${id}/versions`);
+    return Promise.all(summaries.map(async summary => {
+      const document = await fetchJSON<Document>(`/documents/${id}?version=${summary.version}`);
+      return { ...summary, content: document.content };
+    }));
+  },
 
   // Auth
   getMe: () => fetchJSON<AuthMe>('/auth/me'),
@@ -147,14 +178,14 @@ export const api = {
   },
 
   // Users (workspace members — humans only)
-  getUsers: () => fetchJSON<User[]>(`/users`),
+  getUsers: () => fetchAllPages<User>(`/users`),
   changeMemberRole: (workspaceId: string, userId: string, roleId: string) =>
     fetchJSON<User>(`/workspaces/${workspaceId}/members/${userId}`, { method: 'PUT', body: JSON.stringify({ role_id: roleId }) }),
   removeMember: (workspaceId: string, userId: string) =>
     fetchJSON<void>(`/workspaces/${workspaceId}/members/${userId}`, { method: 'DELETE' }),
 
   // Roles
-  getRoles: (workspaceId: string) => fetchJSON<Role[]>(`/workspaces/${workspaceId}/roles`),
+  getRoles: (workspaceId: string) => fetchAllPages<Role>(`/workspaces/${workspaceId}/roles`),
   createRole: (workspaceId: string, data: { key: string; name: string; description?: string; permissions: string[]; rank?: number }) =>
     fetchJSON<Role>(`/workspaces/${workspaceId}/roles`, { method: 'POST', body: JSON.stringify(data) }),
   updateRole: (id: string, data: { name?: string; description?: string; permissions?: string[]; rank?: number }) =>
@@ -164,7 +195,7 @@ export const api = {
     fetchJSON<Role>(`/roles/${id}/clone`, { method: 'POST', body: JSON.stringify({ new_key: newKey, new_name: newName }) }),
 
   // Invitations
-  getInvitations: (workspaceId: string) => fetchJSON<Invitation[]>(`/workspaces/${workspaceId}/invitations`),
+  getInvitations: (workspaceId: string) => fetchAllPages<Invitation>(`/workspaces/${workspaceId}/invitations`),
   createInvitation: (workspaceId: string, email: string, roleId: string) =>
     fetchJSON<CreatedInvitation>(`/workspaces/${workspaceId}/invitations`, { method: 'POST', body: JSON.stringify({ email, role_id: roleId }) }),
   revokeInvitation: (id: string) => fetchJSON<void>(`/invitations/${id}`, { method: 'DELETE' }),
@@ -185,11 +216,11 @@ export const api = {
     if (filters.actor_id) qs.set('actor_id', filters.actor_id);
     if (filters.action) qs.set('action', filters.action);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return fetchJSON<AuditRecord[]>(`/workspaces/${workspaceId}/audit-log${suffix}`);
+    return fetchAllPages<AuditRecord>(`/workspaces/${workspaceId}/audit-log${suffix}`);
   },
 
   // Agents & Settings
-  getAgents: () => fetchJSON<Agent[]>(`/agents`),
+  getAgents: () => fetchAllPages<Agent>(`/agents`),
   registerAgent: (data: { name: string; capabilities?: string }) =>
     fetchJSON<Agent>(`/agents`, { method: 'POST', body: JSON.stringify(data) }),
   updateAgent: (id: string, data: { name?: string; capabilities?: string; status?: string; operator_user_id?: string | null; role_id?: string | null }) =>
@@ -200,10 +231,13 @@ export const api = {
 
 
   // Events
-  getEvents: (projectId: string, limit: number = 30) => fetchJSON<Event[]>(`/projects/${projectId}/events?limit=${limit}`),
+  getEvents: async (projectId: string, limit: number = 30) => {
+    const page = await fetchJSON<Page<Event>>(`/projects/${projectId}/events?limit=${Math.min(Math.max(limit, 1), 100)}`);
+    return page.items;
+  },
 
   // Knowledge Base
-  getKBs: (projectId?: string) => fetchJSON<KnowledgeBase[]>(projectId ? `/kbs?project_id=${projectId}` : '/kbs'),
+  getKBs: (projectId?: string) => fetchAllPages<KnowledgeBase>(projectId ? `/kbs?project_id=${projectId}` : '/kbs'),
   createKB: (data: { name: string; description?: string; is_global?: boolean; project_ids?: string[] }) =>
     fetchJSON<KnowledgeBase>('/kbs', { method: 'POST', body: JSON.stringify(data) }),
   linkKB: (kbId: string, projectId: string) => fetchJSON<void>(`/kbs/${kbId}/link`, { method: 'POST', body: JSON.stringify({ project_id: projectId }) }),
@@ -213,7 +247,19 @@ export const api = {
     let url = `/kbs/search?q=${encodeURIComponent(query)}`;
     if (kbId) url += `&kb_id=${kbId}`;
     if (projectId) url += `&project_id=${projectId}`;
-    return fetchJSON<{ facts: KBFact[]; entities: KBEntity[] }>(url);
+    return (async () => {
+      const summaries: KBFactSummary[] = [];
+      const entities: KBEntity[] = [];
+      let cursor: string | null = null;
+      do {
+        const response: { facts: KBFactSummary[]; entities: KBEntity[]; page: Page<never>['page'] } = await fetchJSON(`${url}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+        summaries.push(...response.facts);
+        entities.push(...response.entities);
+        cursor = response.page.has_more ? response.page.next_cursor : null;
+      } while (cursor);
+      const facts = await Promise.all(summaries.map(summary => api.getKBFact(summary.id)));
+      return { facts, entities };
+    })();
   },
   getGraphTree: (kbId?: string, projectId?: string) => {
     let url = '/kbs/graph';
@@ -226,7 +272,11 @@ export const api = {
     if (kbId) url += `&kb_id=${kbId}`;
     return fetchJSON<EntityKnowledgeResult>(url);
   },
-  getKBFacts: (kbId: string) => fetchJSON<KBFact[]>(`/kbs/${kbId}/facts`),
+  getKBFacts: async (kbId: string) => {
+    const summaries = await fetchAllPages<KBFactSummary>(`/kbs/${kbId}/facts`);
+    return Promise.all(summaries.map(summary => api.getKBFact(summary.id)));
+  },
+  getKBFact: (id: string) => fetchJSON<KBFact>(`/kbs/facts/${id}`),
   addFact: (data: { kb_id: string; title: string; content: string; category?: string; entity_name?: string; entity_identifier?: string; entity_type?: string }) =>
     fetchJSON<KBFact>('/kbs/facts', { method: 'POST', body: JSON.stringify(data) }),
   updateFact: (id: string, data: Partial<{ title: string; content: string; category: string; entity_name: string; entity_identifier: string; entity_type: string }>) =>
@@ -240,7 +290,7 @@ export const api = {
     fetchJSON<KBRelation>('/kbs/relations', { method: 'POST', body: JSON.stringify(data) }),
 
   // Personal Access Tokens
-  getTokens: () => fetchJSON<ApiToken[]>('/tokens'),
+  getTokens: () => fetchAllPages<ApiToken>('/tokens'),
   createToken: (data: { name: string; expires_at?: string | null }) =>
     fetchJSON<CreatedApiToken>('/tokens', { method: 'POST', body: JSON.stringify(data) }),
   revokeToken: (id: string) => fetchJSON<{ message: string; id: string }>(`/tokens/${id}`, { method: 'DELETE' }),

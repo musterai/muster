@@ -29,6 +29,7 @@ import {
   authCallbackQuerySchema,
   authLocalSchema,
   authLoginQuerySchema,
+  collectionQuerySchema,
   idParamsSchema,
   invitationCreateBodySchema,
   workspaceIdParamsSchema,
@@ -372,9 +373,12 @@ export function createAuthRouter(
     }
   });
 
-  router.get('/workspaces/:workspaceId/invitations', ...validateRequest({ params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/workspaces/:workspaceId/invitations', ...validateRequest({ query: collectionQuerySchema, params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const invitations = await invitationService.list(req.params.workspaceId);
+      const invitations = await invitationService.listPage(req.params.workspaceId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(invitations);
     } catch (err) {
       next(err);

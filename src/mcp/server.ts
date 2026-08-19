@@ -596,8 +596,11 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   // --- Project Tools ---
-  server.tool('list_projects', {}, withPermission('list_projects', auth, async () => {
-    const projects = await services.projectService.list();
+  server.tool('list_projects', {
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_projects', auth, async ({ cursor, limit }) => {
+    const projects = await services.projectService.listPage({ cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(projects, null, 2) }] };
   }));
 
@@ -634,8 +637,12 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   // --- Board & Column Tools ---
-  server.tool('list_boards', { project_id: z.string() }, withPermission('list_boards', auth, async ({ project_id }) => {
-    const boards = await services.boardService.list(project_id);
+  server.tool('list_boards', {
+    project_id: z.string(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_boards', auth, async ({ project_id, cursor, limit }) => {
+    const boards = await services.boardService.listPage(project_id, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(boards, null, 2) }] };
   }));
 
@@ -668,10 +675,10 @@ All AI agents and human operators collaborating within Muster must follow this p
     if (!board) throw new Error(`Board ${board_id} not found`);
 
     const columns = await services.columnService.list(board_id);
-    const cards = await services.cardService.list({ board_id });
+    const cards = await services.cardService.listPage({ board_id });
 
     return {
-      content: [{ type: 'text', text: JSON.stringify({ ...board, columns, cards }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({ ...board, columns, cards: cards.items, card_page: cards.page }, null, 2) }],
     };
   }));
 
@@ -712,9 +719,11 @@ All AI agents and human operators collaborating within Muster must follow this p
     column_id: z.string().optional(),
     assignee_id: z.string().optional(),
     label: z.string().optional(),
-    archived: z.boolean().optional()
-  }, withPermission('list_cards', auth, async (filters) => {
-    const cards = await services.cardService.list(filters);
+    archived: z.boolean().optional(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional().describe('Opaque continuation cursor returned by the previous page'),
+    limit: z.number().int().min(1).max(100).optional().describe('Page size; defaults to 50 and cannot exceed 100'),
+  }, withPermission('list_cards', auth, async ({ cursor, limit, ...filters }) => {
+    const cards = await services.cardService.listPage(filters, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
   }));
 
@@ -723,10 +732,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     query: z.string().trim().min(1).describe('Literal, case-insensitive substring to match against card titles'),
     exclude_card_id: cardReferenceSchema.optional().describe('Optional card ULID or human-readable key to omit from results'),
     limit: z.number().int().min(1).max(100).optional().describe('Maximum results to return; defaults to 20 and cannot exceed 100'),
-  }, withPermission('search_cards', auth, async ({ project_id, query, exclude_card_id, limit }) => {
-    const cards = await services.cardService.searchByTitle(project_id, query, {
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional().describe('Opaque continuation cursor returned by the previous page'),
+  }, withPermission('search_cards', auth, async ({ project_id, query, exclude_card_id, limit, cursor }) => {
+    const cards = await services.cardService.searchByTitlePage(project_id, query, {
       excludeCardId: exclude_card_id,
       limit,
+      cursor,
     });
     return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
   }));
@@ -919,9 +930,11 @@ All AI agents and human operators collaborating within Muster must follow this p
   server.tool('list_documents', {
     project_id: z.string(),
     status: z.string().optional(),
-    parent_id: z.string().nullable().optional()
-  }, withPermission('list_documents', auth, async ({ project_id, ...filters }) => {
-    const result = await services.documentService.list(project_id, filters);
+    parent_id: z.string().nullable().optional(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_documents', auth, async ({ project_id, cursor, limit, ...filters }) => {
+    const result = await services.documentService.listPage(project_id, filters, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -936,8 +949,11 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
-  server.tool('get_document', { document_id: z.string() }, withPermission('get_document', auth, async ({ document_id }) => {
-    const result = await services.documentService.getById(document_id);
+  server.tool('get_document', {
+    document_id: z.string(),
+    version: z.number().int().positive().optional(),
+  }, withPermission('get_document', auth, async ({ document_id, version }) => {
+    const result = await services.documentService.getById(document_id, version);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -961,8 +977,12 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
-  server.tool('get_document_history', { document_id: z.string() }, withPermission('get_document_history', auth, async ({ document_id }) => {
-    const result = await services.documentService.getHistory(document_id);
+  server.tool('get_document_history', {
+    document_id: z.string(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('get_document_history', auth, async ({ document_id, cursor, limit }) => {
+    const result = await services.documentService.getHistoryPage(document_id, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -1047,8 +1067,11 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
-  server.tool('list_agents', {}, withPermission('list_agents', auth, async () => {
-    const result = await services.agentService.list(config.auth.mode === 'enforced' ? auth.workspace_id : undefined);
+  server.tool('list_agents', {
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_agents', auth, async ({ cursor, limit }) => {
+    const result = await services.agentService.listPage(config.auth.mode === 'enforced' ? auth.workspace_id : undefined, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
@@ -1057,15 +1080,20 @@ All AI agents and human operators collaborating within Muster must follow this p
     project_id: z.string(),
     entity_type: z.string().optional(),
     entity_id: z.string().optional(),
-    limit: z.number().optional()
-  }, withPermission('get_activity', auth, async ({ project_id, ...filters }) => {
-    const result = await services.eventService.list(project_id, filters);
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('get_activity', auth, async ({ project_id, cursor, limit, ...filters }) => {
+    const result = await services.eventService.listPage(project_id, filters, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }));
 
   // --- Knowledge Base Tools ---
-  server.tool('list_knowledge_bases', { project_id: z.string().optional() }, withPermission('list_knowledge_bases', auth, async ({ project_id }) => {
-    const kbs = await services.kbService.list(project_id);
+  server.tool('list_knowledge_bases', {
+    project_id: z.string().optional(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_knowledge_bases', auth, async ({ project_id, cursor, limit }) => {
+    const kbs = await services.kbService.listPage(project_id, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(kbs, null, 2) }] };
   }));
 
@@ -1093,8 +1121,9 @@ All AI agents and human operators collaborating within Muster must follow this p
     query: z.string(),
     kb_id: z.string().optional(),
     project_id: z.string().optional(),
-    limit: z.number().optional()
-  }, withPermission('search_knowledge', auth, async ({ query, kb_id, project_id, limit }) => {
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('search_knowledge', auth, async ({ query, kb_id, project_id, cursor, limit }) => {
     let kbIds: string[] | undefined;
     if (kb_id) {
       kbIds = [kb_id];
@@ -1102,7 +1131,7 @@ All AI agents and human operators collaborating within Muster must follow this p
       const kbs = await services.kbService.list(project_id);
       kbIds = kbs.map(k => k.id);
     }
-    const results = await services.kbService.searchKnowledge(query, kbIds, limit);
+    const results = await services.kbService.searchKnowledgePage(query, kbIds, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
   }));
 
@@ -1113,6 +1142,14 @@ All AI agents and human operators collaborating within Muster must follow this p
     const result = await services.kbService.getEntityKnowledge(query, kb_id ? [kb_id] : undefined);
     if (!result) return { content: [{ type: 'text', text: `No entity knowledge found for \"${query}\"` }] };
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  }));
+
+  server.tool('get_gained_knowledge', {
+    fact_id: z.string().min(1).describe('Knowledge fact ID returned by list or search summaries'),
+  }, withPermission('get_gained_knowledge', auth, async ({ fact_id }) => {
+    const fact = await services.kbService.getFactById(fact_id);
+    if (!fact) throw new Error(`Knowledge fact ${fact_id} not found`);
+    return { content: [{ type: 'text', text: JSON.stringify(fact, null, 2) }] };
   }));
 
   server.tool('add_gained_knowledge', {
@@ -1189,8 +1226,12 @@ All AI agents and human operators collaborating within Muster must follow this p
   }));
 
   // --- Role Management Tools ---
-  server.tool('list_roles', { workspace_id: z.string() }, withPermission('list_roles', auth, async ({ workspace_id }) => {
-    const roles = await services.roleService.list(workspace_id);
+  server.tool('list_roles', {
+    workspace_id: z.string(),
+    cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, withPermission('list_roles', auth, async ({ workspace_id, cursor, limit }) => {
+    const roles = await services.roleService.listPage(workspace_id, { cursor, limit });
     return { content: [{ type: 'text', text: JSON.stringify(roles, null, 2) }] };
   }));
 

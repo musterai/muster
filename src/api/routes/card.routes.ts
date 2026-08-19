@@ -89,8 +89,10 @@ export function createCardRouter(
 
   router.get('/projects/:projectId/cards/search', ...validateRequest({ query: cardSearchQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const cards = await cardService.searchByTitle(req.params.projectId, (req.query.q as string) || '', {
+      const cards = await cardService.searchByTitlePage(req.params.projectId, (req.query.q as string) || '', {
         excludeCardId: req.query.exclude_card_id as string | undefined,
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
       });
       res.json(cards);
     } catch (err) {
@@ -100,13 +102,13 @@ export function createCardRouter(
 
   router.get('/projects/:projectId/cards', ...validateRequest({ query: cardListQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const cards = await cardService.list({
+      const cards = await cardService.listPage({
         project_id: req.params.projectId,
         column_id: req.query.column_id as string,
         assignee_id: req.query.assignee_id as string,
         label: req.query.label as string,
         archived: (req.query.archived as unknown) === true || req.query.archived === 'true',
-      });
+      }, { cursor: req.query.cursor as string | undefined, limit: req.query.limit as number | undefined });
       res.json(cards);
     } catch (err) {
       next(err);
@@ -115,13 +117,13 @@ export function createCardRouter(
 
   router.get('/boards/:boardId/cards', ...validateRequest({ query: cardListQuerySchema, params: boardIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const cards = await cardService.list({
+      const cards = await cardService.listPage({
         board_id: req.params.boardId,
         column_id: req.query.column_id as string,
         assignee_id: req.query.assignee_id as string,
         label: req.query.label as string,
         archived: (req.query.archived as unknown) === true || req.query.archived === 'true',
-      });
+      }, { cursor: req.query.cursor as string | undefined, limit: req.query.limit as number | undefined });
       res.json(cards);
     } catch (err) {
       next(err);

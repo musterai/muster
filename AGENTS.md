@@ -209,7 +209,7 @@ Custom roles can be created via `create_role`, and system roles can be cloned vi
 
 ---
 
-## 🛠️ Complete MCP Tool Registry (68 Tools)
+## 🛠️ Complete MCP Tool Registry (70 Tools)
 
 ### Project Tools
 
@@ -295,6 +295,7 @@ Custom roles can be created via `create_role`, and system roles can be cloned vi
 | `link_knowledge_base` | Link a Knowledge Base to a project. |
 | `search_knowledge` | Search gained knowledge facts, entities, IPs, hostnames, and emails. |
 | `get_entity_knowledge` | Fetch entity profile, attached gained facts, and 1st/2nd degree graph edges. |
+| `get_gained_knowledge` | Fetch a knowledge fact's full body by ID after selecting it from a bounded list or search page. |
 | `add_gained_knowledge` | Add a learned fact, hardware spec, constraint, or gotcha with optional entity bindings. |
 | `update_gained_knowledge` | Edit an existing fact's title, content, category, confidence, or entity binding. |
 | `upsert_kb_entity` | Create or update a node in the Knowledge Graph. |
@@ -320,7 +321,7 @@ src/
 │   ├── database.ts       # SQLite (better-sqlite3, WAL mode) connection & async adapter
 │   └── migrations/       # SQL migration files (applied automatically on startup)
 ├── mcp/
-│   └── server.ts         # MCP Streamable HTTP server (68 tools + collaboration_protocol prompt)
+│   └── server.ts         # MCP Streamable HTTP server (70 tools + collaboration_protocol prompt)
 ├── realtime/
 │   └── sse.ts            # Server-Sent Events broadcaster (live activity stream)
 ├── services/             # Business logic layer (projects, boards, cards, agents, documents, kb)
@@ -334,7 +335,7 @@ src/
 - **SQLite WAL Mode**: Enables concurrent reads alongside writes. Creates three files per database: `.db`, `.db-wal`, `.db-shm`.
 - **ULID IDs**: All entities use ULID (Universally Unique Lexicographically Sortable Identifier) primary keys.
 - **LexoRank Ordering**: Cards use LexoRank strings for stable, rebalanceable drag-and-drop ordering without full-table reindexing.
-- **MCP JSON-RPC 2.0 over HTTP**: All 68 tools communicate via standard `POST /mcp` with `Content-Type: application/json`. Responses are SSE-streamed (`text/event-stream`).
+- **MCP JSON-RPC 2.0 over HTTP**: All 70 tools communicate via standard `POST /mcp` with `Content-Type: application/json`. Responses are SSE-streamed (`text/event-stream`).
 
 ---
 

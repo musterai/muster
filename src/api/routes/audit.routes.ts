@@ -14,10 +14,12 @@ export function createAuditRouter(auditService: AuditService): Router {
 
   router.get('/workspaces/:workspaceId/audit-log', ...validateRequest({ query: auditQuerySchema, params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const records = await auditService.list(req.params.workspaceId, {
+      const records = await auditService.listPage(req.params.workspaceId, {
         actor_id: req.query.actor_id as string | undefined,
         action: req.query.action as string | undefined,
-        limit: typeof req.query.limit === 'number' ? req.query.limit : 100,
+      }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
       });
       res.json(records);
     } catch (err) {

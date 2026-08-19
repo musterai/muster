@@ -1,9 +1,11 @@
 // File: src/services/role.service.ts
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 import { Role, CreateRole, UpdateRole } from '../shared/types.js';
 import { PRESET_ROLES, validatePermissions } from '../shared/permissions.js';
 import { EventService } from './event.service.js';
+import { ValidationError } from '../shared/errors.js';
 
 export class RoleService {
   constructor(
@@ -87,6 +89,30 @@ export class RoleService {
       [workspaceId],
     );
     return rows.map(r => this.mapRow(r));
+  }
+
+  async listPage(workspaceId: string, options: PageOptions = {}): Promise<Page<Role>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `roles:${workspaceId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [workspaceId];
+    let cursorSql = '';
+    if (cursor) {
+      const cursorRank = Number(cursor[0]);
+      if (!Number.isSafeInteger(cursorRank)) {
+        throw new ValidationError('cursor is invalid, stale, or belongs to a different collection', {
+          field: 'cursor',
+          code: 'INVALID_CURSOR',
+        });
+      }
+      cursorSql = ' AND (rank < ? OR (rank = ? AND id < ?))';
+      params.push(cursorRank, cursorRank, cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<any>(
+      `SELECT * FROM role WHERE workspace_id = ?${cursorSql} ORDER BY rank DESC, id DESC LIMIT ?`, params,
+    );
+    return toPage(rows.map(row => this.mapRow(row)), limit, row => encodeCursor(scope, [row.rank, row.id]));
   }
 
   async getById(id: string): Promise<Role | null> {

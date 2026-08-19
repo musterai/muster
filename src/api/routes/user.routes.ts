@@ -12,7 +12,7 @@ import { AuditService } from '../../services/audit.service.js';
 import { OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
 import { assertPermissionsGrantable, PermissionDeniedError } from '../../shared/permission-enforcer.js';
 import { validateRequest } from '../middleware/validate.js';
-import { memberRoleSchema, workspaceMemberParamsSchema } from '../schemas.js';
+import { collectionQuerySchema, memberRoleSchema, workspaceMemberParamsSchema } from '../schemas.js';
 import { config } from '../../config/index.js';
 
 function requireWorkspacePathScope(req: Request): void {
@@ -26,7 +26,7 @@ function requireWorkspacePathScope(req: Request): void {
 export function createUserRouter(db: DatabaseAdapter, userService: UserService, roleService: RoleService, auditService: AuditService): Router {
   const router = Router();
 
-  router.get('/users', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/users', ...validateRequest({ query: collectionQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const authWorkspaceId = req.authContext?.workspace_id;
       const wsRows = authWorkspaceId
@@ -34,10 +34,13 @@ export function createUserRouter(db: DatabaseAdapter, userService: UserService, 
         : await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
       const workspaceId = authWorkspaceId || wsRows[0]?.id;
       if (!workspaceId) {
-        res.json([]);
+        res.json({ items: [], page: { limit: req.query.limit || 50, has_more: false, next_cursor: null } });
         return;
       }
-      const members = await userService.listMembers(workspaceId);
+      const members = await userService.listMembersPage(workspaceId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(members);
     } catch (err) {
       next(err);

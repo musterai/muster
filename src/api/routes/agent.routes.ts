@@ -4,7 +4,7 @@ import { AgentService } from '../../services/agent.service.js';
 import { CardService } from '../../services/card.service.js';
 import { AuthContext } from '../../shared/auth-context.js';
 import { validateRequest } from '../middleware/validate.js';
-import { agentRegisterSchema, agentUpdateSchema, idParamsSchema } from '../schemas.js';
+import { agentRegisterSchema, agentUpdateSchema, collectionQuerySchema, idParamsSchema } from '../schemas.js';
 import { config } from '../../config/index.js';
 import { DatabaseAdapter } from '../../db/adapter.js';
 import { AuditService } from '../../services/audit.service.js';
@@ -31,10 +31,13 @@ export function createAgentRouter(
   const router = Router();
 
   // Global agent list
-  router.get('/agents', ...validateRequest(), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/agents', ...validateRequest({ query: collectionQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth = getAuth(req);
-      const agents = await agentService.list(config.auth.mode === 'enforced' ? auth?.workspace_id : undefined);
+      const agents = await agentService.listPage(config.auth.mode === 'enforced' ? auth?.workspace_id : undefined, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(agents);
     } catch (err) {
       next(err);

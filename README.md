@@ -217,7 +217,7 @@ Muster exposes **68 MCP tools** across 8 categories. All tools communicate via s
 
 ### Knowledge Base (10)
 
-`list_knowledge_bases` · `create_knowledge_base` · `link_knowledge_base` · `search_knowledge` · `get_entity_knowledge` · `add_gained_knowledge` · `update_gained_knowledge` · `upsert_kb_entity` · `update_kb_entity` · `add_kb_relation`
+`list_knowledge_bases` · `create_knowledge_base` · `link_knowledge_base` · `search_knowledge` · `get_entity_knowledge` · `get_gained_knowledge` · `add_gained_knowledge` · `update_gained_knowledge` · `upsert_kb_entity` · `update_kb_entity` · `add_kb_relation`
 
 ### Activity (1)
 
@@ -242,7 +242,7 @@ muster/
 │   │   ├── database.ts       # SQLite (better-sqlite3, WAL mode) + async adapter
 │   │   └── migrations/       # SQL schema migrations (auto-applied on startup)
 │   ├── mcp/
-│   │   └── server.ts         # MCP Streamable HTTP server (68 tools + prompts)
+│   │   └── server.ts         # MCP Streamable HTTP server (70 tools + prompts)
 │   ├── realtime/
 │   │   └── sse.ts            # Server-Sent Events broadcaster
 │   ├── services/             # Business logic (projects, boards, cards, agents, documents)

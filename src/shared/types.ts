@@ -222,6 +222,9 @@ export interface Card {
   board_slug?: string;
 }
 
+/** Collection representation: large markdown bodies are detail-only. */
+export type CardSummary = Omit<Card, 'description'>;
+
 export interface ClaimCard {
   principal_id: string;
   ttl_seconds?: number;
@@ -343,6 +346,8 @@ export interface DocumentVersion {
   created_at: string;
   author_name?: string | null;
 }
+
+export type DocumentVersionSummary = Omit<DocumentVersion, 'content'>;
 
 /** Document without its markdown body — cards embed this, never the full content. */
 export type DocumentSummary = Omit<Document, 'content'>;
@@ -524,6 +529,9 @@ export interface KBFact {
   entity_name?: string;
   entity_identifier?: string;
 }
+
+/** Collection/search representation: potentially large fact content is detail-only. */
+export type KBFactSummary = Omit<KBFact, 'content'>;
 
 export interface AddGainedKnowledge {
   kb_id: string;

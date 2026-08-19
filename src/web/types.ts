@@ -60,6 +60,8 @@ export interface Card {
   board_slug?: string;
 }
 
+export type CardSummary = Omit<Card, 'description'>;
+
 export interface Label {
   id: string;
   board_id: string;
@@ -96,6 +98,17 @@ export type Principal = (User & { kind: 'user' }) | (Agent & { kind: 'agent' });
 
 /** Document without its markdown body — cards embed this, never the full content. */
 export type DocumentSummary = Omit<Document, 'content'>;
+
+export interface PageInfo {
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+export interface Page<T> {
+  items: T[];
+  page: PageInfo;
+}
 
 export interface CardDetails extends Card {
   assignees: CardAssignee[];
@@ -185,6 +198,8 @@ export interface DocumentVersion {
   created_at: string;
 }
 
+export type DocumentVersionSummary = Omit<DocumentVersion, 'content'>;
+
 export interface Event {
   id: string;
   project_id: string;
@@ -246,6 +261,8 @@ export interface KBFact {
   entity_name?: string;
   entity_identifier?: string;
 }
+
+export type KBFactSummary = Omit<KBFact, 'content'>;
 
 export interface KBRelation {
   id: string;

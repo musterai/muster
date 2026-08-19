@@ -4,7 +4,7 @@ import { BoardService } from '../../services/board.service.js';
 import { ColumnService } from '../../services/column.service.js';
 import { CardService } from '../../services/card.service.js';
 import { validateRequest } from '../middleware/validate.js';
-import { boardCreateSchema, boardUpdateSchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
+import { boardCreateSchema, boardUpdateSchema, collectionQuerySchema, idParamsSchema, projectIdParamsSchema } from '../schemas.js';
 
 export function createBoardRouter(
   boardService: BoardService,
@@ -13,19 +13,26 @@ export function createBoardRouter(
 ): Router {
   const router = Router();
 
-  router.get('/projects/:projectId/boards', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/boards', ...validateRequest({ query: collectionQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const boards = await boardService.list(req.params.projectId);
+      const boards = await boardService.listPage(req.params.projectId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(boards);
     } catch (err) {
       next(err);
     }
   });
 
-  router.get('/projects/:projectId/all-boards', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/projects/:projectId/all-boards', ...validateRequest({ query: collectionQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const boards = await boardService.list(req.params.projectId);
-      const cards = await cardService.list({ project_id: req.params.projectId });
+      const boardPage = await boardService.listPage(req.params.projectId, { limit: 100 });
+      const boards = boardPage.items;
+      const cards = await cardService.listPage({ project_id: req.params.projectId }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       const columnsList = await Promise.all(boards.map((b) => columnService.list(b.id)));
       const columns = columnsList.flat();
 
@@ -38,7 +45,9 @@ export function createBoardRouter(
         updated_at: new Date().toISOString(),
         boards,
         columns,
-        cards,
+        cards: cards.items,
+        card_page: cards.page,
+        board_page: boardPage.page,
       });
     } catch (err) {
       next(err);
@@ -54,13 +63,16 @@ export function createBoardRouter(
     }
   });
 
-  router.get('/boards/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/boards/:id', ...validateRequest({ query: collectionQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const board = await boardService.getById(req.params.id);
       if (!board) return res.status(404).json({ error: 'Board not found' });
       const columns = await columnService.list(board.id);
-      const cards = await cardService.list({ board_id: board.id });
-      res.json({ ...board, columns, cards });
+      const cards = await cardService.listPage({ board_id: board.id }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
+      res.json({ ...board, columns, cards: cards.items, card_page: cards.page });
     } catch (err) {
       next(err);
     }

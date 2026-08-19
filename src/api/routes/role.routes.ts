@@ -5,7 +5,7 @@ import { AuditService } from '../../services/audit.service.js';
 import { OPEN_AUTH_CONTEXT } from '../../shared/auth-context.js';
 import { assertPermissionsGrantable } from '../../shared/permission-enforcer.js';
 import { validateRequest } from '../middleware/validate.js';
-import { idParamsSchema, roleCloneSchema, roleCreateSchema, roleIdParamsSchema, roleUpdateSchema, workspaceIdParamsSchema } from '../schemas.js';
+import { collectionQuerySchema, idParamsSchema, roleCloneSchema, roleCreateSchema, roleIdParamsSchema, roleUpdateSchema, workspaceIdParamsSchema } from '../schemas.js';
 import { DatabaseAdapter } from '../../db/adapter.js';
 
 export function createRoleRouter(
@@ -20,9 +20,12 @@ export function createRoleRouter(
   const auditService = (maybeAudit || serviceOrAudit) as AuditService;
   const router = Router();
 
-  router.get('/workspaces/:workspaceId/roles', ...validateRequest({ params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
+  router.get('/workspaces/:workspaceId/roles', ...validateRequest({ query: collectionQuerySchema, params: workspaceIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const roles = await roleService.list(req.params.workspaceId);
+      const roles = await roleService.listPage(req.params.workspaceId, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      });
       res.json(roles);
     } catch (err) {
       next(err);

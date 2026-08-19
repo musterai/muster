@@ -7,6 +7,7 @@ import { BoardService } from './board.service.js';
 import { DocumentService } from './document.service.js';
 import { deriveKeyPrefix } from '../shared/card-key.js';
 import { deriveSlug } from '../shared/slug.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 
 export class ProjectService {
   constructor(
@@ -113,6 +114,21 @@ All AI agents and human operators collaborating within this project must observe
 
   async list(): Promise<Project[]> {
     return this.db.query<Project>('SELECT * FROM project ORDER BY created_at DESC');
+  }
+
+  async listPage(options: PageOptions = {}): Promise<Page<Project>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = 'projects';
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [];
+    let sql = 'SELECT * FROM project';
+    if (cursor) {
+      sql += ' WHERE (created_at < ? OR (created_at = ? AND id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT ?';
+    params.push(limit + 1);
+    return toPage(await this.db.query<Project>(sql, params), limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
   async update(id: string, data: UpdateProject, actorId?: string, adapter?: DatabaseAdapter): Promise<Project> {

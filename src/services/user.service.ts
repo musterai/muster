@@ -6,6 +6,7 @@
 
 import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
+import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
 import { ValidationError } from '../shared/errors.js';
 
 export interface AppUser {
@@ -154,6 +155,25 @@ export class UserService {
        ORDER BY u.display_name ASC`,
       [workspaceId],
     );
+  }
+
+  async listMembersPage(workspaceId: string, options: PageOptions = {}): Promise<Page<WorkspaceMember>> {
+    const limit = normalizePageLimit(options.limit);
+    const scope = `workspace-members:${workspaceId}`;
+    const cursor = decodeCursor(options.cursor, scope, 2);
+    const params: unknown[] = [workspaceId];
+    let cursorSql = '';
+    if (cursor) {
+      cursorSql = ' AND (u.display_name > ? OR (u.display_name = ? AND u.id > ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    params.push(limit + 1);
+    const rows = await this.db.query<WorkspaceMember>(
+      `SELECT u.id, u.email, u.display_name, u.avatar_url, wm.role_id, r.name as role_name, wm.joined_at
+       FROM workspace_member wm JOIN app_user u ON u.id = wm.user_id JOIN role r ON r.id = wm.role_id
+       WHERE wm.workspace_id = ?${cursorSql} ORDER BY u.display_name ASC, u.id ASC LIMIT ?`, params,
+    );
+    return toPage(rows, limit, row => encodeCursor(scope, [row.display_name, row.id]));
   }
 
   /**

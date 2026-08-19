@@ -36,11 +36,13 @@ export function createEventRouter(eventService: EventService, sseManager: SSEMan
 
   router.get('/projects/:projectId/events', ...validateRequest({ query: eventQuerySchema, params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const events = await eventService.list(req.params.projectId, {
+      const events = await eventService.listPage(req.params.projectId, {
         entity_type: req.query.entity_type as string,
         entity_id: req.query.entity_id as string,
         since: req.query.since as string,
-        limit: typeof req.query.limit === 'number' ? req.query.limit : undefined,
+      }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
       });
       res.json(events);
     } catch (err) {

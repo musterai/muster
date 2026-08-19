@@ -22,7 +22,10 @@ export const NewAgentModal: React.FC<NewAgentModalProps> = ({ onClose, onSuccess
     setIsSubmitting(true);
     setError(null);
     try {
-      await api.registerAgent({ name, capabilities });
+      await api.registerAgent({
+        name: name.trim(),
+        ...(capabilities.trim() ? { capabilities: capabilities.trim() } : {}),
+      });
       onSuccess();
       onClose();
     } catch (err: any) {
