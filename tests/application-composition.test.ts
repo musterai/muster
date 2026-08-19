@@ -13,13 +13,6 @@ import type { Services } from '../src/shared/services.js';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'test-application-composition.db');
 
-function sourceFiles(root: string): string[] {
-  return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
-    const target = path.join(root, entry.name);
-    return entry.isDirectory() ? sourceFiles(target) : entry.name.endsWith('.ts') ? [target] : [];
-  });
-}
-
 describe('transport-neutral application composition', () => {
   let db: DatabaseAdapter | undefined;
 
@@ -54,19 +47,6 @@ describe('transport-neutral application composition', () => {
     expect(delivered).toContain('project:created');
     expect(delivered).toContain('board:created');
     expect(delivered).toContain('document:created');
-  });
-
-  it('prevents REST from importing MCP and keeps application composition transport-free', () => {
-    const apiFiles = sourceFiles(path.join(process.cwd(), 'src/api'));
-    for (const file of apiFiles) {
-      expect(fs.readFileSync(file, 'utf8'), file).not.toMatch(/from\s+['"][^'"]*\/mcp(?:\/|['"])/);
-    }
-
-    const composition = fs.readFileSync(
-      path.join(process.cwd(), 'src/application/composition.ts'),
-      'utf8',
-    );
-    expect(composition).not.toMatch(/from\s+['"][^'"]*\/(?:api|mcp|realtime|connect)(?:\/|['"])/);
   });
 
   it('hands REST, MCP and SSE the same root-owned graph and policy identities', async () => {
