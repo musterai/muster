@@ -20,6 +20,10 @@ import type {
   CardAccessPolicy,
   CardLanePolicy,
   TransactionServiceFactory,
+  CardRecordQueries,
+  CardMoveOperations,
+  CardAssignmentOperations,
+  CardRelationOperations,
 } from '../services/index.js';
 import type { DatabaseAdapter } from '../db/adapter.js';
 
@@ -53,4 +57,8 @@ export interface Services {
   cardAccessPolicy: CardAccessPolicy;
   cardLanePolicy: CardLanePolicy;
   transactionServiceFactory: TransactionServiceFactory;
+  cardRecordQueries: CardRecordQueries;
+  cardMoveOperations: CardMoveOperations;
+  cardAssignmentOperations: CardAssignmentOperations;
+  cardRelationOperations: CardRelationOperations;
 }

@@ -83,6 +83,12 @@ describe('transport-neutral application composition', () => {
     expect(mcpServices).toBe(runtime.services);
     expect(runtime.services.cardService.accessPolicy).toBe(runtime.services.cardAccessPolicy);
     expect(runtime.services.cardService.lanePolicy).toBe(runtime.services.cardLanePolicy);
+    expect(runtime.services.cardService.records).toBe(runtime.services.cardRecordQueries);
+    expect(runtime.services.cardService.moveOperations).toBe(runtime.services.cardMoveOperations);
+    expect(runtime.services.cardService.assignmentOperations)
+      .toBe(runtime.services.cardAssignmentOperations);
+    expect(runtime.services.cardService.relationOperations)
+      .toBe(runtime.services.cardRelationOperations);
 
     await runtime.services.projectService.create({ name: 'Shared transport graph' });
     expect(delivered).toContain('project:created');

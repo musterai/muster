@@ -6,6 +6,10 @@ import {
   CardService,
   CardAccessPolicy,
   CardLanePolicy,
+  CardRecordQueries,
+  CardMoveOperations,
+  CardAssignmentOperations,
+  CardRelationOperations,
   ColumnService,
   CommentService,
   DeviceGrantService,
@@ -59,9 +63,33 @@ export function createApplicationServices(
   );
   const cardAccessPolicy = new CardAccessPolicy(db);
   const cardLanePolicy = new CardLanePolicy(db);
+  const cardRecordQueries = new CardRecordQueries(db);
+  const cardMoveOperations = new CardMoveOperations(
+    db,
+    eventService,
+    cardAccessPolicy,
+    cardLanePolicy,
+    cardRecordQueries,
+  );
+  const cardAssignmentOperations = new CardAssignmentOperations(
+    db,
+    eventService,
+    cardAccessPolicy,
+    cardLanePolicy,
+    cardRecordQueries,
+  );
+  const cardRelationOperations = new CardRelationOperations(
+    db,
+    eventService,
+    cardRecordQueries,
+  );
   const cardService = new CardService(db, eventService, {
     accessPolicy: cardAccessPolicy,
     lanePolicy: cardLanePolicy,
+    records: cardRecordQueries,
+    moveOperations: cardMoveOperations,
+    assignmentOperations: cardAssignmentOperations,
+    relationOperations: cardRelationOperations,
   });
 
   return {
@@ -75,6 +103,10 @@ export function createApplicationServices(
     transactionServiceFactory,
     cardAccessPolicy,
     cardLanePolicy,
+    cardRecordQueries,
+    cardMoveOperations,
+    cardAssignmentOperations,
+    cardRelationOperations,
     cardService,
     projectService: new ProjectService(db, eventService, boardService, documentService),
     columnService: new ColumnService(db, eventService),

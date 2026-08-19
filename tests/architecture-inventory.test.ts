@@ -58,7 +58,11 @@ describe('resolved architecture and construction inventory', () => {
       'AuditService',
       'BoardService',
       'CardAccessPolicy',
+      'CardAssignmentOperations',
       'CardLanePolicy',
+      'CardMoveOperations',
+      'CardRecordQueries',
+      'CardRelationOperations',
       'CardService',
       'ColumnService',
       'CommentService',
@@ -73,6 +77,7 @@ describe('resolved architecture and construction inventory', () => {
       'RoleService',
       'SessionService',
       'TokenService',
+      'TransactionServiceFactory',
       'UserService',
     ]);
     expect(() => assertCleanArchitecture(inventory)).not.toThrow();

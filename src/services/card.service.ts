@@ -3,40 +3,30 @@ import { DatabaseAdapter } from '../db/adapter.js';
 import { Card, CardAssignee, CardDetails, CardSummary, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { formatCardKey } from '../shared/card-key.js';
-import { CardRuleError, ConflictError, NotFoundError, ValidationError } from '../shared/errors.js';
+import { CardRuleError, NotFoundError, ValidationError } from '../shared/errors.js';
 import { config } from '../config/index.js';
 import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.js';
-import { assertHttpUrl } from '../shared/url.js';
-import { canonicalizeCardLink } from './helpers/card-links.helper.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { assertResourceWorkspace, assertResourcesShareWorkspace, assertResourcesWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
-import { assertAgentSelectorScope } from './agent-scope.authorization.js';
 import { CardAccessPolicy } from './card-access.policy.js';
-import { CardLanePolicy, type ColumnCapacity, type UnresolvedBlocker } from './card-lane.policy.js';
+import { CardLanePolicy, type ColumnCapacity } from './card-lane.policy.js';
 import { PermissionDeniedError, WORKSPACE_READ } from '../shared/permission-enforcer.js';
 import { assertActiveWorkspacePrincipal } from './agent-scope.authorization.js';
 import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
+import type { CardRecordQueries } from './card-record.queries.js';
+import type { CardMoveOperations } from './card-move.operations.js';
+import type { CardAssignmentOperations } from './card-assignment.operations.js';
+import type { CardRelationOperations } from './card-relation.operations.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
-const MAX_MOVE_RETRIES = 3;
-const MOVE_RETRY_DELAY_MS = 10;
-
-class MoveRetryError extends Error {
-  constructor() {
-    super('card changed lanes while its move was being serialized');
-    this.name = 'MoveRetryError';
-  }
-}
-
-function isRetryablePostgresError(error: unknown): boolean {
-  const code = (error as { code?: string }).code;
-  return code === '40P01' || code === '40001';
-}
-
 export interface CardServiceDependencies {
   accessPolicy: CardAccessPolicy;
   lanePolicy: CardLanePolicy;
+  records: CardRecordQueries;
+  moveOperations: CardMoveOperations;
+  assignmentOperations: CardAssignmentOperations;
+  relationOperations: CardRelationOperations;
 }
 
 export class CardService {
@@ -47,32 +37,18 @@ export class CardService {
   ) {
     this.accessPolicy = dependencies.accessPolicy;
     this.lanePolicy = dependencies.lanePolicy;
+    this.records = dependencies.records;
+    this.moveOperations = dependencies.moveOperations;
+    this.assignmentOperations = dependencies.assignmentOperations;
+    this.relationOperations = dependencies.relationOperations;
   }
 
   readonly accessPolicy: CardAccessPolicy;
   readonly lanePolicy: CardLanePolicy;
-
-  /**
-   * Positions are a small, untrusted ordering hint. Digits are accepted only
-   * for the historical `0a` prepend value; every persisted value is replaced
-   * by a canonical lowercase rank during the lane rebalance below.
-   */
-  private assertPosition(position: string | undefined): void {
-    this.lanePolicy.assertPosition(position);
-  }
-
-  /**
-   * A move must carry an explicit lane or rank intent. Without this guard an
-   * omitted target defaults to the current lane and an omitted rank defaults
-   * to append, silently turning an empty request into a reorder.
-   *
-   * REST and MCP reject invalid shapes at their boundaries. Keeping the
-   * invariant here is deliberate: direct service callers and future
-   * transports must not be able to mutate a card with `{}` either.
-   */
-  private assertMoveIntent(data: MoveCard): void {
-    this.lanePolicy.assertMoveIntent(data);
-  }
+  readonly records: CardRecordQueries;
+  readonly moveOperations: CardMoveOperations;
+  readonly assignmentOperations: CardAssignmentOperations;
+  readonly relationOperations: CardRelationOperations;
 
   /**
    * Resolve a card only when it belongs to the credential-selected workspace.
@@ -113,28 +89,6 @@ export class CardService {
     return this.accessPolicy.assertCardMutationScope(cardIdOrKey, auth, adapter);
   }
 
-  /** Apply deterministic canonical ranks to an already ordered lane. */
-  private async rebalanceLane(db: DatabaseAdapter, cards: Card[]): Promise<string[]> {
-    return this.lanePolicy.rebalanceLane(db, cards);
-  }
-
-  private async orderedLaneCards(columnId: string, db: DatabaseAdapter, excludeId?: string): Promise<Card[]> {
-    return this.lanePolicy.orderedLaneCards(columnId, db, excludeId);
-  }
-
-  /** Insert a card according to its requested hint, repairing duplicate/legacy ranks at the same time. */
-  private orderWithPosition(cards: Card[], card: Card, position?: string): Card[] {
-    return this.lanePolicy.orderWithPosition(cards, card, position);
-  }
-
-  private async getColumnCapacity(columnId: string, db: DatabaseAdapter = this.db): Promise<ColumnCapacity> {
-    return this.lanePolicy.getColumnCapacity(columnId, db);
-  }
-
-  private getUnresolvedBlockers(cardId: string, db: DatabaseAdapter = this.db) {
-    return this.lanePolicy.getUnresolvedBlockers(cardId, db);
-  }
-
   private async recordOverride(
     projectId: string,
     cardId: string,
@@ -165,7 +119,7 @@ export class CardService {
     if (!projectId) throw new Error(`Column ${data.column_id} is not attached to a project`);
     const { card, wipViolation } = await this.db.transaction(async (tx) => {
       let wipViolation: ColumnCapacity | null = null;
-      const capacity = await this.getColumnCapacity(data.column_id, tx);
+      const capacity = await this.lanePolicy.getColumnCapacity(data.column_id, tx);
       if (capacity.wip_limit !== null && capacity.card_count >= capacity.wip_limit) {
         wipViolation = capacity;
         if (!options.operatorOverride) {
@@ -185,13 +139,13 @@ export class CardService {
       }
 
       const key = await this.nextCardKey(projectId, tx);
-      this.assertPosition(data.position);
+      this.lanePolicy.assertPosition(data.position);
 
       const priority = data.priority || 'medium';
       const description = data.description || null;
       const due_date = data.due_date || null;
       const is_epic = data.is_epic ? 1 : 0;
-      const existingCards = await this.orderedLaneCards(data.column_id, tx);
+      const existingCards = await this.lanePolicy.orderedLaneCards(data.column_id, tx);
       const draftCard: Card = {
         id,
         key,
@@ -209,7 +163,7 @@ export class CardService {
         claim_expires_at: null,
         is_epic,
       };
-      const orderedCards = this.orderWithPosition(existingCards, draftCard, data.position);
+      const orderedCards = this.lanePolicy.orderWithPosition(existingCards, draftCard, data.position);
 
       await tx.execute(
         `INSERT INTO card (id, key, column_id, title, description, position, priority, due_date, created_at, updated_at, archived, is_epic)
@@ -217,7 +171,7 @@ export class CardService {
         [id, key, data.column_id, data.title, description, 'm', priority, due_date, created_at, updated_at, is_epic]
       );
 
-      const ranks = await this.rebalanceLane(tx, orderedCards);
+      const ranks = await this.lanePolicy.rebalanceLane(tx, orderedCards);
       const position = ranks[orderedCards.findIndex(card => card.id === id)];
 
       // Card associations and its domain event are part of the same commit
@@ -700,263 +654,18 @@ export class CardService {
   }
 
   async move(id: string, data: MoveCard, actorId?: string, options: CardOperationOptions = {}): Promise<CardDetails> {
-    // Validate before resolving the card or opening a transaction so an empty
-    // move is observably a no-op across every caller.
-    this.assertMoveIntent(data);
-    const auth = options.auth || OPEN_AUTH_CONTEXT;
-    const cardId = config.auth.mode === 'enforced'
-      ? await this.assertCardMutationScope(id, options.auth)
-      : await resolveCardId(this.db, id);
-    await assertResourceWorkspace(this.db, auth, 'card', cardId);
-    if (data.target_column_id) {
-      await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['column', data.target_column_id]]);
-      await assertResourcesShareWorkspace(this.db, [['card', cardId], ['column', data.target_column_id]]);
-      const projectRows = await this.db.query<{ source_project_id: string; target_project_id: string }>(
-        `SELECT source_board.project_id AS source_project_id, target_board.project_id AS target_project_id
-         FROM card c
-         JOIN "column" source_col ON source_col.id = c.column_id
-         JOIN board source_board ON source_board.id = source_col.board_id
-         JOIN "column" target_col ON target_col.id = ?
-         JOIN board target_board ON target_board.id = target_col.board_id
-         WHERE c.id = ?`,
-        [data.target_column_id, cardId],
-      );
-      if (!projectRows[0] || projectRows[0].source_project_id !== projectRows[0].target_project_id) {
-        throw new NotFoundError('Resource not found');
-      }
-    }
-    let completed = false;
-    for (let attempt = 0; attempt < MAX_MOVE_RETRIES; attempt++) {
-      try {
-        await this.db.transaction(async (tx) => {
-      const overrideRules: Array<Record<string, unknown>> = [];
-      let moveEvent: {
-        projectId: string;
-        fromColumnId: string;
-        toColumnId: string;
-        position: string;
-        isColumnChange: boolean;
-        toTerminal: boolean;
-        toColumnName: string;
-        cardKey: string;
-        cardTitle: string;
-      } | null = null;
-      // Read the source without locking, acquire every lane lock in canonical
-      // order, then lock the card. Every writer that rewrites lane peers uses
-      // this lane-before-card protocol; it prevents card/column wait cycles.
-      const initialRows = await tx.query<{ column_id: string }>('SELECT column_id FROM card WHERE id = ?', [cardId]);
-      const initial = initialRows[0];
-      if (!initial) throw new NotFoundError(`Card with ID ${cardId} not found`);
-      await this.assertCardMutationScope(cardId, options.auth, tx);
-      const initialTarget = data.target_column_id ?? initial.column_id;
-      // The target selector is independently scoped on every serialization
-      // attempt. Do this before lane locks, capacity reads, rank rewrites, or
-      // events so a missing/foreign target is an observable no-op.
-      await this.assertColumnWorkspaceScope(initialTarget, options.auth, tx);
-      if (tx.dialect === 'postgres') {
-        const laneIds = [...new Set([initial.column_id, initialTarget])].sort();
-        for (const laneId of laneIds) {
-          await tx.query<{ id: string }>('SELECT id FROM "column" WHERE id = ? FOR UPDATE', [laneId]);
-        }
-      }
-
-      const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
-      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [cardId]);
-      const existing = rows[0];
-      if (!existing) throw new NotFoundError(`Card with ID ${cardId} not found`);
-      if (tx.dialect === 'postgres' && existing.column_id !== initial.column_id) throw new MoveRetryError();
-
-      const target_column_id = data.target_column_id ?? existing.column_id;
-
-      const capacity = await this.getColumnCapacity(target_column_id, tx);
-      const isColumnChange = target_column_id !== existing.column_id;
-
-      if (isColumnChange && capacity.wip_limit !== null && capacity.card_count >= capacity.wip_limit) {
-        const details = {
-          rule: 'wip_limit',
-          operation: 'move',
-          column_id: capacity.id,
-          column_name: capacity.name,
-          current_count: capacity.card_count,
-          wip_limit: capacity.wip_limit,
-        };
-        if (!options.operatorOverride) {
-          throw new CardRuleError(
-            'CARD_WIP_LIMIT',
-            `Column "${capacity.name}" is at its WIP limit (${capacity.card_count}/${capacity.wip_limit}); cannot move this card there without operator override.`,
-            details,
-          );
-        }
-        overrideRules.push(details);
-      }
-
-      if (isColumnChange && capacity.name.trim().toLowerCase() === 'in progress') {
-        const blockers = await this.getUnresolvedBlockers(cardId, tx);
-        if (blockers.length > 0) {
-          const details = {
-            rule: 'blocked_by',
-            operation: 'move',
-            blockers: blockers.map(blocker => ({ ...blocker })),
-          };
-          if (!options.operatorOverride) {
-            const blockerSummary = blockers.map(blocker => `${blocker.key} "${blocker.title}"`).join(', ');
-            throw new CardRuleError(
-              'CARD_BLOCKED',
-              `Cannot move this card into "${capacity.name}" while it is blocked by ${blockerSummary}. Resolve the blocking cards or use operator override.`,
-              details,
-            );
-          }
-          overrideRules.push(details);
-        }
-      }
-
-      const targetCards = await this.orderedLaneCards(target_column_id, tx, cardId);
-      const movedCard: Card = { ...existing, column_id: target_column_id, position: 'm' };
-      const orderedTargetCards = this.orderWithPosition(targetCards, movedCard, data.position);
-      const targetRanks = await this.rebalanceLane(tx, orderedTargetCards);
-      const movedIndex = orderedTargetCards.findIndex(card => card.id === cardId);
-      const position = targetRanks[movedIndex];
-
-      // A cross-lane move repairs the source lane in the same transaction.
-      // The moved card is excluded above, so no association or card row is
-      // lost while both lanes receive deterministic, unique ranks.
-      if (isColumnChange) {
-        const sourceCards = await this.orderedLaneCards(existing.column_id, tx, cardId);
-        await this.rebalanceLane(tx, sourceCards);
-      }
-
-      const updated_at = new Date().toISOString();
-      await tx.execute(
-        `UPDATE card SET column_id = ?, position = ?, updated_at = ? WHERE id = ?`,
-        [target_column_id, position, updated_at, cardId]
-      );
-
-      const projectId = await this.getProjectIdForColumn(target_column_id, tx);
-      if (!projectId) throw new Error(`Column ${target_column_id} is not attached to a project`);
-      moveEvent = {
-        projectId,
-        fromColumnId: existing.column_id,
-        toColumnId: target_column_id,
-        position,
-        isColumnChange,
-        toTerminal: capacity.is_terminal === 1,
-        toColumnName: capacity.name,
-        cardKey: existing.key,
-        cardTitle: existing.title,
-      };
-
-      if (this.eventService) {
-        await this.eventService.create({
-          project_id: projectId,
-          entity_type: 'card',
-          entity_id: cardId,
-          action: 'moved',
-          actor_id: actorId,
-          payload: {
-            from_column_id: moveEvent.fromColumnId,
-            to_column_id: moveEvent.toColumnId,
-            position: moveEvent.position,
-          },
-        }, tx);
-
-        // MUS-45: a card landing in a terminal (Done) lane is a completion.
-        // Keep this event in the same transaction as the card move so a
-        // failed completion insert cannot leave a durable move without its
-        // corresponding audit trail.
-        if (moveEvent.isColumnChange && moveEvent.toTerminal) {
-          await this.eventService.create({
-            project_id: moveEvent.projectId,
-            entity_type: 'card',
-            entity_id: cardId,
-            action: 'completed',
-            actor_id: actorId,
-            payload: {
-              card_key: moveEvent.cardKey,
-              card_title: moveEvent.cardTitle,
-              from_column_id: moveEvent.fromColumnId,
-              to_column_id: moveEvent.toColumnId,
-              to_column_name: moveEvent.toColumnName,
-            },
-          }, tx);
-        }
-      }
-
-      if (overrideRules.length > 0) {
-        await this.recordOverride(moveEvent.projectId, cardId, actorId, 'move', { rules: overrideRules }, tx);
-      }
-
-        });
-        completed = true;
-        break;
-      } catch (error) {
-        const retryable = this.db.dialect === 'postgres' && (error instanceof MoveRetryError || isRetryablePostgresError(error));
-        if (!retryable || attempt === MAX_MOVE_RETRIES - 1) {
-          if (retryable) {
-            throw new ConflictError('Card move conflicted with concurrent lane changes; retry the move.', {
-              operation: 'move',
-              retryable: true,
-            });
-          }
-          throw error;
-        }
-        await new Promise(resolve => setTimeout(resolve, MOVE_RETRY_DELAY_MS * (attempt + 1)));
-      }
-    }
-    if (!completed) throw new ConflictError('Card move could not be serialized; retry the move.', { retryable: true });
-
-    return this.getById(cardId, this.db, auth);
+    const cardId = await this.moveOperations.move(id, data, actorId, options);
+    return this.getById(cardId, this.db, options.auth || OPEN_AUTH_CONTEXT);
   }
 
   async assign(idOrKey: string, agentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    await this.db.transaction(async tx => {
-      const cardId = config.auth.mode === 'enforced'
-        ? await this.assertCardWorkspaceScope(idOrKey, auth, tx)
-        : await resolveCardId(tx, idOrKey);
-      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['agent', agentId]]);
-      await assertResourcesShareWorkspace(tx, [['card', cardId], ['agent', agentId]]);
-      await assertAgentSelectorScope(tx, agentId, auth, 'card.assign_others');
-      const result = await tx.execute(
-        `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
-        [cardId, agentId]
-      );
-
-      if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx, auth);
-        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
-        if (projectId) {
-          await this.eventService.create({
-            project_id: projectId,
-            entity_type: 'card',
-            entity_id: cardId,
-            action: 'assigned',
-            actor_id: actorId,
-            payload: { agent_id: agentId },
-          }, tx);
-        }
-      }
-    });
+    return this.assignmentOperations.assign(idOrKey, agentId, actorId, auth);
   }
 
-  async unassign(idOrKey: string, agentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    await this.db.transaction(async tx => {
-      const cardId = config.auth.mode === 'enforced'
-        ? await this.assertCardWorkspaceScope(idOrKey, auth, tx)
-        : await resolveCardId(tx, idOrKey);
-      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['agent', agentId]]);
-      await assertResourcesShareWorkspace(tx, [['card', cardId], ['agent', agentId]]);
-      await assertAgentSelectorScope(tx, agentId, auth, 'card.assign_others');
-      await tx.execute(
-        `DELETE FROM card_assignee WHERE card_id = ? AND principal_id = ?`,
-        [cardId, agentId]
-      );
-    });
+  async unassign(idOrKey: string, agentId: string, _actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    return this.assignmentOperations.unassign(idOrKey, agentId, auth);
   }
 
-  /**
-   * Atomically claim a card: succeeds only if unclaimed, held by the same agent,
-   * or the existing lease has expired. Runs as a compare-and-swap inside a
-   * transaction so two concurrent claims can never both succeed.
-   */
   async claim(
     cardId: string,
     agentId: string,
@@ -964,158 +673,23 @@ export class CardService {
     actorId?: string,
     options: CardOperationOptions = {},
   ): Promise<CardDetails | ClaimRefusal> {
-    const auth = options.auth || OPEN_AUTH_CONTEXT;
-    const canonicalCardId = config.auth.mode === 'enforced'
-      ? await this.assertCardWorkspaceScope(cardId, options.auth)
-      : await resolveCardId(this.db, cardId);
-    await assertResourcesWorkspace(this.db, auth, [['card', canonicalCardId], ['agent', agentId]]);
-    await assertResourcesShareWorkspace(this.db, [['card', canonicalCardId], ['agent', agentId]]);
-    let overrideBlockers: UnresolvedBlocker[] = [];
-
-    const result = await this.db.transaction(async (tx) => {
-      // Read-check-write is only atomic if nothing else can write the row
-      // between the read and the write. On SQLite that's true by accident —
-      // better-sqlite3 is one connection and BEGIN IMMEDIATE serializes every
-      // transaction globally. Postgres's connection pool has no such
-      // accident: two concurrent claim() calls can both SELECT the same
-      // unclaimed card before either UPDATEs it. FOR UPDATE closes that
-      // window by blocking a second transaction's SELECT until the first
-      // commits or rolls back. SQLite doesn't recognize FOR UPDATE as syntax
-      // at all, so this must stay conditional rather than portable SQL —
-      // see DatabaseAdapter.dialect's doc comment for why that's the
-      // deliberate exception rather than the norm.
-      const lockClause = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
-      const rows = await tx.query<Card>(`SELECT * FROM card WHERE id = ?${lockClause}`, [canonicalCardId]);
-      const card = rows[0];
-      if (!card) throw new NotFoundError(`Card with ID ${canonicalCardId} not found`);
-      await this.assertCardWorkspaceScope(canonicalCardId, options.auth, tx);
-      await assertAgentSelectorScope(tx, agentId, options.auth, 'card.assign_others');
-
-      const now = new Date();
-      const nowIso = now.toISOString();
-      const heldByOther = card.claimed_by && card.claimed_by !== agentId
-        && card.claim_expires_at && card.claim_expires_at > nowIso;
-
-      if (heldByOther) {
-        const holderRows = await tx.query<{ name: string }>(
-          'SELECT a.name FROM agent a JOIN principal p ON a.id = p.id WHERE p.id = ?',
-          [card.claimed_by]
-        );
-        const refusal: ClaimRefusal = {
-          success: false,
-          reason: 'already_claimed',
-          card_id: canonicalCardId,
-          held_by: { id: card.claimed_by as string, name: holderRows[0]?.name ?? null },
-          claim_expires_at: card.claim_expires_at as string,
-        };
-        return refusal;
-      }
-
-      const blockers = await this.getUnresolvedBlockers(canonicalCardId, tx);
-      if (blockers.length > 0) {
-        if (!options.operatorOverride) {
-          const blockerSummary = blockers.map(blocker => `${blocker.key} "${blocker.title}"`).join(', ');
-          throw new CardRuleError(
-            'CARD_BLOCKED',
-            `Cannot claim this card while it is blocked by ${blockerSummary}. Resolve the blocking cards or use operator override.`,
-            {
-              rule: 'blocked_by',
-              operation: 'claim',
-              blockers: blockers.map(blocker => ({ ...blocker })),
-            },
-          );
-        }
-        overrideBlockers = blockers;
-      }
-
-      const expiresIso = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
-      await tx.execute(
-        `UPDATE card SET claimed_by = ?, claimed_at = ?, claim_expires_at = ?, updated_at = ? WHERE id = ?`,
-        [agentId, nowIso, expiresIso, nowIso, canonicalCardId]
-      );
-      await tx.execute(
-        `INSERT OR IGNORE INTO card_assignee (card_id, principal_id) VALUES (?, ?)`,
-        [canonicalCardId, agentId]
-      );
-
-      if (this.eventService) {
-        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
-        if (projectId) {
-          await this.eventService.create({
-            project_id: projectId,
-            entity_type: 'card',
-            entity_id: canonicalCardId,
-            action: 'claimed',
-            actor_id: agentId,
-            payload: { claim_expires_at: expiresIso },
-          }, tx);
-          if (overrideBlockers.length > 0) {
-            await this.recordOverride(projectId, canonicalCardId, actorId || agentId, 'claim', {
-              rule: 'blocked_by',
-              blockers: overrideBlockers.map(blocker => ({ ...blocker })),
-            }, tx);
-          }
-        }
-      }
-
-      return this.getById(canonicalCardId, tx, auth);
-    });
-
-    return result;
+    const result = await this.assignmentOperations.claim(
+      cardId,
+      agentId,
+      ttlSeconds,
+      actorId,
+      options,
+    );
+    if (result.success === false) return result;
+    return this.getById(result.cardId, this.db, options.auth || OPEN_AUTH_CONTEXT);
   }
 
-  /** Extend the claim lease on every card currently held by this agent — called on heartbeat. */
   async renewClaims(agentId: string, ttlSeconds: number = DEFAULT_CLAIM_TTL_SECONDS): Promise<void> {
-    const expiresIso = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-    await this.db.execute(
-      `UPDATE card SET claim_expires_at = ? WHERE claimed_by = ?`,
-      [expiresIso, agentId]
-    );
+    return this.assignmentOperations.renewClaims(agentId, ttlSeconds);
   }
 
-  /** Release leases past their expiry so the board doesn't hold a card forever for a dead agent. */
   async releaseExpiredLeases(adapter?: DatabaseAdapter): Promise<string[]> {
-    if (!adapter) return this.db.transaction(tx => this.releaseExpiredLeases(tx));
-
-    const nowIso = new Date().toISOString();
-    // The transaction boundary serializes SQLite sweepers (BEGIN IMMEDIATE).
-    // PostgreSQL needs row locks because independent pool clients can sweep
-    // concurrently; the expiry predicate is re-evaluated after any waiter is
-    // released, so a second sweeper sees the first one's conditional update.
-    const lockClause = adapter.dialect === 'postgres' ? ' FOR UPDATE' : '';
-    const expired = await adapter.query<Card>(
-      `SELECT * FROM card WHERE claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?${lockClause}`,
-      [nowIso]
-    );
-    const released: string[] = [];
-
-    for (const card of expired) {
-      const updated_at = new Date().toISOString();
-      const result = await adapter.execute(
-        `UPDATE card SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, updated_at = ?
-         WHERE id = ? AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
-        [updated_at, card.id, nowIso]
-      );
-      // Keep the event and the state transition in this transaction. A
-      // concurrent sweeper that lost the conditional update emits nothing.
-      if (result.changes !== 1) continue;
-      released.push(card.id);
-
-      if (this.eventService) {
-        const projectId = await this.getProjectIdForColumn(card.column_id, adapter);
-        if (projectId) {
-          await this.eventService.create({
-            project_id: projectId,
-            entity_type: 'card',
-            entity_id: card.id,
-            action: 'claim_expired',
-            payload: { previously_claimed_by: card.claimed_by },
-          }, adapter);
-        }
-      }
-    }
-
-    return released;
+    return this.assignmentOperations.releaseExpiredLeases(adapter);
   }
 
   async addLabel(idOrKey: string, labelId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
@@ -1138,172 +712,35 @@ export class CardService {
   }
 
   async linkDocument(idOrKey: string, documentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    await this.db.transaction(async tx => {
-      const cardId = await resolveCardId(tx, idOrKey);
-      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['document', documentId]]);
-      await assertResourcesShareWorkspace(tx, [['card', cardId], ['document', documentId]]);
-      const linked_at = new Date().toISOString();
-      const result = await tx.execute(
-        `INSERT OR IGNORE INTO card_document (card_id, document_id, linked_at) VALUES (?, ?, ?)`,
-        [cardId, documentId, linked_at]
-      );
-
-      if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx, auth);
-        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
-        if (projectId) {
-          await this.eventService.create({
-            project_id: projectId,
-            entity_type: 'card',
-            entity_id: cardId,
-            action: 'document_linked',
-            actor_id: actorId,
-            payload: { document_id: documentId },
-          }, tx);
-        }
-      }
-    });
+    return this.relationOperations.linkDocument(idOrKey, documentId, actorId, auth);
   }
 
-  async unlinkDocument(idOrKey: string, documentId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    const cardId = await resolveCardId(this.db, idOrKey);
-    await assertResourcesWorkspace(this.db, auth, [['card', cardId], ['document', documentId]]);
-    await this.db.execute(
-      `DELETE FROM card_document WHERE card_id = ? AND document_id = ?`,
-      [cardId, documentId]
-    );
+  async unlinkDocument(idOrKey: string, documentId: string, _actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    return this.relationOperations.unlinkDocument(idOrKey, documentId, auth);
   }
 
   async linkCard(idOrKey: string, targetIdOrKey: string, relationType: CardLinkRelationType, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    await this.db.transaction(async tx => {
-      const [cardId, targetCardId] = await Promise.all([
-        resolveCardId(tx, idOrKey),
-        resolveCardId(tx, targetIdOrKey),
-      ]);
-      await assertResourcesWorkspace(tx, auth, [['card', cardId], ['card', targetCardId]]);
-      await assertResourcesShareWorkspace(tx, [['card', cardId], ['card', targetCardId]]);
-      const { sourceCardId, destCardId, storedType } = canonicalizeCardLink(cardId, targetCardId, relationType);
-
-      const id = ulid();
-      const created_at = new Date().toISOString();
-      const result = await tx.execute(
-        `INSERT OR IGNORE INTO card_link (id, source_card_id, target_card_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)`,
-        [id, sourceCardId, destCardId, storedType, created_at]
-      );
-
-      if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx, auth);
-        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
-        if (projectId) {
-          await this.eventService.create({
-            project_id: projectId,
-            entity_type: 'card',
-            entity_id: cardId,
-            action: 'card_linked',
-            actor_id: actorId,
-            payload: { target_card_id: targetCardId, relation_type: relationType },
-          }, tx);
-        }
-      }
-    });
+    return this.relationOperations.linkCard(idOrKey, targetIdOrKey, relationType, actorId, auth);
   }
 
-  async unlinkCard(idOrKey: string, linkId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    const cardId = await resolveCardId(this.db, idOrKey);
-    await assertResourceWorkspace(this.db, auth, 'card', cardId);
-    await this.db.execute(
-      `DELETE FROM card_link WHERE id = ? AND (source_card_id = ? OR target_card_id = ?)`,
-      [linkId, cardId, cardId]
-    );
+  async unlinkCard(idOrKey: string, linkId: string, _actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    return this.relationOperations.unlinkCard(idOrKey, linkId, auth);
   }
 
   async addWorkLink(idOrKey: string, data: CreateCardWorkLink, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<CardWorkLink> {
-    assertHttpUrl(data.url);
-    return this.db.transaction(async tx => {
-      const cardId = await resolveCardId(tx, idOrKey);
-      await assertResourceWorkspace(tx, auth, 'card', cardId);
-      const id = ulid();
-      const created_at = new Date().toISOString();
-      const external_ref = data.external_ref ?? null;
-      const title = data.title ?? null;
-      const status = data.status ?? null;
-
-      await tx.execute(
-        `INSERT INTO card_work_link (id, card_id, kind, provider, url, external_ref, title, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, cardId, data.kind, data.provider, data.url, external_ref, title, status, created_at]
-      );
-
-      if (this.eventService) {
-        const card = await this.getById(cardId, tx, auth);
-        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
-        if (projectId) {
-          await this.eventService.create({
-            project_id: projectId,
-            entity_type: 'card',
-            entity_id: cardId,
-            action: 'work_link_added',
-            actor_id: actorId,
-            payload: { kind: data.kind, provider: data.provider, url: data.url },
-          }, tx);
-        }
-      }
-
-      return { id, card_id: cardId, kind: data.kind, provider: data.provider, url: data.url, external_ref, title, status, created_at };
-    });
+    return this.relationOperations.addWorkLink(idOrKey, data, actorId, auth);
   }
 
   async removeWorkLink(idOrKey: string, linkId: string, actorId?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
-    await this.db.transaction(async tx => {
-      const cardId = await resolveCardId(tx, idOrKey);
-      await assertResourceWorkspace(tx, auth, 'card', cardId);
-      const result = await tx.execute(
-        `DELETE FROM card_work_link WHERE id = ? AND card_id = ?`,
-        [linkId, cardId]
-      );
-
-      if (this.eventService && result.changes > 0) {
-        const card = await this.getById(cardId, tx, auth);
-        const projectId = await this.getProjectIdForColumn(card.column_id, tx);
-        if (projectId) {
-          await this.eventService.create({
-            project_id: projectId,
-            entity_type: 'card',
-            entity_id: cardId,
-            action: 'work_link_removed',
-            actor_id: actorId,
-            payload: { link_id: linkId },
-          }, tx);
-        }
-      }
-    });
+    return this.relationOperations.removeWorkLink(idOrKey, linkId, actorId, auth);
   }
 
   async listWorkLinks(idOrKey: string, db: DatabaseAdapter = this.db, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<CardWorkLink[]> {
-    const cardId = await resolveCardId(db, idOrKey);
-    await assertResourceWorkspace(db, auth, 'card', cardId);
-    return db.query<CardWorkLink>(
-      `SELECT * FROM card_work_link WHERE card_id = ? ORDER BY created_at ASC`,
-      [cardId]
-    );
+    return this.relationOperations.listWorkLinks(idOrKey, db, auth);
   }
 
   async listWorkLinksPage(idOrKey: string, options: PageOptions = {}, db: DatabaseAdapter = this.db, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<CardWorkLink>> {
-    const cardId = await resolveCardId(db, idOrKey);
-    await assertResourceWorkspace(db, auth, 'card', cardId);
-    const limit = normalizePageLimit(options.limit);
-    const scope = `card-work-links:${cardId}`;
-    const cursor = decodeCursor(options.cursor, scope, 2);
-    const params: unknown[] = [cardId];
-    let sql = 'SELECT * FROM card_work_link WHERE card_id = ?';
-    if (cursor) {
-      sql += ' AND (created_at > ? OR (created_at = ? AND id > ?))';
-      params.push(cursor[0], cursor[0], cursor[1]);
-    }
-    sql += ' ORDER BY created_at ASC, id ASC LIMIT ?';
-    params.push(limit + 1);
-    const rows = await db.query<CardWorkLink>(sql, params);
-    return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
+    return this.relationOperations.listWorkLinksPage(idOrKey, options, db, auth);
   }
 
   async searchByTitle(projectId: string, query: string, opts: { excludeCardId?: string; limit?: number } = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Card[]> {

@@ -217,7 +217,7 @@ export function inspectArchitecture({
     const visitConstructions = (node: ts.Node): void => {
       if (ts.isNewExpression(node)) {
         const name = constructionName(node, checker);
-        if (/(?:Service|Policy)$/.test(name)) {
+        if (/(?:Service|Policy|Operations|Queries|Factory)$/.test(name)) {
           const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
           const site = { file: displayFile, name, line };
           constructions.push(site);
