@@ -990,7 +990,8 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
     const concurrencyAccountTrigger = concurrencyPage.locator('header button[title*="Account"]');
     await concurrencyAccountTrigger.click();
     await assertPendingDialogIsolation(concurrencyPage, 'User Account dialog');
-    await concurrencyPage.keyboard.press('Shift+/');
+    await concurrencyPage.getByRole('button', { name: 'Keyboard shortcuts', includeHidden: true })
+      .evaluate((trigger: HTMLButtonElement) => trigger.click());
     await assertPendingDialogIsolation(concurrencyPage, 'Keyboard Shortcuts dialog');
     releaseShortcutChunk();
     const concurrentShortcuts = await assertAccessibleDialog(concurrencyPage, 'Keyboard Shortcuts');
@@ -1046,7 +1047,8 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
     await pendingOverResolvedPage.goto(appUrl, { waitUntil: 'domcontentloaded' });
     await pendingOverResolvedPage.locator('header button[title*="Account"]').click();
     const resolvedAccount = await assertAccessibleDialog(pendingOverResolvedPage, /Account|Operator/);
-    await pendingOverResolvedPage.keyboard.press('Shift+/');
+    await pendingOverResolvedPage.getByRole('button', { name: 'Keyboard shortcuts', includeHidden: true })
+      .evaluate((trigger: HTMLButtonElement) => trigger.click());
     const overlayPendingStatus = await assertPendingDialogIsolation(pendingOverResolvedPage, 'Keyboard Shortcuts dialog');
     await pendingOverResolvedPage.keyboard.press('Escape');
     await overlayPendingStatus.waitFor({ state: 'detached' });
@@ -1105,6 +1107,72 @@ export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promi
     await reopenedShortcutDialog.waitFor({ state: 'detached' });
     if (!await shortcutTrigger.evaluate((element: HTMLElement) => document.activeElement === element)) {
       throw new Error('Repeated lazy shortcuts close did not restore its current opener');
+    }
+
+    // A top non-Shortcuts layer must consume the global shortcuts chord without
+    // letting App toggle the hidden lower Shortcuts boundary. Once Account
+    // closes, the revealed Shortcuts layer owns the next chord and closes.
+    await shortcutTrigger.focus();
+    await shortcutTrigger.click();
+    const lowerShortcutDialog = await assertAccessibleDialog(page, 'Keyboard Shortcuts');
+    const accountTriggerUnderShortcuts = page.locator('header button[title*="Account"]');
+    await accountTriggerUnderShortcuts.evaluate((trigger: HTMLButtonElement) => trigger.click());
+    const topAccountDialog = await assertAccessibleDialog(page, /Operator|Browser UI Tester/);
+    const assertAccountAboveShortcuts = async (phase: string) => {
+      const state = await page.evaluate(() => {
+        const shortcuts = document.getElementById('shortcuts-dialog-title')?.closest<HTMLElement>('[role="dialog"]');
+        const account = document.getElementById('account-dialog-title')?.closest<HTMLElement>('[role="dialog"]');
+        const shortcutsScrim = shortcuts?.closest<HTMLElement>('.muster-scrim');
+        const accountScrim = account?.closest<HTMLElement>('.muster-scrim');
+        return {
+          shortcutsMounted: Boolean(shortcuts),
+          shortcutsInert: Boolean(shortcutsScrim?.inert),
+          shortcutsHidden: shortcutsScrim?.getAttribute('aria-hidden'),
+          accountMounted: Boolean(account),
+          accountInert: Boolean(accountScrim?.inert),
+          accountHidden: accountScrim?.getAttribute('aria-hidden'),
+          focusInsideAccount: Boolean(account?.contains(document.activeElement)),
+        };
+      });
+      if (
+        !state.shortcutsMounted
+        || !state.shortcutsInert
+        || state.shortcutsHidden !== 'true'
+        || !state.accountMounted
+        || state.accountInert
+        || state.accountHidden === 'true'
+        || !state.focusInsideAccount
+      ) {
+        throw new Error(`${phase}: top Account did not retain ownership above Shortcuts: ${JSON.stringify(state)}`);
+      }
+    };
+    await assertAccountAboveShortcuts('before Shift+?');
+    await page.keyboard.press('Shift+/');
+    await page.waitForTimeout(50);
+    await assertAccountAboveShortcuts('after Shift+?');
+    await page.keyboard.press('Escape');
+    await topAccountDialog.waitFor({ state: 'detached' });
+    if (!await lowerShortcutDialog.isVisible() || !await lowerShortcutDialog.evaluate((dialog: HTMLElement) => dialog.contains(document.activeElement))) {
+      throw new Error('Closing Account did not reveal and focus the still-mounted Shortcuts dialog');
+    }
+    await page.keyboard.press('Shift+/');
+    await lowerShortcutDialog.waitFor({ state: 'detached' });
+    const shortcutOwnershipCleanup = await shortcutTrigger.evaluate((trigger: HTMLElement) => {
+      const root = document.getElementById('root');
+      return {
+        exactFocus: document.activeElement === trigger,
+        rootInert: Boolean(root?.inert),
+        rootHidden: root?.getAttribute('aria-hidden'),
+        bodyOverflow: document.body.style.overflow,
+      };
+    });
+    if (
+      !shortcutOwnershipCleanup.exactFocus
+      || shortcutOwnershipCleanup.rootInert
+      || shortcutOwnershipCleanup.rootHidden === 'true'
+      || shortcutOwnershipCleanup.bodyOverflow === 'hidden'
+    ) {
+      throw new Error(`Shortcut ownership cleanup failed: ${JSON.stringify(shortcutOwnershipCleanup)}`);
     }
 
     // A failed lazy chunk recovers through the explicit reload action. Prove a

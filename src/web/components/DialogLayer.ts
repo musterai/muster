@@ -91,10 +91,10 @@ function handleDialogKeyDown(event: KeyboardEvent): void {
   const surface = top?.surface;
   if (!top || !surface) return;
 
-  if (top.cancelOnShortcutToggle && (event.key === '?' || (event.shiftKey && event.key === '/'))) {
+  if (event.key === '?' || (event.shiftKey && event.key === '/')) {
     event.preventDefault();
     event.stopPropagation();
-    top.onCancel();
+    if (top.cancelOnShortcutToggle) top.onCancel();
     return;
   }
 
