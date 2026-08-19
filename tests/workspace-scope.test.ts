@@ -23,6 +23,7 @@ import { createMcpServer } from '../src/mcp/server.js';
 import type { AuthContext } from '../src/shared/auth-context.js';
 import { config } from '../src/config/index.js';
 import { createProjectRouter } from '../src/api/routes/project.routes.js';
+import { createKBRouter } from '../src/api/routes/kb.routes.js';
 
 describe('MUS-66 workspace isolation', () => {
   let db: DatabaseAdapter;
@@ -126,6 +127,7 @@ describe('MUS-66 workspace isolation', () => {
     await expect(cards.linkCard(cardA.id, cardB.id, 'relates_to', 'user-a', authA))
       .rejects.toMatchObject({ code: 'NOT_FOUND' });
 
+    const now = new Date().toISOString();
     const kbA = await kbs.create({ name: 'Alpha KB', project_ids: [projectA.id] }, 'user-a', undefined, authA);
     const kbB = await kbs.create({ name: 'Bravo KB', is_global: true, project_ids: [projectB.id] }, 'user-b', undefined, authB);
     expect((await kbs.list(projectA.id, authA)).map(kb => kb.id)).toEqual([kbA.id]);
@@ -151,10 +153,101 @@ describe('MUS-66 workspace isolation', () => {
       target_entity_id: entityB.id,
       relation_type: 'depends_on',
     }, 'user-a', undefined, authA)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await db.query<{ id: string }>(
+      'SELECT id FROM kb_relation WHERE source_entity_id = ? AND target_entity_id = ?',
+      [entityA.id, entityB.id],
+    )).toEqual([]);
     await expect(kbs.linkProject(kbA.id, projectB.id, 'user-a', undefined, authA))
       .rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await db.query<{ project_id: string }>(
+      'SELECT project_id FROM project_knowledge_base WHERE kb_id = ? AND project_id = ?',
+      [kbA.id, projectB.id],
+    )).toEqual([]);
 
-    const now = new Date().toISOString();
+    const factB = await kbs.addFact({
+      kb_id: kbB.id,
+      entity_id: entityB.id,
+      title: 'Bravo secret fact',
+      content: 'Must remain private',
+    }, 'user-b', undefined, authB);
+    expect((await kbs.listFacts(undefined, undefined, undefined, authA)).map(fact => fact.id))
+      .toEqual([factA.id]);
+
+    // Simulate a malformed/imported graph edge that satisfies SQL foreign
+    // keys but violates the common-KB/workspace invariant. Read paths must
+    // filter it before selecting either the foreign endpoint ID or its name.
+    const invalidRelationId = 'invalid-cross-workspace-relation';
+    await db.execute(
+      `INSERT INTO kb_relation
+       (id, kb_id, source_entity_id, target_entity_id, relation_type, description, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [invalidRelationId, kbA.id, entityA.id, entityB.id, 'depends_on', null, now],
+    );
+    const entityKnowledge = await kbs.getEntityKnowledge(entityA.id, [kbA.id], authA);
+    expect(entityKnowledge?.outgoing_relations).toEqual([]);
+    expect((await kbs.getGraphTree(kbA.id, undefined, authA)).links).toEqual([]);
+
+    const scopedMcp = createMcpServer({
+      projectService: projects,
+      boardService: boards,
+      columnService: columns,
+      cardService: cards,
+      commentService: new CommentService(db, events),
+      documentService: documents,
+      agentService: agents,
+      eventService: events,
+      kbService: kbs,
+      roleService: roles,
+      auditService: new AuditService(db),
+      userService: users,
+      db,
+    } as any, undefined, authA) as any;
+    const mcpKnowledge = await scopedMcp._registeredTools.get_entity_knowledge.handler({
+      query: entityA.id,
+      kb_id: kbA.id,
+    }, {});
+    expect(JSON.parse(mcpKnowledge.content[0].text).outgoing_relations).toEqual([]);
+
+    const kbRouter = createKBRouter(kbs) as any;
+    const kbRouteHandler = (routePath: string) => kbRouter.stack
+      .find((layer: any) => layer.route?.path === routePath && layer.route.methods.get)
+      .route.stack.at(-1).handle;
+    let restKnowledge: any;
+    await kbRouteHandler('/kbs/entity-knowledge')(
+      { query: { q: entityA.id, kb_id: kbA.id }, authContext: authA },
+      { status: () => ({ json: (payload: any) => { restKnowledge = payload; } }), json: (payload: any) => { restKnowledge = payload; } },
+      (error?: unknown) => { if (error) throw error; },
+    );
+    expect(restKnowledge.outgoing_relations).toEqual([]);
+    let restGraph: any;
+    await kbRouteHandler('/kbs/graph')(
+      { query: { kb_id: kbA.id }, authContext: authA },
+      { json: (payload: any) => { restGraph = payload; } },
+      (error?: unknown) => { if (error) throw error; },
+    );
+    expect(restGraph.links).toEqual([]);
+
+    // A second malformed/imported row gives one KB owners in two workspaces.
+    // Lists must fail closed for that KB and must never hydrate projectB's ID.
+    await db.execute(
+      'INSERT INTO project_knowledge_base (project_id, kb_id, created_at) VALUES (?, ?, ?)',
+      [projectB.id, kbA.id, now],
+    );
+    expect((await kbs.list(projectA.id, authA)).some(kb => kb.id === kbA.id)).toBe(false);
+    const mcpKbs = await scopedMcp._registeredTools.list_knowledge_bases.handler({ project_id: projectA.id }, {});
+    const mcpKbPayload = JSON.parse(mcpKbs.content[0].text);
+    expect(mcpKbPayload.some((kb: { linked_project_ids?: string[] }) =>
+      kb.linked_project_ids?.includes(projectB.id))).toBe(false);
+    let restKbs: any;
+    await kbRouteHandler('/kbs')(
+      { query: { project_id: projectA.id }, authContext: authA },
+      { json: (payload: any) => { restKbs = payload; } },
+      (error?: unknown) => { if (error) throw error; },
+    );
+    expect(restKbs.some((kb: { linked_project_ids?: string[] }) =>
+      kb.linked_project_ids?.includes(projectB.id))).toBe(false);
+    expect((await db.query<{ id: string }>('SELECT id FROM kb_fact WHERE id = ?', [factB.id])).length).toBe(1);
+
     for (const [id, workspaceId] of [['agent-a', 'ws-a'], ['agent-b', 'ws-b']]) {
       await db.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', [id, 'agent', now]);
       await db.execute('INSERT INTO agent (id, name, status, last_seen_at, workspace_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', [id, id, 'active', now, workspaceId, now]);

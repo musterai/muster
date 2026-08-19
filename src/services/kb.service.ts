@@ -41,7 +41,7 @@ export class KBService {
     adapter: DatabaseAdapter = this.db,
   ): Promise<void> {
     if (!this.eventService) return;
-    const projectIds = await this.getLinkedProjectIds(kbId, adapter);
+    const projectIds = await this.getLinkedProjectIdsInternal(kbId, adapter);
     for (const projectId of projectIds) {
       await this.eventService.create({
         project_id: projectId,
@@ -120,7 +120,7 @@ export class KBService {
     if (!rows[0]) return null;
 
     const kb = rows[0];
-    kb.linked_project_ids = await this.getLinkedProjectIds(id);
+    kb.linked_project_ids = await this.getLinkedProjectIds(id, auth);
     return kb;
   }
 
@@ -137,9 +137,14 @@ export class KBService {
              LEFT JOIN project_knowledge_base selected_link
                ON selected_link.kb_id = kb.id AND selected_link.project_id = ?
              WHERE owner_project.workspace_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM project_knowledge_base foreign_link
+                 JOIN project foreign_project ON foreign_project.id = foreign_link.project_id
+                 WHERE foreign_link.kb_id = kb.id AND foreign_project.workspace_id <> ?
+               )
                AND (kb.is_global = 1 OR selected_link.project_id IS NOT NULL)
              ORDER BY kb.created_at DESC`,
-            [projectId, scopedWorkspace],
+            [projectId, scopedWorkspace, scopedWorkspace],
           )
         : await this.db.query<KnowledgeBase>(
             `SELECT DISTINCT kb.* FROM knowledge_base kb
@@ -153,15 +158,21 @@ export class KBService {
         `SELECT DISTINCT kb.* FROM knowledge_base kb
          JOIN project_knowledge_base pkb ON kb.id = pkb.kb_id
          JOIN project p ON p.id = pkb.project_id
-         WHERE p.workspace_id = ? ORDER BY kb.created_at DESC`,
-        [scopedWorkspace],
+         WHERE p.workspace_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM project_knowledge_base foreign_link
+             JOIN project foreign_project ON foreign_project.id = foreign_link.project_id
+             WHERE foreign_link.kb_id = kb.id AND foreign_project.workspace_id <> ?
+           )
+         ORDER BY kb.created_at DESC`,
+        [scopedWorkspace, scopedWorkspace],
       );
     } else {
       kbs = await this.db.query<KnowledgeBase>('SELECT * FROM knowledge_base ORDER BY created_at DESC');
     }
 
     for (const kb of kbs) {
-      kb.linked_project_ids = await this.getLinkedProjectIds(kb.id);
+      kb.linked_project_ids = await this.getLinkedProjectIds(kb.id, auth);
     }
 
     return kbs;
@@ -197,12 +208,31 @@ export class KBService {
     );
   }
 
-  async getLinkedProjectIds(kbId: string, adapter: DatabaseAdapter = this.db): Promise<string[]> {
+  private async getLinkedProjectIdsInternal(kbId: string, adapter: DatabaseAdapter = this.db): Promise<string[]> {
     const rows = await adapter.query<{ project_id: string }>(
       'SELECT project_id FROM project_knowledge_base WHERE kb_id = ?',
       [kbId]
     );
     return rows.map(r => r.project_id);
+  }
+
+  private async getLinkedProjectIds(
+    kbId: string,
+    auth: AuthContext,
+    adapter: DatabaseAdapter = this.db,
+  ): Promise<string[]> {
+    const workspaceId = workspaceIdFor(auth);
+    if (!workspaceId) return this.getLinkedProjectIdsInternal(kbId, adapter);
+
+    const rows = await adapter.query<{ project_id: string }>(
+      `SELECT pkb.project_id
+       FROM project_knowledge_base pkb
+       JOIN project p ON p.id = pkb.project_id
+       WHERE pkb.kb_id = ? AND p.workspace_id = ?
+       ORDER BY pkb.created_at`,
+      [kbId, workspaceId],
+    );
+    return rows.map(row => row.project_id);
   }
 
   async delete(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
@@ -430,9 +460,10 @@ export class KBService {
   async listFacts(kbId?: string, entityId?: string, category?: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBFact[]> {
     if (kbId) await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
     if (entityId) await assertResourceWorkspace(this.db, auth, 'kb_entity', entityId);
+    const scopedWorkspace = workspaceIdFor(auth);
     let sql = `SELECT f.*, e.name as entity_name, e.identifier as entity_identifier 
                FROM kb_fact f 
-               LEFT JOIN kb_entity e ON f.entity_id = e.id`;
+               LEFT JOIN kb_entity e ON f.entity_id = e.id AND e.kb_id = f.kb_id`;
     const params: unknown[] = [];
     const clauses: string[] = [];
 
@@ -447,6 +478,26 @@ export class KBService {
     if (category) {
       clauses.push('f.category = ?');
       params.push(category);
+    }
+    if (scopedWorkspace) {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM project_knowledge_base owner_link
+        JOIN project owner_project ON owner_project.id = owner_link.project_id
+        WHERE owner_link.kb_id = f.kb_id AND owner_project.workspace_id = ?
+      )`);
+      params.push(scopedWorkspace);
+      clauses.push(`NOT EXISTS (
+        SELECT 1 FROM project_knowledge_base foreign_link
+        JOIN project foreign_project ON foreign_project.id = foreign_link.project_id
+        WHERE foreign_link.kb_id = f.kb_id AND foreign_project.workspace_id <> ?
+      )`);
+      params.push(scopedWorkspace);
+      clauses.push(`(
+        f.entity_id IS NULL OR EXISTS (
+          SELECT 1 FROM kb_entity fact_entity
+          WHERE fact_entity.id = f.entity_id AND fact_entity.kb_id = f.kb_id
+        )
+      )`);
     }
 
     if (clauses.length > 0) {
@@ -617,17 +668,17 @@ export class KBService {
     const outgoing = await this.db.query<KBRelation>(
       `SELECT r.*, e.name as target_entity_name 
        FROM kb_relation r 
-       JOIN kb_entity e ON r.target_entity_id = e.id 
-       WHERE r.source_entity_id = ?`,
-      [entity.id]
+       JOIN kb_entity e ON r.target_entity_id = e.id AND e.kb_id = r.kb_id
+       WHERE r.source_entity_id = ? AND r.kb_id = ?`,
+      [entity.id, entity.kb_id]
     );
 
     const incoming = await this.db.query<KBRelation>(
       `SELECT r.*, e.name as source_entity_name 
        FROM kb_relation r 
-       JOIN kb_entity e ON r.source_entity_id = e.id 
-       WHERE r.target_entity_id = ?`,
-      [entity.id]
+       JOIN kb_entity e ON r.source_entity_id = e.id AND e.kb_id = r.kb_id
+       WHERE r.target_entity_id = ? AND r.kb_id = ?`,
+      [entity.id, entity.kb_id]
     );
 
     return {
@@ -705,7 +756,10 @@ export class KBService {
     );
 
     const links = await this.db.query<KBRelation>(
-      `SELECT * FROM kb_relation WHERE kb_id IN (${inClause})`,
+      `SELECT r.* FROM kb_relation r
+       JOIN kb_entity source ON source.id = r.source_entity_id AND source.kb_id = r.kb_id
+       JOIN kb_entity target ON target.id = r.target_entity_id AND target.kb_id = r.kb_id
+       WHERE r.kb_id IN (${inClause})`,
       targetKbIds
     );
 
