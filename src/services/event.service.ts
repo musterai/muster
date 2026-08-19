@@ -3,6 +3,8 @@ import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Event, CreateEvent } from '../shared/types.js';
 import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
 
 export type EventCallback = (event: Event) => void | Promise<void>;
 
@@ -29,7 +31,8 @@ export class EventService {
     this.listeners.push(callback);
   }
 
-  async getProjectWorkspaceId(projectId: string): Promise<string | null> {
+  async getProjectWorkspaceId(projectId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<string | null> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     const rows = await this.db.query<{ workspace_id: string | null }>(
       'SELECT workspace_id FROM project WHERE id = ?',
       [projectId],
@@ -45,7 +48,8 @@ export class EventService {
    * indistinguishable: callers receive an empty live-tail resume rather than
    * event metadata or an unbounded replay.
    */
-  async listAfterId(projectId: string, eventId: string, limit = 100): Promise<EventResumeResult> {
+  async listAfterId(projectId: string, eventId: string, limit = 100, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<EventResumeResult> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     const boundedLimit = Number.isFinite(limit)
       ? Math.min(100, Math.max(1, Math.floor(limit)))
       : 100;
@@ -137,7 +141,8 @@ export class EventService {
     return transactionDb ? persist(transactionDb) : this.db.transaction(persist);
   }
 
-  async list(projectId: string, options: { entity_type?: string; entity_id?: string; since?: string; limit?: number } = {}): Promise<Event[]> {
+  async list(projectId: string, options: { entity_type?: string; entity_id?: string; since?: string; limit?: number } = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Event[]> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     // LEFT JOINs both concrete principal tables so the activity feed can name
     // a human actor, not just an agent — see MUS-32.
     let sql = `SELECT e.*, COALESCE(a.name, u.display_name) as actor_name, p.kind as actor_kind
@@ -181,7 +186,9 @@ export class EventService {
     projectId: string,
     filters: { entity_type?: string; entity_id?: string; since?: string } = {},
     options: PageOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
   ): Promise<Page<Event>> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     const limit = normalizePageLimit(options.limit);
     const scope = `events:${JSON.stringify({ projectId, entity_type: filters.entity_type || null, entity_id: filters.entity_id || null, since: filters.since || null })}`;
     const cursor = decodeCursor(options.cursor, scope, 2);

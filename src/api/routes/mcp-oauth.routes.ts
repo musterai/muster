@@ -194,9 +194,9 @@ export function createMcpOAuthRouter(
       const phase = outer?.[0] || 'agents';
       const nestedCursor = outer?.[1] || undefined;
       const agentPage = phase === 'agents' ? await agentService.listOwnedPage(auth.workspace_id, auth.principal.id, { cursor: nestedCursor, limit }) : null;
-      let rolePage = phase === 'roles' ? await roleService.listPage(auth.workspace_id, { cursor: nestedCursor, limit }) : null;
+      let rolePage = phase === 'roles' ? await roleService.listPage(auth.workspace_id, { cursor: nestedCursor, limit }, auth) : null;
       if (phase === 'agents' && !agentPage?.page.has_more && (agentPage?.items.length || 0) < limit) {
-        rolePage = await roleService.listPage(auth.workspace_id, { limit: limit - (agentPage?.items.length || 0) });
+        rolePage = await roleService.listPage(auth.workspace_id, { limit: limit - (agentPage?.items.length || 0) }, auth);
       }
       const hasMore = Boolean(agentPage?.page.has_more || rolePage?.page.has_more || (phase === 'agents' && !rolePage));
       const nextPhase = agentPage?.page.has_more ? 'agents' : 'roles';
@@ -257,6 +257,10 @@ export function createMcpOAuthRouter(
       let agentPrincipalId: string;
       if (typeof agent_id === 'string' && agent_id) {
         const existing = await agentService.assertAgentScope(agent_id, auth, 'agent.manage_others');
+        if (!existing || existing.operator_user_id !== auth.principal.id) {
+          res.status(403).json({ error: 'invalid_request', error_description: 'That agent is not one you operate.' });
+          return;
+        }
         agentPrincipalId = existing.id;
         if (existing.role_id !== role_id) {
           await agentService.update(existing.id, { role_id }, { workspaceId: auth.workspace_id, auth });

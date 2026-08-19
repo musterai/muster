@@ -43,7 +43,7 @@ export function createEventRouter(eventService: EventService, sseManager: SSEMan
       }, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       res.json(events);
     } catch (err) {
       next(err);
@@ -53,7 +53,7 @@ export function createEventRouter(eventService: EventService, sseManager: SSEMan
   router.get('/projects/:projectId/events/stream', ...validateRequest({ params: projectIdParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const auth = req.authContext;
-      const workspaceId = await eventService.getProjectWorkspaceId(req.params.projectId);
+      const workspaceId = await eventService.getProjectWorkspaceId(req.params.projectId, req.authContext);
       const lastEventId = parseLastEventId(req.get('Last-Event-ID'));
 
       // Permission middleware establishes membership, but it cannot know
@@ -90,6 +90,7 @@ export function createEventRouter(eventService: EventService, sseManager: SSEMan
             req.params.projectId,
             lastEventId,
             100,
+            req.authContext,
           );
           sseManager.completeReplay(clientId, resume.events);
         } catch (err) {

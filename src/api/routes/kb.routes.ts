@@ -46,7 +46,7 @@ export function createKBRouter(kbService: KBService): Router {
       const kbs = await kbService.listPage(projectId, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       res.json(kbs);
     } catch (err) {
       next(err);
@@ -57,7 +57,7 @@ export function createKBRouter(kbService: KBService): Router {
   router.post('/kbs', ...validateRequest({ body: kbCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { actor_id: claimedActorId, ...data } = req.body;
-      const kb = await kbService.create(data, getActorId(req, claimedActorId));
+      const kb = await kbService.create(data, getActorId(req, claimedActorId), undefined, req.authContext);
       res.status(201).json(kb);
     } catch (err) {
       next(err);
@@ -74,7 +74,7 @@ export function createKBRouter(kbService: KBService): Router {
       const results = await kbService.searchKnowledgePage(query, kbId ? [kbId] : undefined, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      }, projectId);
+      }, projectId, req.authContext);
       res.json(results);
     } catch (err) {
       next(err);
@@ -89,7 +89,7 @@ export function createKBRouter(kbService: KBService): Router {
       const tree = await kbService.getGraphTree(kbId, projectId, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       res.json(tree);
     } catch (err) {
       next(err);
@@ -106,7 +106,7 @@ export function createKBRouter(kbService: KBService): Router {
       const result = await kbService.getEntityKnowledge(q, kbId ? [kbId] : undefined, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       if (!result) return res.status(404).json({ error: 'Entity knowledge not found' });
       res.json(result);
     } catch (err) {
@@ -117,7 +117,7 @@ export function createKBRouter(kbService: KBService): Router {
   // Get KB by ID
   router.get('/kbs/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const kb = await kbService.getById(req.params.id);
+      const kb = await kbService.getById(req.params.id, req.authContext);
       if (!kb) return res.status(404).json({ error: 'Knowledge base not found' });
       res.json(kb);
     } catch (err) {
@@ -128,7 +128,7 @@ export function createKBRouter(kbService: KBService): Router {
   // Delete KB
   router.delete('/kbs/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await kbService.delete(req.params.id);
+      await kbService.delete(req.params.id, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -140,7 +140,7 @@ export function createKBRouter(kbService: KBService): Router {
     try {
       const { project_id, actor_id: claimedActorId } = req.body;
       if (!project_id) return res.status(400).json({ error: 'project_id is required' });
-      await kbService.linkProject(req.params.id, project_id, getActorId(req, claimedActorId));
+      await kbService.linkProject(req.params.id, project_id, getActorId(req, claimedActorId), undefined, req.authContext);
       res.status(200).json({ success: true });
     } catch (err) {
       next(err);
@@ -152,7 +152,7 @@ export function createKBRouter(kbService: KBService): Router {
     try {
       const { project_id } = req.body;
       if (!project_id) return res.status(400).json({ error: 'project_id is required' });
-      await kbService.unlinkProject(req.params.id, project_id);
+      await kbService.unlinkProject(req.params.id, project_id, req.authContext);
       res.status(200).json({ success: true });
     } catch (err) {
       next(err);
@@ -166,7 +166,7 @@ export function createKBRouter(kbService: KBService): Router {
       const entities = await kbService.listEntitiesPage(req.params.id, type, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       res.json(entities);
     } catch (err) {
       next(err);
@@ -177,7 +177,7 @@ export function createKBRouter(kbService: KBService): Router {
   router.post('/kbs/entities', ...validateRequest({ body: kbEntityCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { actor_id: claimedActorId, ...data } = req.body;
-      const entity = await kbService.upsertEntity(data, getActorId(req, claimedActorId));
+      const entity = await kbService.upsertEntity(data, getActorId(req, claimedActorId), undefined, req.authContext);
       res.status(201).json(entity);
     } catch (err) {
       next(err);
@@ -188,7 +188,7 @@ export function createKBRouter(kbService: KBService): Router {
   router.put('/kbs/entities/:id', ...validateRequest({ body: kbEntityUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { actor_id: claimedActorId, ...data } = req.body;
-      const entity = await kbService.updateEntity(req.params.id, data, getActorId(req, claimedActorId));
+      const entity = await kbService.updateEntity(req.params.id, data, getActorId(req, claimedActorId), undefined, req.authContext);
       res.json(entity);
     } catch (err) {
       next(err);
@@ -198,7 +198,7 @@ export function createKBRouter(kbService: KBService): Router {
   // Delete Entity
   router.delete('/kbs/entities/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await kbService.deleteEntity(req.params.id);
+      await kbService.deleteEntity(req.params.id, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -213,7 +213,7 @@ export function createKBRouter(kbService: KBService): Router {
       const facts = await kbService.listFactsPage(req.params.id, { entityId, category }, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       res.json(facts);
     } catch (err) {
       next(err);
@@ -222,7 +222,7 @@ export function createKBRouter(kbService: KBService): Router {
 
   router.get('/kbs/facts/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const fact = await kbService.getFactById(req.params.id);
+      const fact = await kbService.getFactById(req.params.id, req.authContext);
       if (!fact) return res.status(404).json({ error: 'Knowledge fact not found' });
       res.json(fact);
     } catch (err) {
@@ -234,7 +234,7 @@ export function createKBRouter(kbService: KBService): Router {
   router.post('/kbs/facts', ...validateRequest({ body: kbFactCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { actor_id: claimedActorId, source_principal_id: claimedSourceId, ...data } = req.body;
-      const fact = await kbService.addFact(data, getActorId(req, claimedActorId ?? claimedSourceId));
+      const fact = await kbService.addFact(data, getActorId(req, claimedActorId ?? claimedSourceId), undefined, req.authContext);
       res.status(201).json(fact);
     } catch (err) {
       next(err);
@@ -245,7 +245,7 @@ export function createKBRouter(kbService: KBService): Router {
   router.put('/kbs/facts/:id', ...validateRequest({ body: kbFactUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { actor_id: claimedActorId, ...data } = req.body;
-      const fact = await kbService.updateFact(req.params.id, data, getActorId(req, claimedActorId));
+      const fact = await kbService.updateFact(req.params.id, data, getActorId(req, claimedActorId), undefined, req.authContext);
       res.json(fact);
     } catch (err) {
       next(err);
@@ -255,7 +255,7 @@ export function createKBRouter(kbService: KBService): Router {
   // Delete Fact
   router.delete('/kbs/facts/:id', ...validateRequest({ body: kbActorSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await kbService.deleteFact(req.params.id, getActorId(req, req.body?.actor_id));
+      await kbService.deleteFact(req.params.id, getActorId(req, req.body?.actor_id), undefined, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -266,7 +266,7 @@ export function createKBRouter(kbService: KBService): Router {
   router.post('/kbs/relations', ...validateRequest({ body: kbRelationCreateSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { actor_id: claimedActorId, ...data } = req.body;
-      const relation = await kbService.addRelation(data, getActorId(req, claimedActorId));
+      const relation = await kbService.addRelation(data, getActorId(req, claimedActorId), undefined, req.authContext);
       res.status(201).json(relation);
     } catch (err) {
       next(err);
@@ -276,7 +276,7 @@ export function createKBRouter(kbService: KBService): Router {
   // Delete Relation
   router.delete('/kbs/relations/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await kbService.deleteRelation(req.params.id);
+      await kbService.deleteRelation(req.params.id, req.authContext);
       res.status(204).end();
     } catch (err) {
       next(err);

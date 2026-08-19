@@ -463,10 +463,18 @@ describe('Atomic card claiming and lease expiry', () => {
     const originalMode = config.auth.mode;
     (config.auth as any).mode = 'enforced';
     try {
-      const project = await projectService.create({ name: 'Enforced Mode Anti-Spoof' });
-      const boards = await boardService.list(project.id);
-      const columns = await columnService.list(boards[0].id);
-      const card = await cardService.create({ column_id: columns[0].id, title: 'Hosted install comment' });
+      const auth: AuthContext = {
+        principal: { kind: 'user', id: 'real-authenticated-user' },
+        workspace_id: 'test-ws-01',
+        is_workspace_member: true,
+        permissions: ['comment.create'],
+        is_operator_override: false,
+        role_name: null,
+      };
+      const project = await projectService.create({ name: 'Enforced Mode Anti-Spoof' }, undefined, undefined, auth);
+      const boards = await boardService.list(project.id, auth);
+      const columns = await columnService.list(boards[0].id, auth);
+      const card = await cardService.create({ column_id: columns[0].id, title: 'Hosted install comment' }, undefined, { auth });
 
       const services: Services = {
         projectService, boardService, columnService, cardService, commentService,
@@ -476,14 +484,6 @@ describe('Atomic card claiming and lease expiry', () => {
       const now = new Date().toISOString();
       await db.execute('INSERT OR IGNORE INTO principal (id, kind, created_at) VALUES (?, ?, ?)', ['real-authenticated-user', 'user', now]);
 
-      const auth: AuthContext = {
-        principal: { kind: 'user', id: 'real-authenticated-user' },
-        workspace_id: 'test-ws-01',
-        is_workspace_member: true,
-        permissions: ['comment.create'],
-        is_operator_override: false,
-        role_name: null,
-      };
       const server = createMcpServer(services, { headers: {} } as any, auth) as any;
       const inputSchema = server._registeredTools['add_comment'].inputSchema;
       expect(inputSchema.safeParse({

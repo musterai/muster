@@ -32,7 +32,7 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
       const docs = await documentService.listPage(req.params.projectId, { status, parent_id }, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       res.json(docs);
     } catch (err) {
       next(err);
@@ -44,7 +44,7 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
       const { author_id: claimedAuthorId, ...data } = req.body;
       const doc = await documentService.create(
         { ...data, project_id: req.params.projectId },
-        getActorId(req, claimedAuthorId)
+        getActorId(req, claimedAuthorId), undefined, req.authContext
       );
       res.status(201).json(doc);
     } catch (err) {
@@ -55,7 +55,7 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
   router.get('/documents/:id', ...validateRequest({ query: documentQuerySchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const version = typeof req.query.version === 'number' ? req.query.version : undefined;
-      const doc = await documentService.getById(req.params.id, version);
+      const doc = await documentService.getById(req.params.id, version, req.authContext);
       if (!doc) return res.status(404).json({ error: 'Document not found' });
       res.json(doc);
     } catch (err) {
@@ -66,7 +66,7 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
   router.put('/documents/:id', ...validateRequest({ body: documentUpdateSchema, params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { author_id: claimedAuthorId, ...data } = req.body;
-      const doc = await documentService.update(req.params.id, data, getActorId(req, claimedAuthorId));
+      const doc = await documentService.update(req.params.id, data, getActorId(req, claimedAuthorId), undefined, req.authContext);
       res.json(doc);
     } catch (err) {
       next(err);
@@ -75,7 +75,7 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
 
   router.delete('/documents/:id', ...validateRequest({ params: idParamsSchema }), async (req: Request, res: Response, next: NextFunction) => {
     try {
-      await documentService.delete(req.params.id, getActorId(req));
+      await documentService.delete(req.params.id, getActorId(req), undefined, req.authContext);
       res.json({ success: true });
     } catch (err) {
       next(err);
@@ -101,7 +101,7 @@ export function createDocumentRouter(_db: DatabaseAdapter, documentService: Docu
       const history = await documentService.getHistoryPage(req.params.id, {
         cursor: req.query.cursor as string | undefined,
         limit: req.query.limit as number | undefined,
-      });
+      }, req.authContext);
       res.json(history);
     } catch (err) {
       next(err);

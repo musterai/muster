@@ -6,6 +6,8 @@ import { EventService } from './event.service.js';
 import { rankAfter } from '../shared/lexorank.js';
 import { deriveSlug } from '../shared/slug.js';
 import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageOptions, toPage } from '../shared/pagination.js';
+import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
 
 export class BoardService {
   constructor(
@@ -13,11 +15,12 @@ export class BoardService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateBoard, actorId?: string, adapter?: DatabaseAdapter): Promise<Board> {
+  async create(data: CreateBoard, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board> {
     if (!adapter) {
-      return this.db.transaction(tx => this.create(data, actorId, tx));
+      return this.db.transaction(tx => this.create(data, actorId, tx, auth));
     }
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'project', data.project_id);
     const id = ulid();
     const created_at = new Date().toISOString();
     const updated_at = created_at;
@@ -92,16 +95,19 @@ export class BoardService {
     return board;
   }
 
-  async getById(id: string): Promise<Board | null> {
+  async getById(id: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board | null> {
+    await assertResourceWorkspace(this.db, auth, 'board', id);
     const rows = await this.db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
     return rows[0] || null;
   }
 
-  async list(projectId: string): Promise<Board[]> {
+  async list(projectId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board[]> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     return this.db.query<Board>('SELECT * FROM board WHERE project_id = ? ORDER BY created_at ASC', [projectId]);
   }
 
-  async listPage(projectId: string, options: PageOptions = {}): Promise<Page<Board>> {
+  async listPage(projectId: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<Board>> {
+    await assertResourceWorkspace(this.db, auth, 'project', projectId);
     const limit = normalizePageLimit(options.limit);
     const scope = `boards:${projectId}`;
     const cursor = decodeCursor(options.cursor, scope, 2);
@@ -117,9 +123,10 @@ export class BoardService {
     return toPage(rows, limit, row => encodeCursor(scope, [row.created_at, row.id]));
   }
 
-  async update(id: string, data: UpdateBoard, actorId?: string, adapter?: DatabaseAdapter): Promise<Board> {
-    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx));
+  async update(id: string, data: UpdateBoard, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Board> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, data, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'board', id);
     const rows = await db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
     const existing = rows[0] || null;
     if (!existing) throw new Error(`Board with ID ${id} not found`);
@@ -154,9 +161,10 @@ export class BoardService {
     return updated;
   }
 
-  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'board', id);
     const rows = await db.query<Board>('SELECT * FROM board WHERE id = ?', [id]);
     const existing = rows[0] || null;
     if (!existing) throw new Error(`Board with ID ${id} not found`);
@@ -175,7 +183,8 @@ export class BoardService {
   }
 
   // Label management
-  async createLabel(data: CreateLabel): Promise<Label> {
+  async createLabel(data: CreateLabel, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Label> {
+    await assertResourceWorkspace(this.db, auth, 'board', data.board_id);
     const id = ulid();
     await this.db.execute(
       'INSERT INTO label (id, board_id, name, color) VALUES (?, ?, ?, ?)',
@@ -184,11 +193,13 @@ export class BoardService {
     return { id, board_id: data.board_id, name: data.name, color: data.color };
   }
 
-  async listLabels(boardId: string): Promise<Label[]> {
+  async listLabels(boardId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Label[]> {
+    await assertResourceWorkspace(this.db, auth, 'board', boardId);
     return this.db.query<Label>('SELECT * FROM label WHERE board_id = ?', [boardId]);
   }
 
-  async listLabelsPage(boardId: string, options: PageOptions = {}): Promise<Page<Label>> {
+  async listLabelsPage(boardId: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Page<Label>> {
+    await assertResourceWorkspace(this.db, auth, 'board', boardId);
     const limit = normalizePageLimit(options.limit);
     const scope = `board-labels:${boardId}`;
     const cursor = decodeCursor(options.cursor, scope, 2);

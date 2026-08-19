@@ -6,6 +6,9 @@ import { EventService } from './event.service.js';
 import { assertMaxLength, CARD_TEXT_MAX_CHARS } from '../shared/content-limits.js';
 import { config } from '../config/index.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
+import type { AuthContext } from '../shared/auth-context.js';
+import { OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
+import { assertResourceWorkspace } from './helpers/workspace-scope.helper.js';
 
 export class CommentService {
   constructor(
@@ -13,11 +16,12 @@ export class CommentService {
     private eventService?: EventService
   ) {}
 
-  async create(data: CreateComment, adapter?: DatabaseAdapter): Promise<Comment> {
-    if (!adapter) return this.db.transaction(tx => this.create(data, tx));
+  async create(data: CreateComment, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Comment> {
+    if (!adapter) return this.db.transaction(tx => this.create(data, tx, auth));
     const db = adapter;
     assertMaxLength(data.content, CARD_TEXT_MAX_CHARS, 'Comment content');
     const cardId = await resolveCardId(db, data.card_id);
+    await assertResourceWorkspace(db, auth, 'card', cardId);
     const id = ulid();
     const created_at = new Date().toISOString();
 
@@ -40,20 +44,23 @@ export class CommentService {
     return comment;
   }
 
-  async listByCard(cardId: string): Promise<Comment[]> {
+  async listByCard(cardId: string, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Comment[]> {
     const canonicalCardId = await resolveCardId(this.db, cardId);
+    await assertResourceWorkspace(this.db, auth, 'card', canonicalCardId);
     return this.db.query<Comment>('SELECT * FROM comment WHERE card_id = ? ORDER BY created_at ASC', [canonicalCardId]);
   }
 
-  async getById(id: string): Promise<Comment | null> {
+  async getById(id: string, auth?: AuthContext): Promise<Comment | null> {
+    if (auth) await assertResourceWorkspace(this.db, auth, 'comment', id);
     const rows = await this.db.query<Comment>('SELECT * FROM comment WHERE id = ?', [id]);
     return rows[0] || null;
   }
 
-  async update(id: string, content: string, actorId?: string, adapter?: DatabaseAdapter): Promise<Comment> {
-    if (!adapter) return this.db.transaction(tx => this.update(id, content, actorId, tx));
+  async update(id: string, content: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<Comment> {
+    if (!adapter) return this.db.transaction(tx => this.update(id, content, actorId, tx, auth));
     const db = adapter;
     assertMaxLength(content, CARD_TEXT_MAX_CHARS, 'Comment content');
+    await assertResourceWorkspace(db, auth, 'comment', id);
     const rows = await db.query<Comment>('SELECT * FROM comment WHERE id = ?', [id]);
     const existing = rows[0] || null;
     if (!existing) {
@@ -68,9 +75,10 @@ export class CommentService {
     return updated;
   }
 
-  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter): Promise<void> {
-    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx));
+  async delete(id: string, actorId?: string, adapter?: DatabaseAdapter, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<void> {
+    if (!adapter) return this.db.transaction(tx => this.delete(id, actorId, tx, auth));
     const db = adapter;
+    await assertResourceWorkspace(db, auth, 'comment', id);
     const rows = await db.query<Comment>('SELECT * FROM comment WHERE id = ?', [id]);
     const existing = rows[0] || null;
     if (!existing) {

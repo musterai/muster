@@ -24,6 +24,7 @@ import { config } from '../../config/index.js';
 import { parseCookies } from '../../shared/cookies.js';
 import { isPublicRoute } from '../../shared/public-routes.js';
 import { getRetryAfterMs, recordFailedAttempt, recordSuccessfulAttempt } from './rate-limiter.js';
+import { bootstrapWorkspaceId } from '../../services/helpers/workspace-scope.helper.js';
 
 export const SESSION_COOKIE_NAME = 'muster_session';
 
@@ -235,8 +236,7 @@ export function createAuthMiddleware(
 
         recordSuccessfulAttempt(clientIp);
 
-        const wsRows = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');
-        const workspaceId = wsRows[0]?.id || null;
+        const workspaceId = await bootstrapWorkspaceId(db);
         const { permissions, roleName, isWorkspaceMember } = await resolveUserPermissions(
           db,
           verification.user_id,
