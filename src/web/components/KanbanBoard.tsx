@@ -16,6 +16,7 @@ import { DocumentReaderModal } from './DocumentReaderModal.js';
 import { CardSearch } from './CardSearch.js';
 import { KanbanColumn } from './kanban/KanbanColumn.js';
 import { CardDetailDrawer } from './kanban/CardDetailDrawer.js';
+import { AccessibleDialog } from './AccessibleDialog.js';
 
 interface KanbanBoardProps {
   boards: Board[];
@@ -89,6 +90,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   const [doneVisibleLimits, setDoneVisibleLimits] = useState<Record<string, number>>({});
   const [focusedCardId, setFocusedCardId] = useState<string | null>(null);
   const [focusedColumnIdx, setFocusedColumnIdx] = useState<number>(0);
+  const [boardAnnouncement, setBoardAnnouncement] = useState('');
   const [boardViewMode, setBoardViewModeState] = useState<'default' | 'swimlanes'>(() => {
     try {
       const saved = localStorage.getItem('muster_board_view_mode');
@@ -134,6 +136,33 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
     return { displayColumns: Array.from(uniqueMap.values()), columnMap: map };
   }, [columns, selectedBoardId, board]);
 
+  // Keep exactly one card opener in the tab order whenever the rendered board
+  // has cards. This also repairs focus state after filtering, pagination, or a
+  // move removes the previously focused card from the visible set.
+  useEffect(() => {
+    const visibleCards = displayColumns.flatMap((column, columnIndex) => {
+      const doneLimit = doneVisibleLimits[column.id] ?? DONE_LANE_PAGE_SIZE;
+      return getLaneCards(cards, column.id, column.name, cardDateSortOrder, doneLimit, columnMap).visible.map((card) => ({
+        card,
+        columnIndex,
+      }));
+    });
+
+    if (visibleCards.length === 0) {
+      if (focusedCardId !== null) setFocusedCardId(null);
+      return;
+    }
+
+    const focusedCard = visibleCards.find(({ card }) => card.id === focusedCardId);
+    if (focusedCard) {
+      if (focusedColumnIdx !== focusedCard.columnIndex) setFocusedColumnIdx(focusedCard.columnIndex);
+      return;
+    }
+
+    setFocusedCardId(visibleCards[0].card.id);
+    setFocusedColumnIdx(visibleCards[0].columnIndex);
+  }, [displayColumns, cards, cardDateSortOrder, doneVisibleLimits, columnMap, focusedCardId, focusedColumnIdx]);
+
   const handleMoveCardWithResolution = async (cardId: string, targetColId: string, position?: string) => {
     let resolvedTargetColId = targetColId;
     if (targetColId.startsWith('all-col-')) {
@@ -150,6 +179,10 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       }
     }
     await onMoveCard(cardId, resolvedTargetColId, position);
+    const movedCard = cards.find((card) => card.id === cardId);
+    const targetColumn = columns.find((column) => column.id === resolvedTargetColId)
+      || displayColumns.find((column) => column.id === targetColId);
+    setBoardAnnouncement(`${movedCard?.key || 'Card'} moved to ${targetColumn?.name || 'the selected lane'}.`);
   };
 
   const closeCardModal = () => {
@@ -181,6 +214,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   useEffect(() => {
     const handleBoardKeyDown = (e: KeyboardEvent) => {
       const activeElement = document.activeElement;
+      const isInsideModal = activeElement instanceof HTMLElement
+        && Boolean(activeElement.closest('[role="dialog"][aria-modal="true"]'));
       const isTyping =
         activeElement &&
         (activeElement.tagName === 'INPUT' ||
@@ -188,7 +223,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           activeElement.tagName === 'SELECT' ||
           (activeElement as HTMLElement).isContentEditable);
 
-      if (isTyping || cardDetails || isCreatingCard || showBoardSettingsModal || editingColumn) {
+      if (isInsideModal || isTyping || cardDetails || isCreatingCard || showBoardSettingsModal || editingColumn) {
         return;
       }
 
@@ -230,10 +265,10 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       const focusCard = (cardId: string) => {
         setFocusedCardId(cardId);
         requestAnimationFrame(() => {
-          const cardEl = document.getElementById(`kanban-card-${cardId}`);
-          if (cardEl) {
-            cardEl.focus();
-            cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+          const card = document.getElementById(`kanban-card-${cardId}`);
+          if (card) {
+            card.querySelector<HTMLElement>('[data-card-open]')?.focus();
+            card.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
           }
         });
       };
@@ -695,7 +730,9 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full min-h-0 font-sans space-y-4">
+    <section className="flex-1 flex flex-col h-full min-h-0 font-sans space-y-4" aria-labelledby="kanban-board-heading">
+      <h2 id="kanban-board-heading" className="sr-only">{board.name} Kanban board</h2>
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{boardAnnouncement}</div>
       {/* Board Header Bar */}
       <div className="flex-none flex items-center justify-between border-b border-muster-border pb-3 gap-2 sm:gap-3">
         <div className="flex items-center space-x-2 sm:space-x-2.5 shrink-0 min-w-0">
@@ -738,7 +775,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       onSelectBoard(e.target.value);
                     }
                   }}
-                  className="muster-input text-sm sm:text-base font-bold py-1 pl-2 pr-7 bg-transparent hover:bg-muster-surface-hover border-transparent hover:border-muster-border rounded-lg cursor-pointer font-sans muster-text-primary focus:ring-1 focus:ring-brand-500 appearance-none max-w-[160px] xs:max-w-[220px] sm:max-w-[340px] truncate"
+                  className="muster-input muster-touch-target text-sm sm:text-base font-bold py-1 pl-2 pr-7 bg-transparent hover:bg-muster-surface-hover border-transparent hover:border-muster-border rounded-lg cursor-pointer font-sans muster-text-primary focus:ring-1 focus:ring-brand-500 appearance-none max-w-[160px] xs:max-w-[220px] sm:max-w-[340px] truncate"
                   aria-label="Select board"
                 >
                   <option value="all" className="bg-muster-surface text-xs font-bold py-1 muster-accent">
@@ -764,8 +801,9 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                     setBoardNameInput(board.name);
                     setShowBoardSettingsModal(true);
                   }}
-                  className="p-1 muster-text-muted hover:muster-text-primary rounded transition-colors shrink-0"
+                  className="muster-touch-target p-1 muster-text-muted hover:muster-text-primary rounded transition-colors shrink-0"
                   title="Board Settings"
+                  aria-label="Board settings"
                 >
                   <Settings className="w-4 h-4" />
                 </button>
@@ -778,7 +816,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           <div className="flex items-center bg-muster-surface p-0.5 rounded-lg border border-muster-border shrink-0">
             <button
               onClick={() => setBoardViewMode('default')}
-              className={`px-2 py-1 text-xs font-sans rounded-md flex items-center space-x-1.5 transition-colors cursor-pointer ${
+              aria-pressed={boardViewMode === 'default'}
+              className={`muster-touch-target px-2 py-1 text-xs font-sans rounded-md flex items-center space-x-1.5 transition-colors cursor-pointer ${
                 boardViewMode === 'default'
                   ? 'bg-brand-950 text-brand-300 font-semibold border border-brand-500/40 shadow-sm'
                   : 'muster-text-muted hover:muster-text-primary'
@@ -790,7 +829,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             </button>
             <button
               onClick={() => setBoardViewMode('swimlanes')}
-              className={`px-2 py-1 text-xs font-sans rounded-md flex items-center space-x-1.5 transition-colors cursor-pointer ${
+              aria-pressed={boardViewMode === 'swimlanes'}
+              className={`muster-touch-target px-2 py-1 text-xs font-sans rounded-md flex items-center space-x-1.5 transition-colors cursor-pointer ${
                 boardViewMode === 'swimlanes'
                   ? 'bg-brand-950 text-brand-300 font-semibold border border-brand-500/40 shadow-sm'
                   : 'muster-text-muted hover:muster-text-primary'
@@ -836,7 +876,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                   const el = document.getElementById(`kanban-column-${col.id}`);
                   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
                 }}
-                className={`muster-chip shrink-0 text-xs font-sans py-1 px-2.5 flex items-center gap-1.5 cursor-pointer ${
+                className={`muster-chip muster-touch-target shrink-0 text-xs font-sans py-1 px-2.5 flex items-center gap-1.5 cursor-pointer ${
                   focusedColumnIdx === columns.findIndex((c) => c.id === col.id)
                     ? 'border-brand-500 bg-brand-950/40 text-brand-300 font-semibold ring-1 ring-brand-500/50'
                     : 'hover:border-brand-500/50'
@@ -1167,13 +1207,16 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
       {/* Board Settings Modal */}
       {showBoardSettingsModal && (
-        <div className="muster-scrim" onClick={() => setShowBoardSettingsModal(false)}>
-          <div className="muster-dialog w-full max-w-md p-5 space-y-4 font-sans" onClick={(e) => e.stopPropagation()}>
+        <AccessibleDialog
+          onClose={() => setShowBoardSettingsModal(false)}
+          titleId="board-settings-title"
+          className="w-full max-w-md p-5 space-y-4 font-sans"
+        >
             <div className="flex items-center justify-between border-b border-muster-border pb-3">
-              <h3 className="text-sm font-bold muster-text-primary flex items-center">
+              <h2 id="board-settings-title" className="text-sm font-bold muster-text-primary flex items-center">
                 <Settings className="w-4 h-4 mr-2 muster-accent" /> Board Settings
-              </h3>
-              <button onClick={() => setShowBoardSettingsModal(false)} className="muster-btn muster-btn-icon muster-btn-ghost">
+              </h2>
+              <button onClick={() => setShowBoardSettingsModal(false)} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close board settings">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1235,8 +1278,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </AccessibleDialog>
       )}
 
       {/* Edit Column Modal */}
@@ -1251,6 +1293,6 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           onDelete={(colId) => handleDeleteColumn(colId)}
         />
       )}
-    </div>
+    </section>
   );
 };

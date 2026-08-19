@@ -8,6 +8,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { ApiToken } from '../types.js';
 import { api, ApiError } from '../api.js';
 import { KeyRound, Plus, Trash2, X, Copy, Check, ShieldAlert } from 'lucide-react';
+import { AccessibleDialog } from './AccessibleDialog.js';
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—';
@@ -176,22 +177,23 @@ export const TokensView: React.FC = () => {
 
       {/* Create Token Modal */}
       {showCreateModal && (
-        <div className="muster-scrim">
-          <div className="muster-dialog w-full max-w-md p-6 space-y-4">
+        <AccessibleDialog onClose={() => setShowCreateModal(false)} titleId="new-token-title" className="w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-muster-border pb-3">
               <div className="flex items-center space-x-2">
                 <KeyRound className="w-5 h-5 muster-accent" />
-                <h3 className="text-base font-bold muster-text-primary uppercase tracking-wide">New Token</h3>
+                <h2 id="new-token-title" className="text-base font-bold muster-text-primary uppercase tracking-wide">New Token</h2>
               </div>
-              <button onClick={() => setShowCreateModal(false)} className="muster-btn muster-btn-icon muster-btn-ghost">
-                <X className="w-4 h-4" />
+              <button onClick={() => setShowCreateModal(false)} className="muster-btn muster-btn-icon muster-btn-ghost" aria-label="Close new token dialog">
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
 
             <form onSubmit={handleCreate} className="space-y-4">
               <div>
-                <label className="muster-label uppercase">Name</label>
+                <label htmlFor="new-token-name" className="muster-label uppercase">Name</label>
                 <input
+                  id="new-token-name"
+                  data-dialog-initial-focus
                   type="text"
                   required
                   value={newName}
@@ -202,8 +204,9 @@ export const TokensView: React.FC = () => {
               </div>
 
               <div>
-                <label className="muster-label uppercase">Expiry (optional)</label>
+                <label htmlFor="new-token-expiry" className="muster-label uppercase">Expiry (optional)</label>
                 <input
+                  id="new-token-expiry"
                   type="datetime-local"
                   value={newExpiry}
                   onChange={(e) => setNewExpiry(e.target.value)}
@@ -221,26 +224,30 @@ export const TokensView: React.FC = () => {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
+        </AccessibleDialog>
       )}
 
       {/* Reveal-once secret modal */}
       {revealedSecret && (
-        <div className="muster-scrim">
-          <div className="muster-dialog w-full max-w-lg p-6 space-y-4">
+        <AccessibleDialog
+          onClose={() => { setRevealedSecret(null); setCopied(false); }}
+          titleId="token-created-title"
+          descriptionId="token-created-description"
+          closeOnBackdrop={false}
+          className="w-full max-w-lg p-6 space-y-4"
+        >
             <div className="flex items-center space-x-2 border-b border-muster-border pb-3">
               <ShieldAlert className="w-5 h-5 muster-text-warning" />
-              <h3 className="text-base font-bold muster-text-primary uppercase tracking-wide">Token Created</h3>
+              <h2 id="token-created-title" className="text-base font-bold muster-text-primary uppercase tracking-wide">Token Created</h2>
             </div>
 
-            <p className="text-xs muster-text-muted">
+            <p id="token-created-description" className="text-xs muster-text-muted">
               Copy this token now. <span className="font-semibold muster-text-warning">You will not be able to see it again.</span>
             </p>
 
             <div className="flex items-center gap-2 bg-muster-base border border-muster-border rounded-md px-3 py-2">
               <code className="flex-1 font-mono text-xs muster-text-primary break-all select-all">{revealedSecret}</code>
-              <button onClick={handleCopy} className="muster-btn muster-btn-icon muster-btn-ghost" title="Copy to clipboard">
+              <button data-dialog-initial-focus onClick={handleCopy} className="muster-btn muster-btn-icon muster-btn-ghost" title="Copy to clipboard" aria-label="Copy token to clipboard">
                 {copied ? <Check className="w-4 h-4 muster-text-success" /> : <Copy className="w-4 h-4" />}
               </button>
             </div>
@@ -250,8 +257,7 @@ export const TokensView: React.FC = () => {
                 Done — I've saved it
               </button>
             </div>
-          </div>
-        </div>
+        </AccessibleDialog>
       )}
 
     </div>

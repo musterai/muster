@@ -1,6 +1,7 @@
 // File: src/web/components/ShortcutsHelpModal.tsx
-import React, { useEffect } from 'react';
-import { HelpCircle, X, Keyboard, Command } from 'lucide-react';
+import React from 'react';
+import { X, Keyboard } from 'lucide-react';
+import { AccessibleDialog } from './AccessibleDialog.js';
 
 interface ShortcutsHelpModalProps {
   onClose: () => void;
@@ -18,6 +19,7 @@ const SHORTCUTS: ShortcutItem[] = [
   { keys: ['PgUp', 'PgDn'], description: 'Jump 5 cards up/down in a column', category: 'board' },
   { keys: ['Home', 'End'], description: 'Jump to first/last card in a column', category: 'board' },
   { keys: ['Enter'], description: 'Open selected card details', category: 'board' },
+  { keys: ['Space', '↑', '↓'], description: 'Lift and reorder a focused card drag handle', category: 'board' },
   { keys: ['N', 'C'], description: 'Create new card in focused column', category: 'board' },
   { keys: ['Del'], description: 'Delete selected card', category: 'board' },
   { keys: ['/'], description: 'Focus quick card search box', category: 'global' },
@@ -26,28 +28,25 @@ const SHORTCUTS: ShortcutItem[] = [
 ];
 
 export const ShortcutsHelpModal: React.FC<ShortcutsHelpModalProps> = ({ onClose }) => {
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
-
   const boardShortcuts = SHORTCUTS.filter((s) => s.category === 'board');
   const globalShortcuts = SHORTCUTS.filter((s) => s.category === 'global');
 
   return (
-    <div className="muster-scrim" onClick={onClose}>
-      <div
-        className="muster-dialog w-full max-w-lg max-h-[85vh] overflow-y-auto mx-2 p-5 space-y-4 font-sans"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <AccessibleDialog
+      onClose={onClose}
+      titleId="shortcuts-dialog-title"
+      descriptionId="shortcuts-dialog-description"
+      className="w-full max-w-lg max-h-[85vh] overflow-y-auto mx-2 p-5 space-y-4 font-sans"
+    >
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="shortcuts-dialog-title" className="text-sm font-bold muster-text-primary flex items-center">
             <Keyboard className="w-4 h-4 mr-2 muster-accent" /> Keyboard Shortcuts
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button
+            onClick={onClose}
+            className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target"
+            aria-label="Close keyboard shortcuts"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -107,11 +106,10 @@ export const ShortcutsHelpModal: React.FC<ShortcutsHelpModalProps> = ({ onClose 
         </div>
 
         <div className="pt-2 text-center border-t border-muster-border">
-          <p className="text-[11px] muster-text-muted">
+          <p id="shortcuts-dialog-description" className="text-[11px] muster-text-muted">
             Press <kbd className="px-1.5 py-0.5 text-[10px] font-mono bg-muster-surface-hover muster-text-primary border border-muster-border rounded">?</kbd> anytime to open this guide.
           </p>
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };

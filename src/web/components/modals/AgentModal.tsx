@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, UserPlus, AlertCircle } from 'lucide-react';
 import { api } from '../../api.js';
-import { useEscapeKey } from './useEscapeKey.js';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 interface NewAgentModalProps {
   onClose: () => void;
@@ -9,7 +9,6 @@ interface NewAgentModalProps {
 }
 
 export const NewAgentModal: React.FC<NewAgentModalProps> = ({ onClose, onSuccess }) => {
-  useEscapeKey(onClose);
   const [name, setName] = useState('');
   const [capabilities, setCapabilities] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -24,7 +23,7 @@ export const NewAgentModal: React.FC<NewAgentModalProps> = ({ onClose, onSuccess
     try {
       await api.registerAgent({
         name: name.trim(),
-        ...(capabilities.trim() ? { capabilities: capabilities.trim() } : {}),
+        capabilities: capabilities.trim() || undefined,
       });
       onSuccess();
       onClose();
@@ -37,19 +36,18 @@ export const NewAgentModal: React.FC<NewAgentModalProps> = ({ onClose, onSuccess
   };
 
   return (
-    <div className="muster-scrim">
-      <div className="muster-dialog w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
+    <AccessibleDialog onClose={onClose} titleId="new-agent-title" className="w-full max-w-md max-h-[90vh] overflow-y-auto mx-2 p-4 sm:p-5 space-y-4 font-sans">
         <div className="flex items-center justify-between border-b border-muster-border pb-3">
-          <h3 className="text-sm font-bold muster-text-primary flex items-center">
+          <h2 id="new-agent-title" className="text-sm font-bold muster-text-primary flex items-center">
             <UserPlus className="w-4 h-4 mr-2 muster-accent" /> Register Agent
-          </h3>
-          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost">
+          </h2>
+          <button onClick={onClose} className="muster-btn muster-btn-icon muster-btn-ghost muster-touch-target" aria-label="Close register agent dialog">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {error && (
-          <div className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
+          <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{error}</span>
           </div>
@@ -61,8 +59,10 @@ export const NewAgentModal: React.FC<NewAgentModalProps> = ({ onClose, onSuccess
 
         <form onSubmit={handleSubmit} className="space-y-3 text-xs">
           <div>
-            <label className="muster-label">Agent Name</label>
+            <label htmlFor="new-agent-name" className="muster-label">Agent Name</label>
             <input
+              id="new-agent-name"
+              data-dialog-initial-focus
               type="text"
               required
               value={name}
@@ -73,8 +73,9 @@ export const NewAgentModal: React.FC<NewAgentModalProps> = ({ onClose, onSuccess
           </div>
 
           <div>
-            <label className="muster-label">Capabilities (comma-separated)</label>
+            <label htmlFor="new-agent-capabilities" className="muster-label">Capabilities (comma-separated)</label>
             <input
+              id="new-agent-capabilities"
               type="text"
               value={capabilities}
               onChange={(e) => setCapabilities(e.target.value)}
@@ -100,7 +101,6 @@ export const NewAgentModal: React.FC<NewAgentModalProps> = ({ onClose, onSuccess
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 };
