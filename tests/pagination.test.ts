@@ -177,6 +177,10 @@ describe('bounded collection pagination', () => {
       await db.execute('INSERT INTO kb_entity (id,kb_id,name,type,identifier,metadata,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',
         [entityId, kb.id, `Bulk ${index.toString().padStart(3, '0')}`, 'custom', entityId, metadata, now, now]);
     }
+    for (let index = 0; index < 210; index++) {
+      await db.execute('INSERT INTO kb_relation (id,kb_id,source_entity_id,target_entity_id,relation_type,description,created_at) VALUES (?,?,?,?,?,?,?)',
+        [`bulk-link-${index.toString().padStart(3, '0')}`, kb.id, `bulk-entity-${(index % 105).toString().padStart(3, '0')}`, `bulk-entity-${((index + 1) % 105).toString().padStart(3, '0')}`, 'relates_to', 'omitted body', now]);
+    }
     for (let index = 0; index < 105; index++) {
       await db.execute('INSERT INTO kb_fact (id,kb_id,entity_id,title,content,category,confidence,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
         [`bulk-fact-${index.toString().padStart(3, '0')}`, kb.id, 'bulk-entity-000', `Bulk fact ${index}`, 'private body '.repeat(100), 'test', 1, now, now]);
@@ -191,12 +195,24 @@ describe('bounded collection pagination', () => {
     expect(searchEntities.entities.every(entity => !('metadata' in entity))).toBe(true);
     expect(JSON.stringify(searchEntities).length).toBeLessThan(100_000);
 
-    const graphFirst = await kbs.getGraphTree(kb.id, undefined, { limit: 100 });
-    expect(graphFirst.nodes).toHaveLength(100);
-    expect(graphFirst.page.has_more).toBe(true);
-    expect(JSON.stringify(graphFirst).length).toBeLessThan(100_000);
-    const graphSecond = await kbs.getGraphTree(kb.id, undefined, { limit: 100, cursor: graphFirst.page.next_cursor! });
-    expect(graphSecond.nodes).toHaveLength(5);
+    const graphNodes: string[] = [];
+    const graphLinks: string[] = [];
+    let graphCursor: string | undefined;
+    do {
+      const page = await kbs.getGraphTree(kb.id, undefined, { limit: 37, cursor: graphCursor });
+      expect(page.nodes.length + page.links.length).toBeLessThanOrEqual(37);
+      expect(JSON.stringify(page).length).toBeLessThan(100_000);
+      graphNodes.push(...page.nodes.map(node => node.id));
+      graphLinks.push(...page.links.map(link => link.id));
+      graphCursor = page.page.next_cursor || undefined;
+    } while (graphCursor);
+    expect(graphNodes).toHaveLength(105);
+    expect(graphLinks).toHaveLength(210);
+    expect(new Set(graphNodes).size).toBe(105);
+    expect(new Set(graphLinks).size).toBe(210);
+    const firstGraphPage = await kbs.getGraphTree(kb.id, undefined, { limit: 37 });
+    const otherKb = await kbs.create({ name: 'Other graph KB', project_ids: [projectId] });
+    await expect(kbs.getGraphTree(otherKb.id, undefined, { limit: 37, cursor: firstGraphPage.page.next_cursor! })).rejects.toThrow(/cursor is invalid/);
 
     const knowledgeFirst = await kbs.getEntityKnowledge('bulk-entity-000', [kb.id], { limit: 100 });
     expect(knowledgeFirst?.facts).toHaveLength(100);

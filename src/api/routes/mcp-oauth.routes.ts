@@ -207,7 +207,9 @@ export function createMcpOAuthRouter(
         resource: canonicalMcpResource(),
         agents: (agentPage?.items || []).map(a => ({ id: a.id, name: a.name, role_id: a.role_id })),
         roles: (rolePage?.items || []).map(r => ({ id: r.id, name: r.name })),
-        page: { limit, has_more: hasMore, next_cursor: hasMore ? encodeCursor(scope, [nextPhase, nextPhase === phase ? nextNested : '']) : null },
+        // A mixed final-agent/first-role page has already consumed role rows;
+        // retain that nested role keyset when changing the outer phase.
+        page: { limit, has_more: hasMore, next_cursor: hasMore ? encodeCursor(scope, [nextPhase, nextNested]) : null },
       });
     } catch (err) {
       next(err);

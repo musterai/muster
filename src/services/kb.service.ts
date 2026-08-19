@@ -806,7 +806,10 @@ export class KBService {
       sql += ' ORDER BY r.created_at ASC,r.id ASC LIMIT ?'; params.push(limit + 1);
       links = await this.db.query(sql, params);
     }
-    if (phase === 'nodes' && !cursor && entities.length <= limit && entities.length < limit) {
+    // When a continued node page exhausts the node phase with spare capacity,
+    // start the link phase in that same response. Restricting this fill to the
+    // first request loses every link after a final partial node page.
+    if (phase === 'nodes' && entities.length <= limit && entities.length < limit) {
       const remaining = limit - entities.length;
       const linkParams: unknown[] = [];
       let linkFilter = '1=1';
@@ -839,7 +842,11 @@ export class KBService {
     const linkMore = links.length > (phase === 'nodes' ? remaining : limit);
     const hasMore = nodeMore || linkMore || (phase === 'nodes' && nodeItems.length === limit && !nodeMore);
     const nextPhase = nodeMore ? 'nodes' : 'links';
-    const included = nodeMore ? entities.slice(0, limit).at(-1) : linkItems.at(-1);
+    // Cursor keys come from the database row, not the public link summary
+    // (which intentionally omits created_at along with large descriptions).
+    const included = nodeMore
+      ? entities.slice(0, limit).at(-1)
+      : links.slice(0, phase === 'nodes' ? remaining : limit).at(-1);
     return { nodes: nodeItems, links: linkItems, page: {
       limit, has_more: hasMore,
       next_cursor: hasMore ? encodeCursor(scope, [nextPhase, nodeMore ? (included as KBEntity).name : linkMore ? ((included as unknown as KBRelation)?.created_at || '') : '', (nodeMore || linkMore) ? included?.id || '' : '']) : null,
