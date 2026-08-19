@@ -186,7 +186,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
               <>
                 <button
                   onClick={(e) => onCopyKey(cardDetails.key, cardDetails.id, e)}
-                  className="flex items-center space-x-1 font-mono text-xs muster-accent font-bold hover:opacity-75"
+                  className="muster-card-detail-target flex items-center space-x-1 font-mono text-xs muster-accent font-bold hover:opacity-75"
                   title="Copy card key"
                 >
                   <span>{cardDetails.key}</span>
@@ -202,7 +202,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                         await onMoveCard(cardDetails.id, targetColId);
                       }
                     }}
-                    className="bg-transparent muster-text-primary text-xs focus:outline-none cursor-pointer font-sans"
+                    className="muster-card-detail-target bg-transparent muster-text-primary text-xs focus:outline-none cursor-pointer font-sans"
                     title="Change card column / lane"
                   >
                     {columns.map((col) => (
@@ -239,14 +239,14 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
               <>
                 <button
                   onClick={onStartEditingCard}
-                  className="inline-flex items-center px-2.5 py-1 bg-brand-950/80 hover:bg-brand-900 text-brand-300 border border-brand-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
+                  className="muster-card-detail-target inline-flex items-center px-2.5 py-1 bg-brand-950/80 hover:bg-brand-900 text-brand-300 border border-brand-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
                   title="Edit Task Text & Properties"
                 >
                   <Edit2 className="w-3.5 h-3.5 mr-1" /> Edit Task
                 </button>
                 <button
                   onClick={() => onDeleteCard(cardDetails.id, cardDetails.title)}
-                  className="inline-flex items-center px-2.5 py-1 bg-danger-950/80 hover:bg-danger-900 text-danger-300 border border-danger-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
+                  className="muster-card-detail-target inline-flex items-center px-2.5 py-1 bg-danger-950/80 hover:bg-danger-900 text-danger-300 border border-danger-500/40 rounded text-xs font-semibold transition-all cursor-pointer"
                   title="Delete Task"
                 >
                   <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete Task
@@ -362,7 +362,7 @@ export const CardDetailDrawer: React.FC<CardDetailDrawerProps> = ({
                   <div className="flex items-center space-x-2">
                     <button
                       onClick={onStartEditingCard}
-                      className="p-1 text-neutral-500 hover:text-brand-400 transition-colors cursor-pointer"
+                      className="muster-card-detail-target p-1 text-neutral-500 hover:text-brand-400 transition-colors cursor-pointer"
                       title="Edit Title & Description"
                     >
                       <Edit2 className="w-4 h-4" />

@@ -12,6 +12,7 @@ import {
 } from '../types.js';
 import { api } from '../api.js';
 import { KnowledgeGraphCanvas } from './KnowledgeGraphCanvas.js';
+import { AccessibleDialog } from './AccessibleDialog.js';
 import { BookOpen, Plus, PlusCircle, Pencil, Trash2, X, Search } from 'lucide-react';
 
 interface KnowledgeBaseProps {
@@ -585,16 +586,16 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
 
       {/* Modal: Create Knowledge Base */}
       {showCreateKbModal && (
-        <div className="muster-scrim">
-          <form onSubmit={handleCreateKB} className="muster-dialog p-6 w-full max-w-md space-y-4">
-            <h3 className="text-lg font-bold muster-text-primary">Create New Knowledge Base</h3>
+        <AccessibleDialog onClose={() => setShowCreateKbModal(false)} titleId="create-kb-title" className="w-full max-w-md p-6">
+          <form onSubmit={handleCreateKB} className="w-full space-y-4">
+            <h2 id="create-kb-title" className="text-lg font-bold muster-text-primary">Create New Knowledge Base</h2>
             <div>
-              <label className="muster-label">KB Name</label>
-              <input type="text" placeholder="e.g. Home KB, Work KB, Infra KB" value={newKbName} onChange={(e) => setNewKbName(e.target.value)} required className="muster-input muster-input-lg" />
+              <label htmlFor="create-kb-name" className="muster-label">KB Name</label>
+              <input id="create-kb-name" data-dialog-initial-focus type="text" placeholder="e.g. Home KB, Work KB, Infra KB" value={newKbName} onChange={(e) => setNewKbName(e.target.value)} required className="muster-input muster-input-lg" />
             </div>
             <div>
-              <label className="muster-label">Description</label>
-              <textarea placeholder="Scope and purpose of this knowledge base..." value={newKbDesc} onChange={(e) => setNewKbDesc(e.target.value)} rows={3} className="muster-input muster-input-lg resize-none" />
+              <label htmlFor="create-kb-description" className="muster-label">Description</label>
+              <textarea id="create-kb-description" placeholder="Scope and purpose of this knowledge base..." value={newKbDesc} onChange={(e) => setNewKbDesc(e.target.value)} rows={3} className="muster-input muster-input-lg resize-none" />
             </div>
             <div className="flex items-center space-x-2 pt-1">
               <input type="checkbox" id="is_global" checked={newKbIsGlobal} onChange={(e) => setNewKbIsGlobal(e.target.checked)} className="rounded-sm accent-muster-accent-solid" />
@@ -605,82 +606,82 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
               <button type="submit" className="muster-btn muster-btn-lg muster-btn-primary">Create KB</button>
             </div>
           </form>
-        </div>
+        </AccessibleDialog>
       )}
 
       {/* Modal: Add Gained Knowledge */}
       {showAddFactModal && (
-        <div className="muster-scrim">
-          <form onSubmit={handleAddFact} className="muster-dialog p-6 w-full max-w-lg space-y-4">
-            <h3 className="text-lg font-bold muster-text-primary">Add Gained Knowledge</h3>
-            <div><label className="muster-label">Title</label><input type="text" placeholder="e.g. Single CPU Constraint, Mail Server IP" value={newFactTitle} onChange={(e) => setNewFactTitle(e.target.value)} required className="muster-input muster-input-lg" /></div>
-            <div><label className="muster-label">Content / Learning</label><textarea placeholder="Detail what was learned..." value={newFactContent} onChange={(e) => setNewFactContent(e.target.value)} rows={4} required className="muster-input muster-input-lg resize-none" /></div>
+        <AccessibleDialog onClose={() => setShowAddFactModal(false)} titleId="add-knowledge-title" className="w-full max-w-lg p-6">
+          <form onSubmit={handleAddFact} className="w-full space-y-4">
+            <h2 id="add-knowledge-title" className="text-lg font-bold muster-text-primary">Add Gained Knowledge</h2>
+            <div><label htmlFor="add-knowledge-name" className="muster-label">Title</label><input id="add-knowledge-name" data-dialog-initial-focus type="text" placeholder="e.g. Single CPU Constraint, Mail Server IP" value={newFactTitle} onChange={(e) => setNewFactTitle(e.target.value)} required className="muster-input muster-input-lg" /></div>
+            <div><label htmlFor="add-knowledge-content" className="muster-label">Content / Learning</label><textarea id="add-knowledge-content" placeholder="Detail what was learned..." value={newFactContent} onChange={(e) => setNewFactContent(e.target.value)} rows={4} required className="muster-input muster-input-lg resize-none" /></div>
             <div className="grid grid-cols-2 gap-3">
-              <div><label className="muster-label">Category</label><select value={newFactCategory} onChange={(e) => setNewFactCategory(e.target.value)} className="muster-input">{categoryOptions}</select></div>
-              <div><label className="muster-label">Entity Name (Optional)</label><input type="text" placeholder="e.g. server-01" value={newFactEntityName} onChange={(e) => setNewFactEntityName(e.target.value)} className="muster-input" /></div>
+              <div><label htmlFor="add-knowledge-category" className="muster-label">Category</label><select id="add-knowledge-category" value={newFactCategory} onChange={(e) => setNewFactCategory(e.target.value)} className="muster-input">{categoryOptions}</select></div>
+              <div><label htmlFor="add-knowledge-entity" className="muster-label">Entity Name (Optional)</label><input id="add-knowledge-entity" type="text" placeholder="e.g. server-01" value={newFactEntityName} onChange={(e) => setNewFactEntityName(e.target.value)} className="muster-input" /></div>
             </div>
-            <div><label className="muster-label">Entity Identifier / IP / Email (Optional)</label><input type="text" placeholder="e.g. 192.168.1.50 or admin@work.com" value={newFactEntityIdent} onChange={(e) => setNewFactEntityIdent(e.target.value)} className="muster-input" /></div>
+            <div><label htmlFor="add-knowledge-identifier" className="muster-label">Entity Identifier / IP / Email (Optional)</label><input id="add-knowledge-identifier" type="text" placeholder="e.g. 192.168.1.50 or admin@work.com" value={newFactEntityIdent} onChange={(e) => setNewFactEntityIdent(e.target.value)} className="muster-input" /></div>
             <div className="flex justify-end space-x-2 pt-2">
               <button type="button" onClick={() => setShowAddFactModal(false)} className="muster-btn muster-btn-lg muster-btn-secondary">Cancel</button>
               <button type="submit" className="muster-btn muster-btn-lg muster-btn-primary">Save Knowledge</button>
             </div>
           </form>
-        </div>
+        </AccessibleDialog>
       )}
 
       {/* Modal: Edit Fact */}
       {showEditFactModal && editingFact && (
-        <div className="muster-scrim">
-          <form onSubmit={handleUpdateFact} className="muster-dialog p-6 w-full max-w-lg space-y-4">
-            <h3 className="text-lg font-bold muster-text-primary">Edit Gained Knowledge Fact</h3>
-            <div><label className="muster-label">Title</label><input type="text" value={editFactTitle} onChange={(e) => setEditFactTitle(e.target.value)} required className="muster-input muster-input-lg" /></div>
-            <div><label className="muster-label">Content / Learning</label><textarea value={editFactContent} onChange={(e) => setEditFactContent(e.target.value)} rows={4} required className="muster-input muster-input-lg resize-none" /></div>
+        <AccessibleDialog onClose={() => { setShowEditFactModal(false); setEditingFact(null); }} titleId="edit-knowledge-title" className="w-full max-w-lg p-6">
+          <form onSubmit={handleUpdateFact} className="w-full space-y-4">
+            <h2 id="edit-knowledge-title" className="text-lg font-bold muster-text-primary">Edit Gained Knowledge Fact</h2>
+            <div><label htmlFor="edit-knowledge-name" className="muster-label">Title</label><input id="edit-knowledge-name" data-dialog-initial-focus type="text" value={editFactTitle} onChange={(e) => setEditFactTitle(e.target.value)} required className="muster-input muster-input-lg" /></div>
+            <div><label htmlFor="edit-knowledge-content" className="muster-label">Content / Learning</label><textarea id="edit-knowledge-content" value={editFactContent} onChange={(e) => setEditFactContent(e.target.value)} rows={4} required className="muster-input muster-input-lg resize-none" /></div>
             <div className="grid grid-cols-2 gap-3">
-              <div><label className="muster-label">Category</label><select value={editFactCategory} onChange={(e) => setEditFactCategory(e.target.value)} className="muster-input">{categoryOptions}</select></div>
-              <div><label className="muster-label">Entity Name</label><input type="text" value={editFactEntityName} onChange={(e) => setEditFactEntityName(e.target.value)} className="muster-input" /></div>
+              <div><label htmlFor="edit-knowledge-category" className="muster-label">Category</label><select id="edit-knowledge-category" value={editFactCategory} onChange={(e) => setEditFactCategory(e.target.value)} className="muster-input">{categoryOptions}</select></div>
+              <div><label htmlFor="edit-knowledge-entity" className="muster-label">Entity Name</label><input id="edit-knowledge-entity" type="text" value={editFactEntityName} onChange={(e) => setEditFactEntityName(e.target.value)} className="muster-input" /></div>
             </div>
-            <div><label className="muster-label">Entity Identifier / IP / Email</label><input type="text" value={editFactEntityIdent} onChange={(e) => setEditFactEntityIdent(e.target.value)} className="muster-input" /></div>
+            <div><label htmlFor="edit-knowledge-identifier" className="muster-label">Entity Identifier / IP / Email</label><input id="edit-knowledge-identifier" type="text" value={editFactEntityIdent} onChange={(e) => setEditFactEntityIdent(e.target.value)} className="muster-input" /></div>
             <div className="flex justify-end space-x-2 pt-2">
               <button type="button" onClick={() => { setShowEditFactModal(false); setEditingFact(null); }} className="muster-btn muster-btn-lg muster-btn-secondary">Cancel</button>
               <button type="submit" className="muster-btn muster-btn-lg muster-btn-primary">Update Fact</button>
             </div>
           </form>
-        </div>
+        </AccessibleDialog>
       )}
 
       {/* Modal: Edit Entity */}
       {showEditEntityModal && editingEntity && (
-        <div className="muster-scrim">
-          <form onSubmit={handleUpdateEntity} className="muster-dialog p-6 w-full max-w-md space-y-4">
-            <h3 className="text-lg font-bold muster-text-primary">Edit Knowledge Graph Entity Node</h3>
-            <div><label className="muster-label">Entity Name</label><input type="text" value={editEntityName} onChange={(e) => setEditEntityName(e.target.value)} required className="muster-input muster-input-lg" /></div>
-            <div><label className="muster-label">Entity Type</label><input type="text" placeholder="e.g. server, ip_address, email, service, database" value={editEntityType} onChange={(e) => setEditEntityType(e.target.value)} required className="muster-input" /></div>
-            <div><label className="muster-label">Canonical Identifier (IP, Hostname, Email)</label><input type="text" value={editEntityIdent} onChange={(e) => setEditEntityIdent(e.target.value)} className="muster-input" /></div>
+        <AccessibleDialog onClose={() => { setShowEditEntityModal(false); setEditingEntity(null); }} titleId="edit-kb-entity-title" className="w-full max-w-md p-6">
+          <form onSubmit={handleUpdateEntity} className="w-full space-y-4">
+            <h2 id="edit-kb-entity-title" className="text-lg font-bold muster-text-primary">Edit Knowledge Graph Entity Node</h2>
+            <div><label htmlFor="edit-kb-entity-name" className="muster-label">Entity Name</label><input id="edit-kb-entity-name" data-dialog-initial-focus type="text" value={editEntityName} onChange={(e) => setEditEntityName(e.target.value)} required className="muster-input muster-input-lg" /></div>
+            <div><label htmlFor="edit-kb-entity-type" className="muster-label">Entity Type</label><input id="edit-kb-entity-type" type="text" placeholder="e.g. server, ip_address, email, service, database" value={editEntityType} onChange={(e) => setEditEntityType(e.target.value)} required className="muster-input" /></div>
+            <div><label htmlFor="edit-kb-entity-identifier" className="muster-label">Canonical Identifier (IP, Hostname, Email)</label><input id="edit-kb-entity-identifier" type="text" value={editEntityIdent} onChange={(e) => setEditEntityIdent(e.target.value)} className="muster-input" /></div>
             <div className="flex justify-end space-x-2 pt-2">
               <button type="button" onClick={() => { setShowEditEntityModal(false); setEditingEntity(null); }} className="muster-btn muster-btn-lg muster-btn-secondary">Cancel</button>
               <button type="submit" className="muster-btn muster-btn-lg muster-btn-primary">Update Entity Node</button>
             </div>
           </form>
-        </div>
+        </AccessibleDialog>
       )}
 
       {/* Modal: Add Relation */}
       {showAddRelationModal && selectedEntity && (
-        <div className="muster-scrim">
-          <form onSubmit={handleAddRelation} className="muster-dialog p-6 w-full max-w-md space-y-4">
-            <h3 className="text-lg font-bold muster-text-primary">Link Graph Relation</h3>
-            <p className="text-xs muster-text-muted">
+        <AccessibleDialog onClose={() => setShowAddRelationModal(false)} titleId="add-kb-relation-title" descriptionId="add-kb-relation-description" className="w-full max-w-md p-6">
+          <form onSubmit={handleAddRelation} className="w-full space-y-4">
+            <h2 id="add-kb-relation-title" className="text-lg font-bold muster-text-primary">Link Graph Relation</h2>
+            <p id="add-kb-relation-description" className="text-xs muster-text-muted">
               Source: <span className="font-semibold muster-accent">{selectedEntity.entity.name}</span>
             </p>
-            <div><label className="muster-label">Relation Type</label><input type="text" placeholder="e.g. runs_on, has_ip, depends_on, owned_by" value={relType} onChange={(e) => setRelType(e.target.value)} required className="muster-input" /></div>
-            <div><label className="muster-label">Target Entity</label><select value={relTargetEntityId} onChange={(e) => setRelTargetEntityId(e.target.value)} required className="muster-input"><option value="">Select target entity...</option>{graphTree.nodes.filter((n: KBGraphNode) => n.id !== selectedEntity.entity.id).map((n: KBGraphNode) => (<option key={n.id} value={n.id}>{n.name} ({n.type})</option>))}</select></div>
-            <div><label className="muster-label">Description (Optional)</label><input type="text" placeholder="Additional notes about relation..." value={relDesc} onChange={(e) => setRelDesc(e.target.value)} className="muster-input" /></div>
+            <div><label htmlFor="add-kb-relation-type" className="muster-label">Relation Type</label><input id="add-kb-relation-type" data-dialog-initial-focus type="text" placeholder="e.g. runs_on, has_ip, depends_on, owned_by" value={relType} onChange={(e) => setRelType(e.target.value)} required className="muster-input" /></div>
+            <div><label htmlFor="add-kb-relation-target" className="muster-label">Target Entity</label><select id="add-kb-relation-target" value={relTargetEntityId} onChange={(e) => setRelTargetEntityId(e.target.value)} required className="muster-input"><option value="">Select target entity...</option>{graphTree.nodes.filter((n: KBGraphNode) => n.id !== selectedEntity.entity.id).map((n: KBGraphNode) => (<option key={n.id} value={n.id}>{n.name} ({n.type})</option>))}</select></div>
+            <div><label htmlFor="add-kb-relation-notes" className="muster-label">Description (Optional)</label><input id="add-kb-relation-notes" type="text" placeholder="Additional notes about relation..." value={relDesc} onChange={(e) => setRelDesc(e.target.value)} className="muster-input" /></div>
             <div className="flex justify-end space-x-2 pt-2">
               <button type="button" onClick={() => setShowAddRelationModal(false)} className="muster-btn muster-btn-lg muster-btn-secondary">Cancel</button>
               <button type="submit" className="muster-btn muster-btn-lg muster-btn-primary">Save Relation</button>
             </div>
           </form>
-        </div>
+        </AccessibleDialog>
       )}
     </div>
   );

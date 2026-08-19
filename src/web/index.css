@@ -816,12 +816,18 @@ html.light {
   .muster-segmented-item,
   .muster-card-action,
   .muster-card-move,
+  .muster-card-detail-target,
+  .muster-account-tab,
   .muster-input {
     min-height: 2.75rem;
   }
 
   .muster-btn-icon,
   .muster-card-action {
+    min-width: 2.75rem;
+  }
+
+  .muster-card-detail-target {
     min-width: 2.75rem;
   }
 

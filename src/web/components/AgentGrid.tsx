@@ -4,6 +4,7 @@ import { Bot, Clock, RefreshCw, UserPlus, Trash2, ShieldCheck, Edit3, Pencil, X,
 import { api } from '../api.js';
 import { effectivePermissions } from '../../shared/permissions.js';
 import { PrincipalChip } from './PrincipalChip.js';
+import { AccessibleDialog } from './AccessibleDialog.js';
 
 function getOperatorName(users: User[], operatorUserId?: string | null): string | null {
   if (!operatorUserId) return null;
@@ -332,25 +333,27 @@ export const AgentGrid: React.FC<AgentGridProps> = ({
 
       {/* Edit Agent Modal */}
       {editingAgent && (
-        <div className="muster-scrim">
-          <div className="muster-dialog w-full max-w-md p-6 space-y-4">
+        <AccessibleDialog onClose={() => setEditingAgent(null)} titleId="edit-agent-title" className="w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-muster-border pb-3">
               <div className="flex items-center space-x-2">
                 <Edit3 className="w-5 h-5 muster-text-warning" />
-                <h3 className="text-base font-bold muster-text-primary uppercase tracking-wide">Edit Agent Attributes</h3>
+                <h2 id="edit-agent-title" className="text-base font-bold muster-text-primary uppercase tracking-wide">Edit Agent Attributes</h2>
               </div>
               <button
                 onClick={() => setEditingAgent(null)}
                 className="muster-btn muster-btn-icon muster-btn-ghost"
+                aria-label="Close edit agent dialog"
               >
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
 
             <form onSubmit={handleSaveEdit} className="space-y-4">
               <div>
-                <label className="muster-label uppercase">Agent Name</label>
+                <label htmlFor="edit-agent-name" className="muster-label uppercase">Agent Name</label>
                 <input
+                  id="edit-agent-name"
+                  data-dialog-initial-focus
                   type="text"
                   required
                   value={editName}
@@ -361,8 +364,9 @@ export const AgentGrid: React.FC<AgentGridProps> = ({
               </div>
 
               <div>
-                <label className="muster-label uppercase">Operator</label>
+                <label htmlFor="edit-agent-operator" className="muster-label uppercase">Operator</label>
                 <select
+                  id="edit-agent-operator"
                   value={editOperatorId}
                   onChange={(e) => setEditOperatorId(e.target.value)}
                   className="muster-input font-mono cursor-pointer"
@@ -376,8 +380,9 @@ export const AgentGrid: React.FC<AgentGridProps> = ({
               </div>
 
               <div>
-                <label className="muster-label uppercase">Status</label>
+                <label htmlFor="edit-agent-status" className="muster-label uppercase">Status</label>
                 <select
+                  id="edit-agent-status"
                   value={editStatus}
                   onChange={(e) => setEditStatus(e.target.value as any)}
                   className="muster-input font-mono cursor-pointer"
@@ -389,8 +394,9 @@ export const AgentGrid: React.FC<AgentGridProps> = ({
               </div>
 
               <div>
-                <label className="muster-label uppercase">Capabilities (Comma Separated)</label>
+                <label htmlFor="edit-agent-capabilities" className="muster-label uppercase">Capabilities (Comma Separated)</label>
                 <input
+                  id="edit-agent-capabilities"
                   type="text"
                   value={editCapabilities}
                   onChange={(e) => setEditCapabilities(e.target.value)}
@@ -417,8 +423,7 @@ export const AgentGrid: React.FC<AgentGridProps> = ({
                 </button>
               </div>
             </form>
-          </div>
-        </div>
+        </AccessibleDialog>
       )}
 
     </div>

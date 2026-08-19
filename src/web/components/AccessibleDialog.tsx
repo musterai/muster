@@ -10,7 +10,56 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
-const dialogStack: symbol[] = [];
+interface DialogLayer {
+  id: symbol;
+  scrim: HTMLElement;
+  inert: boolean;
+  ariaHidden: string | null;
+}
+
+const dialogStack: DialogLayer[] = [];
+let originalBodyOverflow: string | null = null;
+let originalRootInert = false;
+let originalRootAriaHidden: string | null = null;
+
+function syncDialogIsolation(): void {
+  const appRoot = document.getElementById('root');
+  const top = dialogStack.at(-1);
+
+  if (top) {
+    document.body.style.overflow = 'hidden';
+    if (appRoot) {
+      appRoot.inert = true;
+      appRoot.setAttribute('aria-hidden', 'true');
+    }
+    for (const layer of dialogStack) {
+      const isTop = layer === top;
+      layer.scrim.inert = isTop ? layer.inert : true;
+      if (!isTop) layer.scrim.setAttribute('aria-hidden', 'true');
+      else if (layer.ariaHidden === null) layer.scrim.removeAttribute('aria-hidden');
+      else layer.scrim.setAttribute('aria-hidden', layer.ariaHidden);
+    }
+    return;
+  }
+
+  if (originalBodyOverflow !== null) document.body.style.overflow = originalBodyOverflow;
+  if (appRoot) {
+    appRoot.inert = originalRootInert;
+    if (originalRootAriaHidden === null) appRoot.removeAttribute('aria-hidden');
+    else appRoot.setAttribute('aria-hidden', originalRootAriaHidden);
+  }
+  originalBodyOverflow = null;
+  originalRootInert = false;
+  originalRootAriaHidden = null;
+}
+
+function isFocusable(element: HTMLElement): boolean {
+  const style = window.getComputedStyle(element);
+  return element.getClientRects().length > 0
+    && style.visibility !== 'hidden'
+    && style.display !== 'none'
+    && !element.closest('[inert], [aria-hidden="true"]');
+}
 
 interface AccessibleDialogProps {
   children: React.ReactNode;
@@ -48,42 +97,32 @@ export const AccessibleDialog: React.FC<AccessibleDialogProps> = ({
     if (!dialog) return;
 
     const instance = instanceRef.current;
-    dialogStack.push(instance);
-
     returnFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
     const appRoot = document.getElementById('root');
-    const underlyingOverlays = Array.from(document.body.children)
-      .filter((element): element is HTMLElement =>
-        element instanceof HTMLElement
-        && element.classList.contains('muster-scrim')
-        && element !== scrimRef.current)
-      .map((element) => ({
-        element,
-        inert: element.inert,
-        ariaHidden: element.getAttribute('aria-hidden'),
-      }));
-    const previousOverflow = document.body.style.overflow;
-    const rootWasInert = appRoot?.inert ?? false;
-    const rootAriaHidden = appRoot?.getAttribute('aria-hidden');
-
-    document.body.style.overflow = 'hidden';
-    if (appRoot) {
-      appRoot.inert = true;
-      appRoot.setAttribute('aria-hidden', 'true');
+    const scrim = scrimRef.current;
+    if (!scrim) return;
+    if (dialogStack.length === 0) {
+      originalBodyOverflow = document.body.style.overflow;
+      originalRootInert = appRoot?.inert ?? false;
+      originalRootAriaHidden = appRoot?.getAttribute('aria-hidden') ?? null;
     }
-    for (const overlay of underlyingOverlays) {
-      overlay.element.inert = true;
-      overlay.element.setAttribute('aria-hidden', 'true');
-    }
+    const layer: DialogLayer = {
+      id: instance,
+      scrim,
+      inert: scrim.inert,
+      ariaHidden: scrim.getAttribute('aria-hidden'),
+    };
+    dialogStack.push(layer);
+    syncDialogIsolation();
 
-    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isFocusable);
     const initial = dialog.querySelector<HTMLElement>('[data-dialog-initial-focus]') || focusable[0] || dialog;
     initial.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (dialogStack.at(-1) !== instance) return;
+      if (dialogStack.at(-1)?.id !== instance) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         onCloseRef.current();
@@ -92,7 +131,7 @@ export const AccessibleDialog: React.FC<AccessibleDialogProps> = ({
       if (event.key !== 'Tab') return;
 
       const candidates = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE))
-        .filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+        .filter(isFocusable);
       if (candidates.length === 0) {
         event.preventDefault();
         dialog.focus();
@@ -100,7 +139,10 @@ export const AccessibleDialog: React.FC<AccessibleDialogProps> = ({
       }
       const first = candidates[0];
       const last = candidates[candidates.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
+      if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -111,23 +153,13 @@ export const AccessibleDialog: React.FC<AccessibleDialogProps> = ({
 
     document.addEventListener('keydown', handleKeyDown, true);
     return () => {
-      const stackIndex = dialogStack.lastIndexOf(instance);
+      const stackIndex = dialogStack.findIndex((entry) => entry.id === instance);
+      const wasTop = dialogStack.at(-1)?.id === instance;
       if (stackIndex >= 0) dialogStack.splice(stackIndex, 1);
       document.removeEventListener('keydown', handleKeyDown, true);
-      document.body.style.overflow = previousOverflow;
-      if (appRoot) {
-        appRoot.inert = rootWasInert;
-        if (rootAriaHidden == null) appRoot.removeAttribute('aria-hidden');
-        else appRoot.setAttribute('aria-hidden', rootAriaHidden);
-      }
-      for (const overlay of underlyingOverlays) {
-        if (!overlay.element.isConnected) continue;
-        overlay.element.inert = overlay.inert;
-        if (overlay.ariaHidden === null) overlay.element.removeAttribute('aria-hidden');
-        else overlay.element.setAttribute('aria-hidden', overlay.ariaHidden);
-      }
+      syncDialogIsolation();
       const returnTarget = returnFocusRef.current;
-      if (returnTarget?.isConnected) returnTarget.focus();
+      if (wasTop && returnTarget?.isConnected) returnTarget.focus();
     };
   }, []);
 
@@ -136,7 +168,7 @@ export const AccessibleDialog: React.FC<AccessibleDialogProps> = ({
       ref={scrimRef}
       className="muster-scrim"
       onMouseDown={(event) => {
-        if (closeOnBackdrop && event.target === event.currentTarget) onClose();
+        if (closeOnBackdrop && event.target === event.currentTarget) onCloseRef.current();
       }}
     >
       <div

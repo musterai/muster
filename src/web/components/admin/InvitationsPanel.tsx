@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Role, Invitation } from '../../types.js';
 import { api, ApiError } from '../../api.js';
 import { Mail, Trash2, Copy, Check } from 'lucide-react';
+import { AccessibleDialog } from '../AccessibleDialog.js';
 
 function formatDate(iso: string | null): string {
   if (!iso) return '—';
@@ -152,20 +153,25 @@ export const InvitationsPanel: React.FC<InvitationsPanelProps> = ({
       )}
 
       {invited && (
-        <div className="muster-scrim">
-          <div className="muster-dialog w-full max-w-lg p-6 space-y-4">
+        <AccessibleDialog
+          onClose={() => { setInvited(null); setCopied(false); }}
+          titleId="invitation-created-title"
+          descriptionId="invitation-created-description"
+          closeOnBackdrop={false}
+          className="w-full max-w-lg p-6 space-y-4"
+        >
             <div className="flex items-center space-x-2 border-b border-muster-border pb-3">
               <Mail className="w-5 h-5 muster-text-warning" />
-              <h3 className="text-base font-bold muster-text-primary uppercase tracking-wide">Invitation Created</h3>
+              <h2 id="invitation-created-title" className="text-base font-bold muster-text-primary uppercase tracking-wide">Invitation Created</h2>
             </div>
-            <p className="text-xs muster-text-muted">
+            <p id="invitation-created-description" className="text-xs muster-text-muted">
               No email is sent yet — tell <span className="font-semibold muster-text-primary">{invited}</span> to sign in at the URL below with an
               identity provider account using that exact email address. They are admitted automatically on their first login; no separate link or
               code is needed.
             </p>
             <div className="flex items-center gap-2 bg-muster-base border border-muster-border rounded-md px-3 py-2">
               <code className="flex-1 font-mono text-xs muster-text-primary break-all select-all">{signInUrl}</code>
-              <button onClick={handleCopy} className="muster-btn muster-btn-icon muster-btn-ghost" title="Copy to clipboard">
+              <button data-dialog-initial-focus onClick={handleCopy} className="muster-btn muster-btn-icon muster-btn-ghost" title="Copy to clipboard" aria-label="Copy sign-in URL to clipboard">
                 {copied ? <Check className="w-4 h-4 muster-text-success" /> : <Copy className="w-4 h-4" />}
               </button>
             </div>
@@ -180,8 +186,7 @@ export const InvitationsPanel: React.FC<InvitationsPanelProps> = ({
                 Done
               </button>
             </div>
-          </div>
-        </div>
+        </AccessibleDialog>
       )}
     </div>
   );

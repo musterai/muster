@@ -136,6 +136,33 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
     return { displayColumns: Array.from(uniqueMap.values()), columnMap: map };
   }, [columns, selectedBoardId, board]);
 
+  // Keep exactly one card opener in the tab order whenever the rendered board
+  // has cards. This also repairs focus state after filtering, pagination, or a
+  // move removes the previously focused card from the visible set.
+  useEffect(() => {
+    const visibleCards = displayColumns.flatMap((column, columnIndex) => {
+      const doneLimit = doneVisibleLimits[column.id] ?? DONE_LANE_PAGE_SIZE;
+      return getLaneCards(cards, column.id, column.name, cardDateSortOrder, doneLimit, columnMap).visible.map((card) => ({
+        card,
+        columnIndex,
+      }));
+    });
+
+    if (visibleCards.length === 0) {
+      if (focusedCardId !== null) setFocusedCardId(null);
+      return;
+    }
+
+    const focusedCard = visibleCards.find(({ card }) => card.id === focusedCardId);
+    if (focusedCard) {
+      if (focusedColumnIdx !== focusedCard.columnIndex) setFocusedColumnIdx(focusedCard.columnIndex);
+      return;
+    }
+
+    setFocusedCardId(visibleCards[0].card.id);
+    setFocusedColumnIdx(visibleCards[0].columnIndex);
+  }, [displayColumns, cards, cardDateSortOrder, doneVisibleLimits, columnMap, focusedCardId, focusedColumnIdx]);
+
   const handleMoveCardWithResolution = async (cardId: string, targetColId: string, position?: string) => {
     let resolvedTargetColId = targetColId;
     if (targetColId.startsWith('all-col-')) {
@@ -187,6 +214,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   useEffect(() => {
     const handleBoardKeyDown = (e: KeyboardEvent) => {
       const activeElement = document.activeElement;
+      const isInsideModal = activeElement instanceof HTMLElement
+        && Boolean(activeElement.closest('[role="dialog"][aria-modal="true"]'));
       const isTyping =
         activeElement &&
         (activeElement.tagName === 'INPUT' ||
@@ -194,7 +223,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           activeElement.tagName === 'SELECT' ||
           (activeElement as HTMLElement).isContentEditable);
 
-      if (isTyping || cardDetails || isCreatingCard || showBoardSettingsModal || editingColumn) {
+      if (isInsideModal || isTyping || cardDetails || isCreatingCard || showBoardSettingsModal || editingColumn) {
         return;
       }
 

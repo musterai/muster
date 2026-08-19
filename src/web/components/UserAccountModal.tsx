@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthMe, User as UserType } from '../types.js';
 import { api } from '../api.js';
 import { ThemePicker } from './ThemePicker.js';
@@ -31,6 +31,7 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
   const [name, setName] = useState(currentUser?.display_name || '');
   const [saving, setSaving] = useState(false);
   const [existingUsers, setExistingUsers] = useState<UserType[]>([]);
+  const tabRefs = useRef<Partial<Record<AccountTab, HTMLButtonElement | null>>>({});
 
   useEffect(() => {
     if (activeTab === 'profile' && authMode === 'open') {
@@ -39,6 +40,28 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
   }, [activeTab, authMode]);
 
   const displayName = currentUser?.display_name || 'Operator';
+  const accountTabs: Array<{ id: AccountTab; label: string; icon: React.ElementType }> = [
+    { id: 'appearance', label: 'Appearance & Theme', icon: Palette },
+    { id: 'tokens', label: 'API Tokens', icon: KeyRound },
+    ...(workspaceId ? [{ id: 'admin' as const, label: 'Workspace Admin', icon: ShieldCheck }] : []),
+    ...(authMode === 'open' && onSetLocalIdentity
+      ? [{ id: 'profile' as const, label: 'Switch User & Profile', icon: UserCircle }]
+      : []),
+  ];
+
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, current: AccountTab) => {
+    const currentIndex = accountTabs.findIndex((tab) => tab.id === current);
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % accountTabs.length;
+    else if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + accountTabs.length) % accountTabs.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = accountTabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = accountTabs[nextIndex].id;
+    tabRefs.current[next]?.focus();
+    setActiveTab(next);
+  };
 
   const handleSelectUser = async (u: UserType) => {
     if (!onSetLocalIdentity || saving) return;
@@ -95,73 +118,31 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
 
         {/* Modal Navigation Tabs */}
         <div role="tablist" aria-label="Account settings sections" className="flex border-b border-muster-border/80 px-4 bg-muster-surface/60 overflow-x-auto no-scrollbar">
-          <button
-            role="tab"
-            aria-selected={activeTab === 'appearance'}
-            aria-controls="account-panel-appearance"
-            onClick={() => setActiveTab('appearance')}
-            className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
-              activeTab === 'appearance'
-                ? 'border-brand-500 muster-accent font-semibold'
-                : 'border-transparent muster-text-muted hover:muster-text-primary'
-            }`}
-          >
-            <Palette className="w-3.5 h-3.5" />
-            <span>Appearance & Theme</span>
-          </button>
-
-          <button
-            role="tab"
-            aria-selected={activeTab === 'tokens'}
-            aria-controls="account-panel-tokens"
-            onClick={() => setActiveTab('tokens')}
-            className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
-              activeTab === 'tokens'
-                ? 'border-brand-500 muster-accent font-semibold'
-                : 'border-transparent muster-text-muted hover:muster-text-primary'
-            }`}
-          >
-            <KeyRound className="w-3.5 h-3.5" />
-            <span>API Tokens</span>
-          </button>
-
-          {workspaceId && (
+          {accountTabs.map(({ id, label, icon: Icon }) => (
             <button
+              key={id}
+              id={`account-tab-${id}`}
+              ref={(element) => { tabRefs.current[id] = element; }}
               role="tab"
-              aria-selected={activeTab === 'admin'}
-              aria-controls="account-panel-admin"
-              onClick={() => setActiveTab('admin')}
-              className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
-                activeTab === 'admin'
+              tabIndex={activeTab === id ? 0 : -1}
+              aria-selected={activeTab === id}
+              aria-controls={`account-panel-${id}`}
+              onKeyDown={(event) => handleTabKeyDown(event, id)}
+              onClick={() => setActiveTab(id)}
+              className={`muster-account-tab px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
+                activeTab === id
                   ? 'border-brand-500 muster-accent font-semibold'
                   : 'border-transparent muster-text-muted hover:muster-text-primary'
               }`}
             >
-              <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Workspace Admin</span>
+              <Icon className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{label}</span>
             </button>
-          )}
-
-          {authMode === 'open' && onSetLocalIdentity && (
-            <button
-              role="tab"
-              aria-selected={activeTab === 'profile'}
-              aria-controls="account-panel-profile"
-              onClick={() => setActiveTab('profile')}
-              className={`px-3 py-2 text-xs font-medium border-b-2 inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
-                activeTab === 'profile'
-                  ? 'border-brand-500 muster-accent font-semibold'
-                  : 'border-transparent muster-text-muted hover:muster-text-primary'
-              }`}
-            >
-              <UserCircle className="w-3.5 h-3.5" />
-              <span>Switch User & Profile</span>
-            </button>
-          )}
+          ))}
         </div>
 
         {/* Tab Body Content */}
-        <div id={`account-panel-${activeTab}`} role="tabpanel" className="p-5 overflow-y-auto flex-1">
+        <div id={`account-panel-${activeTab}`} role="tabpanel" aria-labelledby={`account-tab-${activeTab}`} className="p-5 overflow-y-auto flex-1">
           {activeTab === 'appearance' && (
             <ThemePicker />
           )}
