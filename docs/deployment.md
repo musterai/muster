@@ -107,6 +107,28 @@ browser connection before proxying. A direct request to Muster therefore
 cannot spoof HTTPS or its client address; a request through the configured
 Caddy gets the correct public origin, secure cookie behavior, and client IP.
 
+### SSE connection and queue policy
+
+The server bounds each process to 100 live SSE clients, with per-principal,
+per-IP, and per-workspace limits of 4, 20, and 50 respectively. A client that
+does not drain writes is allowed at most 100 queued events or 256 KiB and is
+disconnected after 30 seconds without a `drain` notification. Capacity
+refusals return HTTP 429 with `error: "sse_capacity_exceeded"` and a
+`Retry-After` header. The broadcaster's counters (`activeClients`, sent and
+dropped events, dropped clients, backpressure drops, and capacity rejections)
+are available through its process-local `getStats()` observability hook; event
+bodies are never included in logs or those counters.
+
+Each activity frame carries its persisted event ID. On reconnect, a bounded
+`Last-Event-ID` cursor is accepted only for the requested project and replays
+up to the first 100 successors oldest-first while live frames are held in the
+same bounded queue. Missing, foreign, malformed, or overlong cursors reset to
+the live tail without disclosing whether an event exists; a replay never scans
+or buffers an unbounded history. The per-IP cap uses Express's resolved client
+IP. A direct request therefore uses its socket peer, while the checked-in
+Caddy topology uses the sanitized forwarded address only because the immediate
+fixed Caddy address is explicitly trusted.
+
 ## Environment variables
 
 | Variable | Default | Description |

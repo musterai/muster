@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createDatabaseAdapter } from '../src/db/factory.js';
 import type { DatabaseAdapter } from '../src/db/adapter.js';
 import { Migrator } from '../src/db/migrator.js';
+import { EventService } from '../src/services/event.service.js';
 
 const builtInMigrations = path.join(process.cwd(), 'src/db/migrations');
 
@@ -44,7 +45,7 @@ describe('migration ledger and atomic execution', () => {
     const rows = await db.query<{ id: string; checksum: string; applied_at: string; schema_version: string; tool_version: string }>(
       'SELECT id, checksum, applied_at, schema_version, tool_version FROM schema_migrations ORDER BY id',
     );
-    expect(rows).toHaveLength(8);
+    expect(rows).toHaveLength(9);
     expect(rows.every(row => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
     expect(rows.every(row => row.applied_at && row.schema_version === '1' && row.tool_version)).toBe(true);
   });
@@ -111,15 +112,72 @@ describe('migration ledger and atomic execution', () => {
     expect(await dbA.query<{ count: number }>('SELECT COUNT(*) AS count FROM schema_migrations')).toEqual([{ count: 1 }]);
   });
 
-  it('adopts the supported complete pre-ledger clean-schema fixture', async () => {
+  it('adopts a through-007 pre-ledger schema, applies 009, and supports event replay', async () => {
     const { db } = fixture();
-    for (const filename of ['001-initial.sql', '003-device-grant.sql', '004-mcp-oauth.sql', '005-audit-log.sql', '006-terminal-columns.sql']) {
+    // 002 is already part of the 001 squash. Applying these files leaves a
+    // realistic no-ledger schema through 007, deliberately before 008/009.
+    for (const filename of [
+      '001-initial.sql',
+      '003-device-grant.sql',
+      '004-mcp-oauth.sql',
+      '005-audit-log.sql',
+      '006-terminal-columns.sql',
+      '007-project-board-slugs.sql',
+    ]) {
       await db.migrate(fs.readFileSync(path.join(builtInMigrations, filename), 'utf8'));
     }
 
     await new Migrator(db, builtInMigrations).run();
     const rows = await db.query<{ id: string }>('SELECT id FROM schema_migrations ORDER BY id');
-    expect(rows).toHaveLength(8);
+    expect(rows.map(row => row.id)).toEqual([
+      '001-initial.sql',
+      '002-invitation-created-at.sql',
+      '003-device-grant.sql',
+      '004-mcp-oauth.sql',
+      '005-audit-log.sql',
+      '006-terminal-columns.sql',
+      '007-project-board-slugs.sql',
+      '008-credential-indexes.sql',
+      '009-event-order.sql',
+    ]);
+
+    expect(await db.query<{ name: string }>('PRAGMA table_info("event")'))
+      .toContainEqual(expect.objectContaining({ name: 'event_order' }));
+    expect(await db.query<{ next_order: number }>('SELECT next_order FROM event_order_sequence WHERE id = 1'))
+      .toEqual([{ next_order: 1 }]);
+
+    const now = new Date().toISOString();
+    await db.execute(
+      'INSERT INTO workspace (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      ['migration-workspace', 'Migration fixture', 'migration-fixture', now, now],
+    );
+    await db.execute(
+      `INSERT INTO project (id, workspace_id, name, description, key_prefix, card_seq, created_at, updated_at, slug)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['migration-project', 'migration-workspace', 'Migration project', null, 'MIG', 0, now, now, 'migration-project'],
+    );
+
+    const events = new EventService(db);
+    const first = await events.create({
+      project_id: 'migration-project',
+      entity_type: 'project',
+      entity_id: 'migration-project',
+      action: 'fixture.first',
+    });
+    const second = await events.create({
+      project_id: 'migration-project',
+      entity_type: 'project',
+      entity_id: 'migration-project',
+      action: 'fixture.second',
+    });
+
+    expect(await db.query<{ event_order: number }>('SELECT event_order FROM event ORDER BY event_order'))
+      .toEqual([{ event_order: 1 }, { event_order: 2 }]);
+    await expect(events.listAfterId('migration-project', first.id)).resolves.toMatchObject({
+      status: 'available',
+      truncated: false,
+      events: [expect.objectContaining({ id: second.id, action: 'fixture.second' })],
+    });
   });
 
   it('rejects an empty ledger on a non-empty database and unknown future versions', async () => {

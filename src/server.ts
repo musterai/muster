@@ -88,9 +88,10 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   const eventService = new EventService(db, async (evt) => {
     sseManager.broadcast(evt.project_id, evt);
   });
+  const auditService = new AuditService(db);
 
   const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService);
+  const documentService = new DocumentService(db, eventService, auditService);
   const kbService = new KBService(db, eventService);
   const roleService = new RoleService(db, eventService);
   const tokenService = new TokenService(db);
@@ -98,7 +99,6 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   const oidcService = new OidcService(db);
   const invitationService = new InvitationService(db);
   const userService = new UserService(db);
-  const auditService = new AuditService(db);
   const deviceGrantService = new DeviceGrantService(db, tokenService, auditService);
   const agentService = new AgentService(db, eventService);
   const mcpOAuthService = new McpOAuthService(db, tokenService, agentService, auditService);
