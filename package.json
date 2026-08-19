@@ -30,7 +30,8 @@
     "build": "vite build && tsc && mkdir -p dist/db/migrations && cp src/db/migrations/* dist/db/migrations/",
     "prepublishOnly": "npm run test && npm run build",
     "seed": "tsx scripts/seed.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:browser-cleanup": "tsx scripts/browser-ui-cleanup-test.ts"
   },
   "keywords": [
     "muster",

@@ -63,6 +63,9 @@ jobs:
       - name: Run Build (Vite SPA + TypeScript)
         run: npm run build
 
+      - name: Verify Browser E2E Failure Cleanup
+        run: npm run test:browser-cleanup
+
       - name: Run Vitest Suite (SQLite + PostgreSQL)
         run: npm test
 

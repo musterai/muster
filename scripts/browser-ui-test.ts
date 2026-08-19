@@ -1,30 +1,112 @@
 // File: scripts/browser-ui-test.ts
 import { chromium } from 'playwright';
 import { fork, ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const TEST_PORT = 3094;
-const TEST_DB_PATH = path.join(process.cwd(), 'data', `e2e-browser-${Date.now()}.db`);
-const APP_URL = `http://127.0.0.1:${TEST_PORT}`;
+const LOOPBACK_HOST = '127.0.0.1';
+const SERVER_START_TIMEOUT_MS = 15_000;
+const SERVER_STOP_TIMEOUT_MS = 3_000;
+const SERVER_KILL_TIMEOUT_MS = 2_000;
+
+export interface BrowserUiRunOptions {
+  forceFailureAfterReady?: boolean;
+  lifecycleOnly?: boolean;
+}
+
+export interface BrowserUiRunSummary {
+  port: number;
+  dbPath: string;
+  serverPid: number | undefined;
+  serverExitCode: number | null;
+  serverSignal: NodeJS.Signals | null;
+}
+
+export class BrowserUiTestRunError extends Error {
+  constructor(
+    message: string,
+    readonly summary: BrowserUiRunSummary,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'BrowserUiTestRunError';
+  }
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function browserDbFiles(dbPath: string): string[] {
+  return [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
+}
+
 function removeDbFiles(dbPath: string) {
-  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+  const errors: unknown[] = [];
+  for (const f of browserDbFiles(dbPath)) {
     if (fs.existsSync(f)) {
       try {
         fs.unlinkSync(f);
-      } catch {}
+      } catch (error) {
+        errors.push(error);
+      }
     }
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, `Failed to remove isolated browser database files for ${dbPath}`);
   }
 }
 
-async function waitForServer(url: string, timeoutMs = 15000) {
+async function reserveAvailablePort(): Promise<number> {
+  const reservation = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    reservation.once('error', reject);
+    reservation.listen(0, LOOPBACK_HOST, () => resolve());
+  });
+  const address = reservation.address();
+  if (!address || typeof address === 'string') {
+    reservation.close();
+    throw new Error('Failed to allocate an isolated browser E2E port');
+  }
+  await new Promise<void>((resolve, reject) =>
+    reservation.close((error) => (error ? reject(error) : resolve())),
+  );
+  return address.port;
+}
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+async function waitForOwnedServer(
+  child: ChildProcess,
+  url: string,
+  ownershipMarker: string,
+  getChildOutput: () => string,
+  timeoutMs = SERVER_START_TIMEOUT_MS,
+) {
   const start = Date.now();
+  while (Date.now() - start < timeoutMs && !getChildOutput().includes(ownershipMarker)) {
+    if (childHasExited(child)) {
+      throw new Error(
+        `Isolated browser server exited before claiming its port (code=${child.exitCode}, signal=${child.signalCode}).\n${getChildOutput()}`,
+      );
+    }
+    await sleep(25);
+  }
+  if (!getChildOutput().includes(ownershipMarker)) {
+    throw new Error(`Isolated browser server did not emit its ownership marker within ${timeoutMs}ms.\n${getChildOutput()}`);
+  }
+
   while (Date.now() - start < timeoutMs) {
+    if (childHasExited(child)) {
+      throw new Error(
+        `Isolated browser server exited before health readiness (code=${child.exitCode}, signal=${child.signalCode}).\n${getChildOutput()}`,
+      );
+    }
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
       if (res.ok) {
@@ -37,35 +119,98 @@ async function waitForServer(url: string, timeoutMs = 15000) {
   throw new Error(`Server failed to start at ${url} within ${timeoutMs}ms`);
 }
 
-async function runBrowserUiTest() {
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return true;
+  return new Promise((resolve) => {
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once('exit', onExit);
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    // Close the small gap between the caller's first status check and listener
+    // installation so a very fast child exit cannot consume the whole timeout.
+    if (childHasExited(child)) {
+      child.off('exit', onExit);
+      clearTimeout(timer);
+      resolve(true);
+    }
+  });
+}
+
+async function terminateChild(child: ChildProcess): Promise<void> {
+  if (childHasExited(child)) return;
+  child.kill('SIGTERM');
+  if (await waitForChildExit(child, SERVER_STOP_TIMEOUT_MS)) return;
+
+  child.kill('SIGKILL');
+  if (await waitForChildExit(child, SERVER_KILL_TIMEOUT_MS)) return;
+  throw new Error(`Isolated browser server PID ${child.pid ?? 'unknown'} did not exit after SIGTERM/SIGKILL`);
+}
+
+export async function runBrowserUiTest(options: BrowserUiRunOptions = {}): Promise<BrowserUiRunSummary> {
+  const testPort = await reserveAvailablePort();
+  const testDbPath = path.join(
+    process.cwd(),
+    'data',
+    `e2e-browser-${Date.now()}-${process.pid}-${randomUUID()}.db`,
+  );
+  const appUrl = `http://${LOOPBACK_HOST}:${testPort}`;
+
   console.log('===========================================================');
   console.log('   STARTING ISOLATED BROWSER E2E TEST (Temp DB File Mode)');
-  console.log('   Target URL: ' + APP_URL);
-  console.log('   Test DB File: ' + TEST_DB_PATH);
+  console.log('   Target URL: ' + appUrl);
+  console.log('   Test DB File: ' + testDbPath);
   console.log('===========================================================\n');
 
-  removeDbFiles(TEST_DB_PATH);
+  removeDbFiles(testDbPath);
 
-  console.log(`[Server Setup] Starting isolated Muster server process on port ${TEST_PORT}...`);
+  console.log(`[Server Setup] Starting isolated Muster server process on port ${testPort}...`);
   const serverProcess: ChildProcess = fork(path.join(process.cwd(), 'dist', 'index.js'), [], {
     env: {
       ...process.env,
-      MUSTER_PORT: String(TEST_PORT),
-      MUSTER_HOST: '127.0.0.1',
-      MUSTER_DB_PATH: TEST_DB_PATH,
+      MUSTER_PORT: String(testPort),
+      MUSTER_HOST: LOOPBACK_HOST,
+      MUSTER_DB_PATH: testDbPath,
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
+
+  let childOutput = '';
+  const captureOutput = (data: Buffer) => {
+    childOutput = `${childOutput}${data.toString()}`.slice(-32_768);
+  };
+  serverProcess.stdout?.on('data', captureOutput);
+  serverProcess.stderr?.on('data', captureOutput);
 
   let browser: any = null;
   let page: any = null;
+  let runFailure: unknown;
+  let cleanupFailure: unknown;
   try {
-    // Wait for server health endpoint
+    // Require the child process itself to claim the dynamically allocated port
+    // before accepting health. A stale or unrelated listener can never satisfy
+    // this ownership marker, and an early child exit rejects immediately.
     console.log('[Server Setup] Waiting for health endpoint readiness...');
-    await waitForServer(`${APP_URL}/api/v1/health`);
+    await waitForOwnedServer(
+      serverProcess,
+      `${appUrl}/api/v1/health`,
+      `REST API: http://${LOOPBACK_HOST}:${testPort}/api/v1`,
+      () => childOutput,
+    );
     console.log('  ✓ Test server online and healthy!\n');
 
-    browser = await chromium.launch({ headless: true });
+    if (options.forceFailureAfterReady) {
+      throw new Error('Intentional browser E2E failure after owned-server readiness');
+    }
+
+    if (options.lifecycleOnly) {
+      console.log('  ✓ Isolated browser server lifecycle completed without launching Playwright.');
+    } else {
+      browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     page = await context.newPage();
 
@@ -75,7 +220,7 @@ async function runBrowserUiTest() {
     });
     // Step 1: Load Web UI
     console.log('[1/8] Loading Web UI...');
-    await page.goto(APP_URL, { waitUntil: 'domcontentloaded' });
+    await page.goto(appUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('header', { timeout: 10000 });
     const pageTitle = await page.title();
     console.log(`  ✓ Web UI Loaded! Title: "${pageTitle}"`);
@@ -307,19 +452,77 @@ async function runBrowserUiTest() {
     console.log('\n===========================================================');
     console.log('   🎉 ALL BROWSER E2E USER TESTS PASSED 100%!');
     console.log('===========================================================\n');
+    }
   } catch (err) {
-    console.error('\n❌ Browser UI Test Error:', err);
-    await page.screenshot({ path: 'scratch/ui-error-screenshot.png' }).catch(() => {});
-    process.exit(1);
+    runFailure = err;
+    if (page) {
+      await page.screenshot({ path: 'scratch/ui-error-screenshot.png' }).catch(() => {});
+    }
   } finally {
-    if (browser) await browser.close();
-    
-    // Stop server and delete temporary test database file
-    serverProcess.kill('SIGTERM');
-    await sleep(500);
-    removeDbFiles(TEST_DB_PATH);
-    console.log(`  🧹 Deleted temporary test database files (${path.basename(TEST_DB_PATH)}*).`);
+    const cleanupErrors: unknown[] = [];
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+
+    // The database must not be unlinked while its child still owns WAL/SHM
+    // handles. Await graceful shutdown, escalate with a bounded SIGKILL, then
+    // remove only the unique paths allocated for this run.
+    try {
+      await terminateChild(serverProcess);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (childHasExited(serverProcess)) {
+      try {
+        removeDbFiles(testDbPath);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else {
+      cleanupErrors.push(
+        new Error(
+          `Retained ${testDbPath} because server PID ${serverProcess.pid ?? 'unknown'} is still alive`,
+        ),
+      );
+    }
+    if (cleanupErrors.length > 0) {
+      cleanupFailure = new AggregateError(cleanupErrors, 'Browser E2E cleanup failed');
+    }
+    if (childHasExited(serverProcess)) {
+      console.log(`  🧹 Deleted temporary test database files (${path.basename(testDbPath)}*).`);
+    } else {
+      console.error(`  ⚠ Retained temporary database files for live server PID ${serverProcess.pid}.`);
+    }
   }
+
+  const summary: BrowserUiRunSummary = {
+    port: testPort,
+    dbPath: testDbPath,
+    serverPid: serverProcess.pid,
+    serverExitCode: serverProcess.exitCode,
+    serverSignal: serverProcess.signalCode,
+  };
+  if (runFailure || cleanupFailure) {
+    const cause =
+      runFailure && cleanupFailure
+        ? new AggregateError([runFailure, cleanupFailure])
+        : runFailure ?? cleanupFailure;
+    throw new BrowserUiTestRunError('Browser UI E2E run failed', summary, { cause });
+  }
+  return summary;
 }
 
-runBrowserUiTest();
+const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) {
+  runBrowserUiTest({
+    forceFailureAfterReady: process.env.MUSTER_BROWSER_E2E_FORCE_FAILURE === 'after-server-ready',
+    lifecycleOnly: process.env.MUSTER_BROWSER_E2E_LIFECYCLE_ONLY === '1',
+  }).catch((error) => {
+    console.error('\n❌ Browser UI Test Error:', error.cause ?? error);
+    process.exitCode = 1;
+  });
+}
