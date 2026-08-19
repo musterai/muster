@@ -230,8 +230,21 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
         }
       }
 
-      const activeCol = columns[activeColIdx];
+      const activeCol = displayColumns[activeColIdx];
       const activeColCards = colCardsMap[activeCol.id] || [];
+
+      const findPopulatedColumn = (direction: -1 | 1) => {
+        for (
+          let columnIndex = activeColIdx + direction;
+          columnIndex >= 0 && columnIndex < displayColumns.length;
+          columnIndex += direction
+        ) {
+          const column = displayColumns[columnIndex];
+          const columnCards = colCardsMap[column.id] || [];
+          if (columnCards.length > 0) return { columnIndex, columnCards };
+        }
+        return null;
+      };
 
       const focusCard = (cardId: string) => {
         setFocusedCardId(cardId);
@@ -247,30 +260,20 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
       switch (e.key) {
         case 'ArrowRight': {
           e.preventDefault();
-          const nextColIdx = Math.min(columns.length - 1, activeColIdx + 1);
-          setFocusedColumnIdx(nextColIdx);
-          const nextCol = columns[nextColIdx];
-          const nextColCards = colCardsMap[nextCol.id] || [];
-          if (nextColCards.length > 0) {
-            focusCard(nextColCards[Math.min(activeCardIdx >= 0 ? activeCardIdx : 0, nextColCards.length - 1)].id);
-          } else {
-            setFocusedCardId(null);
-            document.getElementById(`kanban-column-${nextCol.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+          const target = findPopulatedColumn(1);
+          if (target) {
+            setFocusedColumnIdx(target.columnIndex);
+            focusCard(target.columnCards[Math.min(activeCardIdx >= 0 ? activeCardIdx : 0, target.columnCards.length - 1)].id);
           }
           break;
         }
 
         case 'ArrowLeft': {
           e.preventDefault();
-          const prevColIdx = Math.max(0, activeColIdx - 1);
-          setFocusedColumnIdx(prevColIdx);
-          const prevCol = columns[prevColIdx];
-          const prevColCards = colCardsMap[prevCol.id] || [];
-          if (prevColCards.length > 0) {
-            focusCard(prevColCards[Math.min(activeCardIdx >= 0 ? activeCardIdx : 0, prevColCards.length - 1)].id);
-          } else {
-            setFocusedCardId(null);
-            document.getElementById(`kanban-column-${prevCol.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+          const target = findPopulatedColumn(-1);
+          if (target) {
+            setFocusedColumnIdx(target.columnIndex);
+            focusCard(target.columnCards[Math.min(activeCardIdx >= 0 ? activeCardIdx : 0, target.columnCards.length - 1)].id);
           }
           break;
         }

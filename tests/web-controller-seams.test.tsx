@@ -290,15 +290,19 @@ describe('rendered Kanban interaction boundaries', () => {
     column_id: 'done', position: 'm',
   };
 
-  function renderBoard(onMoveCard = vi.fn()) {
+  function renderBoard(
+    onMoveCard = vi.fn(),
+    boardColumns = columns,
+    boardCards = [cards[0], todoSecond, doneCard],
+  ) {
     const onMoveColumn = vi.fn();
     root.render(<KanbanBoard
       boards={[board]}
       board={board}
       selectedBoardId={board.id}
       onSelectBoard={vi.fn()}
-      columns={columns}
-      cards={[cards[0], todoSecond, doneCard]}
+      columns={boardColumns}
+      cards={boardCards}
       agents={[]}
       users={[]}
       currentUser={null}
@@ -344,6 +348,28 @@ describe('rendered Kanban interaction boundaries', () => {
     expect(document.activeElement).toBe(open('MUS-3'));
     await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
     expect(getDetails).toHaveBeenCalledWith('card-3');
+  });
+
+  it('skips empty lanes when navigating horizontally in either direction', async () => {
+    const emptyReview: Column = {
+      id: 'review', board_id: board.id, name: 'Review', position: 'm', wip_limit: null, is_terminal: 0,
+    };
+    const emptyVerify: Column = {
+      id: 'verify', board_id: board.id, name: 'Verify', position: 'n', wip_limit: null, is_terminal: 0,
+    };
+    await act(async () => renderBoard(
+      vi.fn(),
+      [columns[0], emptyReview, emptyVerify, columns[1]],
+      [cards[0], doneCard],
+    ));
+    const open = (key: string) => container.querySelector<HTMLButtonElement>(`[aria-label^="Open ${key}:"]`)!;
+    await act(async () => open('MUS-1').focus());
+
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })));
+    expect(document.activeElement).toBe(open('MUS-3'));
+
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })));
+    expect(document.activeElement).toBe(open('MUS-1'));
   });
 
   it('uses the rendered keyboard drag boundary for lift, reorder, drop, cancel, and focus', async () => {
