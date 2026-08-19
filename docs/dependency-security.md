@@ -2,8 +2,9 @@
 
 Muster treats package audit results as a release gate, not as an automatic
 upgrade instruction. Dependency changes must preserve the supported Node.js
-runtime, pass the protocol and browser regression suites, and avoid forced
-major upgrades unless they are reviewed as a compatibility change.
+runtime described in [`docs/runtime-support.md`](runtime-support.md), pass the
+protocol and browser regression suites, and avoid forced major upgrades unless
+they are reviewed as a compatibility change.
 
 CI runs both of these checks after the reproducible `npm ci` install:
 
@@ -17,8 +18,8 @@ patch exists. A high or critical exception requires a documented owner,
 technical rationale, compensating controls, and an explicit expiry date; the CI
 gate must not be weakened globally to accommodate an exception.
 
-The `@hono/node-server` override intentionally selects patched `1.19.15` rather
-than the 2.x line pulled by npm's generic audit fix. Version 2 requires Node 20,
-while Muster currently declares support for Node 18 and newer. Remove the
-override only when the application runtime floor is deliberately raised or the
-MCP SDK no longer resolves the vulnerable 1.x release.
+The application no longer carries a compatibility override for
+`@hono/node-server`. Its MCP SDK range now resolves the normal patched 2.1.1
+release, whose Node.js floor is below Muster's supported 22.13.0 floor. If a
+future advisory requires an override, document the exact package range, reason,
+compensating controls, and expiry date here before committing it.

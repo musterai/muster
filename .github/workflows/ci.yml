@@ -12,7 +12,10 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [22]
+        # Node 22 is the oldest supported maintained LTS line; Node 24 is
+        # the newer line used by the production image. Keep both in the
+        # release gate so the minimum does not silently drift.
+        node-version: [22, 24]
 
     container:
       image: node:${{ matrix.node-version }}
@@ -53,7 +56,7 @@ jobs:
           fi
 
       - name: Install Dependencies
-        run: npm ci
+        run: npm ci --engine-strict
 
       - name: Reject High-Severity Dependency Advisories
         run: |

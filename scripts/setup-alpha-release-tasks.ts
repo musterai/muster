@@ -49,7 +49,7 @@ This specification details the required components and polish steps for releasin
 
 ## Release Tasks
 1. **Health Telemetry Endpoint (\`/api/v1/health\`)**: Expose system uptime, DB connection state, and active project/agent counts.
-2. **Containerization (\`Dockerfile\` & \`docker-compose.yml\`)**: Multi-stage build for Node 20+, SQLite WAL data volume persistence, and environment variable configuration.
+2. **Containerization (\`Dockerfile\` & \`docker-compose.yml\`)**: Multi-stage build for Node 22+, SQLite WAL data volume persistence, and environment variable configuration.
 3. **Open-Source Documentation (\`README.md\`, \`LICENSE\`, \`CONTRIBUTING.md\`)**: Clear quickstart guide for MCP configuration (Cursor, AGY, Claude Desktop).
 4. **Seed Utility (\`npm run seed\`)**: Single-command data populator for instant user evaluation.
 5. **GitHub Actions CI/CD (\`.github/workflows/ci.yml\`)**: Automated testing, linting, and build verification on push.`,

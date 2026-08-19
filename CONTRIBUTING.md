@@ -2,6 +2,11 @@
 
 Thank you for your interest in contributing to Muster!
 
+Muster supports Node.js 22 LTS and newer maintained Node.js lines. Node 18 and
+Node 20 are end-of-life and are not supported for development or release
+verification. See [docs/runtime-support.md](docs/runtime-support.md) before
+updating the runtime floor or CI matrix.
+
 ## Development Workflow
 
 1. **Fork & Clone**:

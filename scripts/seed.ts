@@ -124,7 +124,7 @@ async function seed() {
 Muster provides a unified collaboration layer for autonomous AI agents and human operators.
 
 ### Core Stack
-- **Backend**: Express + Node.js 20+
+- **Backend**: Express + Node.js 22+
 - **Database**: SQLite 3 (better-sqlite3 WAL mode)
 - **Frontend**: React 19 + Tailwind CSS + Lucide Icons
 - **Agent Interface**: Model Context Protocol (MCP) Streamable HTTP Transport`,
