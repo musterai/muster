@@ -264,7 +264,7 @@ describe('MUS-66 workspace isolation', () => {
     expect((await kbs.list(projectA.id, authA)).some(kb => kb.id === kbA.id)).toBe(false);
     const mcpKbs = await scopedMcp._registeredTools.list_knowledge_bases.handler({ project_id: projectA.id }, {});
     const mcpKbPayload = JSON.parse(mcpKbs.content[0].text);
-    expect(mcpKbPayload.some((kb: { linked_project_ids?: string[] }) =>
+    expect(mcpKbPayload.items.some((kb: { linked_project_ids?: string[] }) =>
       kb.linked_project_ids?.includes(projectB.id))).toBe(false);
     let restKbs: any;
     await kbRouteHandler('/kbs')(
@@ -272,7 +272,7 @@ describe('MUS-66 workspace isolation', () => {
       { json: (payload: any) => { restKbs = payload; } },
       (error?: unknown) => { if (error) throw error; },
     );
-    expect(restKbs.some((kb: { linked_project_ids?: string[] }) =>
+    expect(restKbs.items.some((kb: { linked_project_ids?: string[] }) =>
       kb.linked_project_ids?.includes(projectB.id))).toBe(false);
     expect((await db.query<{ id: string }>('SELECT id FROM kb_fact WHERE id = ?', [factB.id])).length).toBe(1);
 
@@ -298,7 +298,7 @@ describe('MUS-66 workspace isolation', () => {
       db,
     } as any, undefined, authA) as any;
     const listed = await mcp._registeredTools.list_projects.handler({}, {});
-    expect(new Set(JSON.parse(listed.content[0].text).map((project: { id: string }) => project.id)))
+    expect(new Set(JSON.parse(listed.content[0].text).items.map((project: { id: string }) => project.id)))
       .toEqual(new Set([projectA.id, projectA2.id]));
     await expect(mcp._registeredTools.get_card.handler({ card_id: cardB.id }, {}))
       .rejects.toMatchObject({ code: 'NOT_FOUND' });
@@ -311,11 +311,11 @@ describe('MUS-66 workspace isolation', () => {
       .route.stack.at(-1).handle;
     let listPayload: any;
     await routeHandler('/')(
-      { params: {}, authContext: authA },
+      { params: {}, query: {}, authContext: authA },
       { json: (payload: any) => { listPayload = payload; } },
       (error?: unknown) => { if (error) throw error; },
     );
-    expect(new Set(listPayload.map((project: { id: string }) => project.id))).toEqual(new Set([projectA.id, projectA2.id]));
+    expect(new Set(listPayload.items.map((project: { id: string }) => project.id))).toEqual(new Set([projectA.id, projectA2.id]));
     let foreignError: any;
     await routeHandler('/:id')(
       { params: { id: projectB.id }, authContext: authA },

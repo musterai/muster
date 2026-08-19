@@ -732,7 +732,10 @@ export class KBService {
 
   // --- Aggregated Knowledge & Graph Queries ---
 
-  async getEntityKnowledge(queryStr: string, kbIds?: string[], options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<EntityKnowledgeResult | null> {
+  async getEntityKnowledge(queryStr: string, kbIds?: string[], optionsOrAuth: PageOptions | AuthContext = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<EntityKnowledgeResult | null> {
+    const isAuth = 'principal' in optionsOrAuth || 'workspace_id' in optionsOrAuth;
+    const options: PageOptions = isAuth ? {} : optionsOrAuth as PageOptions;
+    if (isAuth) auth = optionsOrAuth as AuthContext;
     if (kbIds?.length) await assertResourcesWorkspace(this.db, auth, kbIds.map(id => ['knowledge_base', id]));
     let sql = 'SELECT id, kb_id, name, type, identifier, created_at, updated_at FROM kb_entity WHERE (id = ? OR identifier = ? OR LOWER(name) = LOWER(?))';
     const params: unknown[] = [queryStr, queryStr, queryStr];
@@ -901,7 +904,7 @@ export class KBService {
       }
       if (projectId) { sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=f.kb_id AND pkb.project_id=?)'; params.push(projectId); }
       if (scopedWorkspace) {
-        sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=f.kb_id AND p.workspace_id=?) AND NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=f.kb_id AND p2.workspace_id<>?)';
+        sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=f.kb_id AND p.workspace_id=?) AND NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=f.kb_id AND p2.workspace_id<>?) AND (f.entity_id IS NULL OR EXISTS (SELECT 1 FROM kb_entity valid_entity WHERE valid_entity.id=f.entity_id AND valid_entity.kb_id=f.kb_id))';
         params.push(scopedWorkspace, scopedWorkspace);
       }
       if (cursor && cursor[1]) {
@@ -961,7 +964,10 @@ export class KBService {
     };
   }
 
-  async getGraphTree(kbId?: string, projectId?: string, options: PageOptions = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBGraphTree> {
+  async getGraphTree(kbId?: string, projectId?: string, optionsOrAuth: PageOptions | AuthContext = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<KBGraphTree> {
+    const isAuth = 'principal' in optionsOrAuth || 'workspace_id' in optionsOrAuth;
+    const options: PageOptions = isAuth ? {} : optionsOrAuth as PageOptions;
+    if (isAuth) auth = optionsOrAuth as AuthContext;
     if (kbId) await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
     if (projectId) await assertResourceWorkspace(this.db, auth, 'project', projectId);
     const scopedWorkspace = workspaceIdFor(auth);

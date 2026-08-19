@@ -35,8 +35,8 @@ export function createAgentRouter(
     try {
       const auth = getAuth(req);
       const agents = await agentService.listPage(config.auth.mode === 'enforced' ? auth?.workspace_id : undefined, {
-        cursor: req.query.cursor as string | undefined,
-        limit: req.query.limit as number | undefined,
+        cursor: req.query?.cursor as string | undefined,
+        limit: req.query?.limit as number | undefined,
       });
       res.json(agents);
     } catch (err) {
