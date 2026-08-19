@@ -1,26 +1,20 @@
 // File: src/mcp/server.ts
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z as zod } from 'zod';
-import {
-  AgentService,
-  CardService,
-  CommentService,
-  DocumentService,
-  RoleService,
-} from '../services/index.js';
+import { RoleService } from '../services/index.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { requirePermission, TOOL_PERMISSIONS, withPermission } from '../shared/permission-enforcer.js';
 import type { Services } from '../shared/services.js';
-import { mcpCardCreateInputSchema } from '../shared/card-input-schema.js';
 import { config } from '../config/index.js';
 import { Request } from 'express';
-import type { DatabaseAdapter } from '../db/adapter.js';
+import {
+  requireActor,
+  resolveActor,
+  withMutationAudit,
+} from './tool-context.js';
+import { registerCardTools } from './tools/card.tools.js';
 
 const z = zod;
-const cardReferenceSchema = z.string().describe(
-  'The card ULID or its human-readable key (e.g. "MUS-49"); writes resolve it to the immutable card ID.'
-);
-
 type InternalMcpServer = {
   _registeredTools?: Record<string, unknown>;
   tool: (...args: any[]) => any;
@@ -433,106 +427,6 @@ export function installMcpPermissionBoundary(server: McpServer, auth: AuthContex
 
 export type { Services } from '../shared/services.js';
 
-// Keep the MCP boundary contract identical to REST's `cardMoveSchema`: a
-// move is either a lane move, a same-lane reposition, or both.  The legacy
-// `server.tool()` overload only accepts a raw Zod shape, which cannot express
-// this cross-field invariant. `registerTool()` accepts the complete schema.
-const moveCardInputSchema = z.object({
-  card_id: cardReferenceSchema,
-  target_column_id: z.string().min(1).optional(),
-  position: z.string().max(256).regex(/^(?:[a-z]+|0[a-z]+)$/).optional(),
-  operator_override: z.boolean().optional().describe('Explicitly bypass card WIP and blocker rules when the authenticated caller has operator override authority'),
-}).strict().refine(value => value.target_column_id !== undefined || value.position !== undefined, {
-  message: 'target_column_id or position is required',
-});
-
-async function withMutationAudit<T>(
-  services: Services,
-  auth: AuthContext,
-  entry: { action: string; target_type: string; target_id?: string; payload?: Record<string, unknown> }
-    | ((result: T) => { action: string; target_type: string; target_id?: string; payload?: Record<string, unknown> }),
-  mutate: (adapter?: DatabaseAdapter) => Promise<T>,
-): Promise<T> {
-  // An audited MCP mutation must never run without the root adapter that can
-  // bind its audit row to the mutation. Test doubles and embedders must wire
-  // the same dependency as production; failing here is deliberately before
-  // mutate() so there is no unaudited side effect.
-  if (!services.db) throw new Error('Atomic MCP mutation requires services.db');
-  return services.db.transaction(async tx => {
-    const result = await mutate(tx);
-    const resolvedEntry = typeof entry === 'function' ? entry(result) : entry;
-    await services.auditService.logAs(auth, resolvedEntry, tx);
-    return result;
-  });
-}
-
-/**
- * Derive the actor ID.
- *
- * MUS-23: caller-asserted identity via tool arguments is retired for
- * enforced (hosted, multi-tenant) mode — `agent_id` in tool args there is a
- * SELECTOR (validated server-side against the caller's owned agents), never
- * an identity claim. Reviving it there would reopen the impersonation hole
- * MUS-23 closed: any caller could claim to *be* a different registered
- * principal just by naming it in args.
- *
- * That hole doesn't exist in `open` mode: every caller already holds every
- * permission (see requirePermission's early return), so there is no
- * differential trust to spoof across. So — and ONLY when
- * `config.auth.mode === 'open'`, checked explicitly rather than inferred
- * from an absent principal — a caller-supplied `raw` identity hint
- * (`agent_id` / `author_id`) is accepted as a labeling convenience for
- * local, single-tenant installs. The authenticated principal, when present,
- * always wins regardless of mode.
- */
-function resolveActor(auth: AuthContext, raw?: Record<string, unknown>): string | undefined {
-  if (auth.principal) return auth.principal.id;
-  if (config.auth.mode === 'open' && raw) {
-    const candidate = raw.agent_id ?? raw.author_id;
-    if (typeof candidate === 'string' && candidate.length > 0) return candidate;
-  }
-  return undefined;
-}
-
-function mayUseOperatorOverride(auth: AuthContext, requested: boolean | undefined): boolean {
-  return requested === true && (config.auth.mode === 'open' || auth.is_operator_override);
-}
-
-/**
- * Like resolveActor but throws if no actor could be determined (enforced mode).
- * In open mode, returns undefined — the caller is unauthenticated.
- */
-function requireActor(auth: AuthContext, context: string): string | undefined {
-  const actorId = resolveActor(auth);
-  if (!actorId) {
-    if (config.auth.mode === 'enforced') {
-      throw new Error(
-        `Forbidden: tool "${context}" requires an authenticated actor, but no principal was resolved.`
-      );
-    }
-  }
-  return actorId;
-}
-
-/**
- * Row-level scope check for comment.update/comment.delete: a principal may
- * only edit/delete their own comments unless they hold workspace.admin.
- * Mirrors the update_card/move_card "own resource" pattern for junior_engineer
- * card scope — skipped entirely in open mode (no principal, no differential
- * trust to enforce across).
- */
-async function requireCommentOwnershipOrAdmin(
-  commentService: CommentService,
-  auth: AuthContext,
-  commentId: string,
-  action: 'edit' | 'delete',
-): Promise<void> {
-  if (auth.permissions.includes('workspace.admin') || !auth.principal) return;
-  const owns = await commentService.validateCommentOwnership(commentId, auth.principal.id);
-  if (!owns) {
-    throw new Error(`Forbidden: you may only ${action} your own comments (principal: ${auth.principal.id})`);
-  }
-}
 
 export function createMcpServer(services: Services, req?: Request, auth: AuthContext = OPEN_AUTH_CONTEXT): McpServer {
   const server = new McpServer({
@@ -540,17 +434,6 @@ export function createMcpServer(services: Services, req?: Request, auth: AuthCon
     version: '1.0.0',
   });
   installMcpPermissionBoundary(server, auth);
-
-  // Open mode has no authenticated request principal, so attributed calls
-  // must carry the registered agent ID on every request. In enforced mode the
-  // bearer/session principal is authoritative and this field is optional.
-  const attributedAgentIdSchema = config.auth.mode === 'open'
-    ? z.string().min(1).describe(
-      'REQUIRED in open mode. Use the exact id returned by register_agent; registration does not bind later MCP requests to that identity. Never invent an ID.'
-    )
-    : z.string().optional().describe(
-      'Optional in authenticated mode. The bearer/session principal is authoritative; any supplied value is ignored for attribution.'
-    );
 
   // --- MCP Collaboration Prompts ---
   server.prompt('collaboration_protocol', {}, () => ({
@@ -705,213 +588,9 @@ All AI agents and human operators collaborating within Muster must follow this p
     return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Column ${column_id} deleted` }) }] };
   }));
 
-  // --- Card Tools ---
-  server.tool('list_cards', {
-    board_id: z.string().optional(),
-    project_id: z.string().optional(),
-    column_id: z.string().optional(),
-    assignee_id: z.string().optional(),
-    label: z.string().optional(),
-    archived: z.boolean().optional()
-  }, withPermission('list_cards', auth, async (filters) => {
-    const cards = await services.cardService.list(filters, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
-  }));
-
-  server.tool('search_cards', {
-    project_id: z.string().min(1).describe('Project whose active cards should be searched'),
-    query: z.string().trim().min(1).describe('Literal, case-insensitive substring to match against card titles'),
-    exclude_card_id: cardReferenceSchema.optional().describe('Optional card ULID or human-readable key to omit from results'),
-    limit: z.number().int().min(1).max(100).optional().describe('Maximum results to return; defaults to 20 and cannot exceed 100'),
-  }, withPermission('search_cards', auth, async ({ project_id, query, exclude_card_id, limit }) => {
-    const cards = await services.cardService.searchByTitle(project_id, query, {
-      excludeCardId: exclude_card_id,
-      limit,
-    }, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
-  }));
-
-  server.tool('create_card', mcpCardCreateInputSchema.shape, withPermission('create_card', auth, async ({ operator_override, ...args }) => {
-    const card = await services.cardService.create(args, resolveActor(auth), {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
-    });
-    return { content: [{ type: 'text', text: JSON.stringify(card, null, 2) }] };
-  }));
-
-  server.tool('get_card', {
-    card_id: cardReferenceSchema,
-  }, withPermission('get_card', auth, async ({ card_id }) => {
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('update_card', {
-    card_id: cardReferenceSchema,
-    title: z.string().optional(),
-    description: z.string().optional(),
-    priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
-    due_date: z.string().nullable().optional(),
-    is_epic: z.boolean().optional().describe('Marks this card as a container for related work'),
-    operator_override: z.boolean().optional().describe('Explicitly bypass card WIP rules when the authenticated caller has operator override authority'),
-  }, withPermission('update_card', auth, async ({ card_id, operator_override, ...data }) => {
-    const details = await services.cardService.update(card_id, data, resolveActor(auth), {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
-    });
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.registerTool('move_card', { inputSchema: moveCardInputSchema }, withPermission('move_card', auth, async ({ card_id, target_column_id, position, operator_override }) => {
-    const details = await services.cardService.move(card_id, { target_column_id, position }, resolveActor(auth), {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
-    });
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('claim_card', {
-    card_id: cardReferenceSchema,
-    agent_id: z.string().describe('Required — the principal/agent ID claiming the card. This also records the assignee and work lease. After a successful claim, call move_card to advance it to the next active-work lane.'),
-    ttl_seconds: z.number().optional().describe('Lease duration in seconds; defaults to 600 (10 minutes)'),
-    operator_override: z.boolean().optional().describe('Explicitly bypass blocker rules when the authenticated caller has operator override authority'),
-  }, withPermission('claim_card', auth, async ({ card_id, agent_id, ttl_seconds, operator_override }) => {
-    const result = await services.cardService.claim(card_id, agent_id, ttl_seconds, resolveActor(auth) || agent_id, {
-      operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
-    });
-    const response = 'success' in result && result.success === false
-      ? result
-      : {
-          ...result,
-          next_action: "Claim complete: assignment and work lease recorded. Immediately call move_card to advance this card to the next active-work lane (normally 'In Progress').",
-        };
-    return { content: [{ type: 'text', text: JSON.stringify(response, null, 2) }] };
-  }));
-
-  server.tool('assign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('assign_card', auth, async ({ card_id, agent_id }) => {
-    await services.cardService.assign(card_id, agent_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('unassign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('unassign_card', auth, async ({ card_id, agent_id }) => {
-    await services.cardService.unassign(card_id, agent_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('add_comment', {
-    card_id: cardReferenceSchema,
-    content: z.string(),
-    author_id: z.string().optional().describe(
-      'Deprecated alias retained for compatibility. Open-mode MCP clients must pass agent_id; authenticated-mode attribution comes from the bearer/session principal.'
-    ),
-    agent_id: attributedAgentIdSchema,
-  }, withPermission('add_comment', auth, async (args) => {
-    // author_id/agent_id in args are only ever honored by resolveActor() in
-    // open mode (see its doc comment) — the authenticated principal wins otherwise.
-    const author_id = resolveActor(auth, args);
-    const comment = await services.commentService.create({ ...args, author_id }, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(comment, null, 2) }] };
-  }));
-
-  server.tool('update_comment', {
-    comment_id: z.string(),
-    content: z.string(),
-  }, withPermission('update_comment', auth, async ({ comment_id, content }) => {
-    await requireCommentOwnershipOrAdmin(services.commentService, auth, comment_id, 'edit');
-    const comment = await services.commentService.update(comment_id, content, resolveActor(auth), undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(comment, null, 2) }] };
-  }));
-
-  server.tool('delete_comment', {
-    comment_id: z.string(),
-  }, withPermission('delete_comment', auth, async ({ comment_id }) => {
-    await requireCommentOwnershipOrAdmin(services.commentService, auth, comment_id, 'delete');
-    await services.commentService.delete(comment_id, resolveActor(auth), undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Comment ${comment_id} deleted` }) }] };
-  }));
-
-  server.tool('add_label', { card_id: cardReferenceSchema, label_id: z.string() }, withPermission('add_label', auth, async ({ card_id, label_id }) => {
-    await services.cardService.addLabel(card_id, label_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
-  }));
-
-  server.tool('remove_label', { card_id: cardReferenceSchema, label_id: z.string() }, withPermission('remove_label', auth, async ({ card_id, label_id }) => {
-    await services.cardService.removeLabel(card_id, label_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
-  }));
-
-  server.tool('archive_card', { card_id: cardReferenceSchema }, withPermission('archive_card', auth, async ({ card_id }) => {
-    await services.cardService.archive(card_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
-  }));
-
-  server.tool('delete_card', { card_id: cardReferenceSchema }, withPermission('delete_card', auth, async ({ card_id }) => {
-    await services.cardService.delete(card_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Card ${card_id} deleted` }) }] };
-  }));
-
-  server.tool('link_document_to_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('link_document_to_card', auth, async ({ card_id, document_id }) => {
-    await services.cardService.linkDocument(card_id, document_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('unlink_document_from_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('unlink_document_from_card', auth, async ({ card_id, document_id }) => {
-    await services.cardService.unlinkDocument(card_id, document_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('link_card', {
-    card_id: cardReferenceSchema,
-    target_card_id: cardReferenceSchema,
-    relation_type: z.enum(['blocks', 'blocked_by', 'relates_to', 'duplicates', 'parent_of', 'child_of']),
-  }, withPermission('link_card', auth, async ({ card_id, target_card_id, relation_type }) => {
-    await services.cardService.linkCard(card_id, target_card_id, relation_type, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('unlink_card', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('unlink_card', auth, async ({ card_id, link_id }) => {
-    await services.cardService.unlinkCard(card_id, link_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('add_work_link', {
-    card_id: cardReferenceSchema,
-    kind: z.enum(['branch', 'pull_request', 'commit', 'pipeline']),
-    provider: z.enum(['forgejo', 'github', 'gitlab', 'other']),
-    url: z.string(),
-    external_ref: z.string().optional(),
-    title: z.string().optional(),
-    status: z.string().optional(),
-  }, withPermission('add_work_link', auth, async ({ card_id, ...data }) => {
-    await services.cardService.addWorkLink(card_id, data, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('remove_work_link', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('remove_work_link', auth, async ({ card_id, link_id }) => {
-    await services.cardService.removeWorkLink(card_id, link_id, resolveActor(auth), auth);
-    const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
-  }));
-
-  server.tool('list_work_links', { card_id: cardReferenceSchema }, withPermission('list_work_links', auth, async ({ card_id }) => {
-    const links = await services.cardService.listWorkLinks(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(links, null, 2) }] };
-  }));
-
-  server.tool('create_label', { board_id: z.string(), name: z.string(), color: z.string() }, withPermission('create_label', auth, async (args) => {
-    const result = await services.boardService.createLabel(args, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-  }));
-
-  server.tool('list_labels', { board_id: z.string() }, withPermission('list_labels', auth, async ({ board_id }) => {
-    const result = await services.boardService.listLabels(board_id, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-  }));
-
+  // Card/comment/link/label schemas and handlers live together so their
+  // transport contract can evolve without reopening unrelated domains.
+  registerCardTools({ server, services, auth });
   // --- Document Management Tools ---
   server.tool('list_documents', {
     project_id: z.string(),

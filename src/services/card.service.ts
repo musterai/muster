@@ -2,7 +2,6 @@ import { ulid } from 'ulid';
 import { DatabaseAdapter } from '../db/adapter.js';
 import { Card, CardAssignee, CardDetails, CreateCard, UpdateCard, MoveCard, Label, Document, CardLinkRelationType, LinkedCardSummary, CardWorkLink, CreateCardWorkLink, ClaimRefusal, CardOperationOptions } from '../shared/types.js';
 import { EventService } from './event.service.js';
-import { isValidRankHint, rebalanceRanks } from '../shared/lexorank.js';
 import { formatCardKey } from '../shared/card-key.js';
 import { CardRuleError, ConflictError, NotFoundError, ValidationError } from '../shared/errors.js';
 import { config } from '../config/index.js';
@@ -12,8 +11,9 @@ import { canonicalizeCardLink } from './helpers/card-links.helper.js';
 import { resolveCardId } from './helpers/card-id.helper.js';
 import { AuthContext, OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
 import { assertResourceWorkspace, assertResourcesShareWorkspace, assertResourcesWorkspace, workspaceIdFor } from './helpers/workspace-scope.helper.js';
-import { PermissionDeniedError, WORKSPACE_READ } from '../shared/permission-enforcer.js';
-import { assertActiveWorkspacePrincipal, assertAgentSelectorScope } from './agent-scope.authorization.js';
+import { assertAgentSelectorScope } from './agent-scope.authorization.js';
+import { CardAccessPolicy } from './card-access.policy.js';
+import { CardLanePolicy, type ColumnCapacity, type UnresolvedBlocker } from './card-lane.policy.js';
 
 const DEFAULT_CLAIM_TTL_SECONDS = 600;
 const MAX_MOVE_RETRIES = 3;
@@ -31,27 +31,17 @@ function isRetryablePostgresError(error: unknown): boolean {
   return code === '40P01' || code === '40001';
 }
 
-interface ColumnCapacity {
-  id: string;
-  name: string;
-  wip_limit: number | null;
-  card_count: number;
-  is_terminal: number;
-}
-
-interface UnresolvedBlocker {
-  id: string;
-  key: string;
-  title: string;
-  column_id: string;
-  column_name: string;
-}
-
 export class CardService {
+  private readonly accessPolicy: CardAccessPolicy;
+  private readonly lanePolicy: CardLanePolicy;
+
   constructor(
     private db: DatabaseAdapter,
     private eventService?: EventService
-  ) {}
+  ) {
+    this.accessPolicy = new CardAccessPolicy(db);
+    this.lanePolicy = new CardLanePolicy(db);
+  }
 
   /**
    * Positions are a small, untrusted ordering hint. Digits are accepted only
@@ -59,12 +49,7 @@ export class CardService {
    * by a canonical lowercase rank during the lane rebalance below.
    */
   private assertPosition(position: string | undefined): void {
-    if (position !== undefined && !isValidRankHint(position)) {
-      throw new ValidationError('position must contain only lowercase letters a-z', {
-        field: 'position',
-        code: 'INVALID_RANK',
-      });
-    }
+    this.lanePolicy.assertPosition(position);
   }
 
   /**
@@ -77,29 +62,7 @@ export class CardService {
    * transports must not be able to mutate a card with `{}` either.
    */
   private assertMoveIntent(data: MoveCard): void {
-    if (data.target_column_id === undefined && data.position === undefined) {
-      throw new ValidationError('target_column_id or position is required', {
-        fields: ['target_column_id', 'position'],
-        code: 'MOVE_INTENT_REQUIRED',
-      });
-    }
-    if (data.target_column_id !== undefined && (typeof data.target_column_id !== 'string' || data.target_column_id.trim().length === 0)) {
-      throw new ValidationError('target_column_id must be a non-empty string', {
-        field: 'target_column_id',
-        code: 'INVALID_TARGET_COLUMN',
-      });
-    }
-    if (data.position !== undefined && typeof data.position !== 'string') {
-      throw new ValidationError('position must be a string', {
-        field: 'position',
-        code: 'INVALID_RANK',
-      });
-    }
-    this.assertPosition(data.position);
-  }
-
-  private denyCardScope(auth: AuthContext): never {
-    throw new PermissionDeniedError('card.assign_others', auth.role_name);
+    this.lanePolicy.assertMoveIntent(data);
   }
 
   /**
@@ -112,25 +75,7 @@ export class CardService {
     auth: AuthContext | undefined,
     adapter: DatabaseAdapter = this.db,
   ): Promise<string> {
-    if (config.auth.mode === 'open') {
-      return resolveCardId(adapter, cardIdOrKey);
-    }
-    auth = await assertActiveWorkspacePrincipal(adapter, auth);
-
-    const rows = await adapter.query<{ id: string; workspace_id: string }>(
-      `SELECT c.id, p.workspace_id
-       FROM card c
-       JOIN "column" col ON col.id = c.column_id
-       JOIN board b ON b.id = col.board_id
-       JOIN project p ON p.id = b.project_id
-       WHERE c.id = ? OR c.key = ?
-       LIMIT 1`,
-      [cardIdOrKey, cardIdOrKey],
-    );
-    if (rows.length === 0 || rows[0].workspace_id !== auth.workspace_id) {
-      return this.denyCardScope(auth);
-    }
-    return rows[0].id;
+    return this.accessPolicy.assertCardWorkspaceScope(cardIdOrKey, auth, adapter);
   }
 
   /**
@@ -143,22 +88,7 @@ export class CardService {
     auth: AuthContext | undefined,
     adapter: DatabaseAdapter = this.db,
   ): Promise<string> {
-    if (config.auth.mode === 'open') return columnId;
-    auth = await assertActiveWorkspacePrincipal(adapter, auth);
-
-    const rows = await adapter.query<{ id: string; workspace_id: string }>(
-      `SELECT col.id, p.workspace_id
-       FROM "column" col
-       JOIN board b ON b.id = col.board_id
-       JOIN project p ON p.id = b.project_id
-       WHERE col.id = ?
-       LIMIT 1`,
-      [columnId],
-    );
-    if (rows.length === 0 || rows[0].workspace_id !== auth.workspace_id) {
-      return this.denyCardScope(auth);
-    }
-    return rows[0].id;
+    return this.accessPolicy.assertColumnWorkspaceScope(columnId, auth, adapter);
   }
 
   /**
@@ -171,97 +101,29 @@ export class CardService {
     auth: AuthContext | undefined,
     adapter: DatabaseAdapter = this.db,
   ): Promise<string> {
-    const cardId = await this.assertCardWorkspaceScope(cardIdOrKey, auth, adapter);
-    if (config.auth.mode === 'open') return cardId;
-    if (!auth?.principal) throw new PermissionDeniedError(WORKSPACE_READ, auth?.role_name || null);
-    if (auth.permissions.includes('card.assign_others')) return cardId;
-
-    let scopedPrincipalIds: string[] = [];
-    if (auth.principal.kind === 'user') {
-      const operated = await adapter.query<{ id: string }>(
-        `SELECT id FROM agent
-         WHERE operator_user_id = ? AND workspace_id = ?`,
-        [auth.principal.id, auth.workspace_id],
-      );
-      scopedPrincipalIds = [auth.principal.id, ...operated.map(row => row.id)];
-    } else {
-      scopedPrincipalIds = [auth.principal.id];
-    }
-
-    if (scopedPrincipalIds.length === 0) return this.denyCardScope(auth);
-    const placeholders = scopedPrincipalIds.map(() => '?').join(',');
-    const assignments = await adapter.query<{ card_id: string }>(
-      `SELECT card_id FROM card_assignee
-       WHERE card_id = ? AND principal_id IN (${placeholders})
-       LIMIT 1`,
-      [cardId, ...scopedPrincipalIds],
-    );
-    if (assignments.length === 0) return this.denyCardScope(auth);
-    return cardId;
+    return this.accessPolicy.assertCardMutationScope(cardIdOrKey, auth, adapter);
   }
 
   /** Apply deterministic canonical ranks to an already ordered lane. */
   private async rebalanceLane(db: DatabaseAdapter, cards: Card[]): Promise<string[]> {
-    const ranks = rebalanceRanks(cards.length);
-    for (let index = 0; index < cards.length; index++) {
-      await db.execute('UPDATE card SET position = ? WHERE id = ?', [ranks[index], cards[index].id]);
-    }
-    return ranks;
+    return this.lanePolicy.rebalanceLane(db, cards);
   }
 
   private async orderedLaneCards(columnId: string, db: DatabaseAdapter, excludeId?: string): Promise<Card[]> {
-    const cards = await db.query<Card>(
-      'SELECT * FROM card WHERE column_id = ? AND archived = 0 ORDER BY position ASC, id ASC',
-      [columnId]
-    );
-    return excludeId ? cards.filter(card => card.id !== excludeId) : cards;
+    return this.lanePolicy.orderedLaneCards(columnId, db, excludeId);
   }
 
   /** Insert a card according to its requested hint, repairing duplicate/legacy ranks at the same time. */
   private orderWithPosition(cards: Card[], card: Card, position?: string): Card[] {
-    const ordered = [...cards];
-    let insertAt = ordered.length;
-    if (position !== undefined) {
-      const index = ordered.findIndex(existing => existing.position > position);
-      insertAt = index === -1 ? ordered.length : index;
-    }
-    ordered.splice(insertAt, 0, card);
-    return ordered;
+    return this.lanePolicy.orderWithPosition(cards, card, position);
   }
 
   private async getColumnCapacity(columnId: string, db: DatabaseAdapter = this.db): Promise<ColumnCapacity> {
-    // WIP checks run inside the create/move transaction. Lock the target
-    // column row on Postgres so concurrent writers to the same lane cannot
-    // both observe spare capacity and exceed the limit.
-    if (db.dialect === 'postgres') {
-      await db.query<{ id: string }>('SELECT id FROM "column" WHERE id = ? FOR UPDATE', [columnId]);
-    }
-    const rows = await db.query<{ id: string; name: string; wip_limit: number | null; card_count: number | string; is_terminal: number | string }>(
-      `SELECT col.id, col.name, col.wip_limit, col.is_terminal, COUNT(c.id) AS card_count
-       FROM "column" col
-       LEFT JOIN card c ON c.column_id = col.id AND c.archived = 0
-       WHERE col.id = ?
-       GROUP BY col.id, col.name, col.wip_limit, col.is_terminal`,
-      [columnId]
-    );
-    const row = rows[0];
-    if (!row) throw new NotFoundError(`Column with ID ${columnId} not found`);
-    return { ...row, card_count: Number(row.card_count), is_terminal: Number(row.is_terminal) };
+    return this.lanePolicy.getColumnCapacity(columnId, db);
   }
 
-  private async getUnresolvedBlockers(cardId: string, db: DatabaseAdapter = this.db): Promise<UnresolvedBlocker[]> {
-    return db.query<UnresolvedBlocker>(
-      `SELECT blocker.id, blocker.key, blocker.title, blocker.column_id, blocker_column.name AS column_name
-       FROM card_link link
-       JOIN card blocker ON blocker.id = link.source_card_id
-       JOIN "column" blocker_column ON blocker_column.id = blocker.column_id
-       WHERE link.target_card_id = ?
-         AND link.relation_type = 'blocks'
-         AND blocker.archived = 0
-         AND blocker_column.is_terminal = 0
-       ORDER BY blocker.position ASC`,
-      [cardId]
-    );
+  private getUnresolvedBlockers(cardId: string, db: DatabaseAdapter = this.db) {
+    return this.lanePolicy.getUnresolvedBlockers(cardId, db);
   }
 
   private async recordOverride(

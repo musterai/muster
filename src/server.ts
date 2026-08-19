@@ -12,39 +12,19 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createDatabaseAdapter } from './db/factory.js';
 import { Migrator } from './db/migrator.js';
-import {
-  ProjectService,
-  BoardService,
-  ColumnService,
-  CardService,
-  CommentService,
-  DocumentService,
-  AgentService,
-  EventService,
-  KBService,
-  RoleService,
-} from './services/index.js';
 import { SSEManager } from './realtime/sse.js';
 import { createRouter } from './api/router.js';
 import { errorHandler } from './api/middleware/error-handler.js';
 import { createMcpServer } from './mcp/server.js';
-import type { Services } from './shared/services.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { config, formatHostForUrl, isLoopbackHost, setDatabaseOverride, validateDeploymentConfig } from './config/index.js';
 import { OPEN_AUTH_CONTEXT } from './shared/auth-context.js';
 import { ulid } from 'ulid';
-import { TokenService } from './services/token.service.js';
-import { SessionService } from './services/session.service.js';
-import { OidcService } from './services/oidc.service.js';
-import { InvitationService } from './services/invitation.service.js';
-import { UserService } from './services/user.service.js';
-import { DeviceGrantService } from './services/device-grant.service.js';
-import { McpOAuthService } from './services/mcp-oauth.service.js';
-import { AuditService } from './services/audit.service.js';
 import { createAuthMiddleware } from './api/middleware/auth.js';
 import { createWellKnownRouter, canonicalMcpResource } from './api/routes/mcp-oauth.routes.js';
 import { corsMiddleware, securityHeadersMiddleware } from './api/middleware/security.js';
 import { createRateLimiter } from './api/middleware/generic-rate-limiter.js';
+import { createApplicationServices } from './application/composition.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -85,44 +65,15 @@ export async function startServer(options?: { db?: string }): Promise<void> {
   await migrator.run();
 
   const sseManager = new SSEManager();
-  const eventService = new EventService(db, async (evt) => {
-    sseManager.broadcast(evt.project_id, evt);
+  const services = createApplicationServices(db, {
+    publishEvent: async (event) => sseManager.broadcast(event.project_id, event),
   });
-  const auditService = new AuditService(db);
-
-  const boardService = new BoardService(db, eventService);
-  const documentService = new DocumentService(db, eventService, auditService);
-  const kbService = new KBService(db, eventService);
-  const roleService = new RoleService(db, eventService);
-  const tokenService = new TokenService(db);
-  const sessionService = new SessionService(db);
-  const oidcService = new OidcService(db);
-  const invitationService = new InvitationService(db);
-  const userService = new UserService(db);
-  const deviceGrantService = new DeviceGrantService(db, tokenService, auditService);
-  const agentService = new AgentService(db, eventService);
-  const mcpOAuthService = new McpOAuthService(db, tokenService, agentService, auditService);
-  const services: Services = {
-    db,
-    projectService: new ProjectService(db, eventService, boardService, documentService),
-    boardService,
-    columnService: new ColumnService(db, eventService),
-    cardService: new CardService(db, eventService),
-    commentService: new CommentService(db, eventService),
-    documentService,
+  const {
     agentService,
-    eventService,
-    kbService,
     roleService,
-    tokenService,
     sessionService,
-    oidcService,
-    invitationService,
-    auditService,
-    deviceGrantService,
-    mcpOAuthService,
-    userService,
-  };
+    tokenService,
+  } = services;
 
   // Bootstrap: create default workspace and project if empty
   const workspaces = await db.query<{ id: string }>('SELECT id FROM workspace LIMIT 1');

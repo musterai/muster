@@ -4,6 +4,8 @@ export * from './project.service.js';
 export * from './board.service.js';
 export * from './column.service.js';
 export * from './card.service.js';
+export * from './card-access.policy.js';
+export * from './card-lane.policy.js';
 export * from './comment.service.js';
 export * from './document.service.js';
 export * from './agent.service.js';
@@ -17,4 +19,3 @@ export * from './user.service.js';
 export * from './device-grant.service.js';
 export * from './mcp-oauth.service.js';
 export * from './audit.service.js';
-

@@ -1,0 +1,75 @@
+import type { DatabaseAdapter } from '../db/adapter.js';
+import {
+  AgentService,
+  AuditService,
+  BoardService,
+  CardService,
+  ColumnService,
+  CommentService,
+  DeviceGrantService,
+  DocumentService,
+  EventService,
+  InvitationService,
+  KBService,
+  McpOAuthService,
+  OidcService,
+  ProjectService,
+  RoleService,
+  SessionService,
+  TokenService,
+  UserService,
+} from '../services/index.js';
+import type { EventCallback } from '../services/event.service.js';
+import type { Services } from '../shared/services.js';
+
+export type ApplicationServices = Services & { db: DatabaseAdapter };
+
+export interface ApplicationCompositionOptions {
+  /**
+   * Outward event delivery is injected by the host. The application owns
+   * durable event creation; SSE, tests, or another transport only publish
+   * events after the transaction commits.
+   */
+  publishEvent?: EventCallback;
+}
+
+/**
+ * Transport-neutral application composition root.
+ *
+ * This is the only production location that constructs domain services and
+ * their shared policies. HTTP, MCP, realtime, and CLI hosts receive the same
+ * container instead of constructing or importing one another.
+ */
+export function createApplicationServices(
+  db: DatabaseAdapter,
+  options: ApplicationCompositionOptions = {},
+): ApplicationServices {
+  const eventService = new EventService(db, options.publishEvent);
+  const auditService = new AuditService(db);
+  const boardService = new BoardService(db, eventService);
+  const documentService = new DocumentService(db, eventService, auditService);
+  const tokenService = new TokenService(db);
+  const agentService = new AgentService(db, eventService);
+
+  return {
+    db,
+    eventService,
+    auditService,
+    boardService,
+    documentService,
+    tokenService,
+    agentService,
+    projectService: new ProjectService(db, eventService, boardService, documentService),
+    columnService: new ColumnService(db, eventService),
+    cardService: new CardService(db, eventService),
+    commentService: new CommentService(db, eventService),
+    kbService: new KBService(db, eventService),
+    roleService: new RoleService(db, eventService),
+    sessionService: new SessionService(db),
+    oidcService: new OidcService(db),
+    invitationService: new InvitationService(db),
+    userService: new UserService(db),
+    deviceGrantService: new DeviceGrantService(db, tokenService, auditService),
+    mcpOAuthService: new McpOAuthService(db, tokenService, agentService, auditService),
+  };
+}
