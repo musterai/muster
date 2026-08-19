@@ -32,7 +32,10 @@ Get up and running in **standalone (unauthenticated) mode** in under 2 minutes!
 
 ### Prerequisites
 
-- **Node.js** 24 LTS for the production container. The broader supported-runtime policy is tracked separately; do not treat Node 18 or Node 20 as a secure long-term production baseline.
+- **Node.js** 22 LTS or newer for supported development and production. The
+  production container is pinned to Node 24 LTS; see
+  [docs/runtime-support.md](docs/runtime-support.md) for the support window
+  and upgrade policy.
 - **npm** 10+
 
 ---
