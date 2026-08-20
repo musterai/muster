@@ -10,6 +10,7 @@ import {
   resolveActor,
   type McpToolContext,
 } from '../tool-context.js';
+import { withCardPageWebUrls, withCardWebUrl } from '../card-links.js';
 
 export function registerCardTools({ server, services, auth }: McpToolContext): void {
   server.tool('list_cards', {
@@ -23,7 +24,7 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     limit: z.number().int().min(1).max(100).optional().describe('Page size; defaults to 50 and cannot exceed 100'),
   }, withPermission('list_cards', auth, async ({ cursor, limit, ...filters }) => {
     const cards = await services.cardService.listPage(filters, { cursor, limit }, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardPageWebUrls(cards), null, 2) }] };
   }));
 
   server.tool('search_cards', {
@@ -38,19 +39,19 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
       limit,
       cursor,
     }, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(cards, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardPageWebUrls(cards), null, 2) }] };
   }));
 
   server.tool('create_card', mcpCardCreateInputSchema.shape, withPermission('create_card', auth, async ({ operator_override, ...args }) => {
     const card = await services.cardService.create(args, resolveActor(auth), {
       operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
-    return { content: [{ type: 'text', text: JSON.stringify(card, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(card), null, 2) }] };
   }));
 
   server.tool('get_card', { card_id: cardReferenceSchema }, withPermission('get_card', auth, async ({ card_id }) => {
     const details = await services.cardService.getById(card_id, undefined, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(details), null, 2) }] };
   }));
 
   server.tool('update_card', {
@@ -65,14 +66,14 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     const details = await services.cardService.update(card_id, data, resolveActor(auth), {
       operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(details), null, 2) }] };
   }));
 
   server.registerTool('move_card', { inputSchema: moveCardInputSchema }, withPermission('move_card', auth, async ({ card_id, target_column_id, position, operator_override }) => {
     const details = await services.cardService.move(card_id, { target_column_id, position }, resolveActor(auth), {
       operatorOverride: mayUseOperatorOverride(auth, operator_override), auth,
     });
-    return { content: [{ type: 'text', text: JSON.stringify(details, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(details), null, 2) }] };
   }));
 
   server.tool('claim_card', {
@@ -87,7 +88,7 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     const response = 'success' in result && result.success === false
       ? result
       : {
-          ...result,
+          ...withCardWebUrl(result as Exclude<typeof result, { success: false }>),
           next_action: "Claim complete: assignment and work lease recorded. Immediately call move_card to advance this card to the returned next active-work lane (next_active_lane; the board's active workflow role).",
         };
     return { content: [{ type: 'text', text: JSON.stringify(response, null, 2) }] };
@@ -95,12 +96,12 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
 
   server.tool('assign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('assign_card', auth, async ({ card_id, agent_id }) => {
     await services.cardService.assign(card_id, agent_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
 
   server.tool('unassign_card', { card_id: cardReferenceSchema, agent_id: z.string() }, withPermission('unassign_card', auth, async ({ card_id, agent_id }) => {
     await services.cardService.unassign(card_id, agent_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
 
   server.tool('add_comment', {
@@ -144,11 +145,11 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
 
   server.tool('link_document_to_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('link_document_to_card', auth, async ({ card_id, document_id }) => {
     await services.cardService.linkDocument(card_id, document_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
   server.tool('unlink_document_from_card', { card_id: cardReferenceSchema, document_id: z.string() }, withPermission('unlink_document_from_card', auth, async ({ card_id, document_id }) => {
     await services.cardService.unlinkDocument(card_id, document_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
   server.tool('link_card', {
     card_id: cardReferenceSchema,
@@ -156,11 +157,11 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     relation_type: z.enum(['blocks', 'blocked_by', 'relates_to', 'duplicates', 'parent_of', 'child_of']),
   }, withPermission('link_card', auth, async ({ card_id, target_card_id, relation_type }) => {
     await services.cardService.linkCard(card_id, target_card_id, relation_type, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
   server.tool('unlink_card', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('unlink_card', auth, async ({ card_id, link_id }) => {
     await services.cardService.unlinkCard(card_id, link_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
 
   server.tool('add_work_link', {
@@ -173,11 +174,11 @@ export function registerCardTools({ server, services, auth }: McpToolContext): v
     status: z.string().optional(),
   }, withPermission('add_work_link', auth, async ({ card_id, ...data }) => {
     await services.cardService.addWorkLink(card_id, data, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
   server.tool('remove_work_link', { card_id: cardReferenceSchema, link_id: z.string() }, withPermission('remove_work_link', auth, async ({ card_id, link_id }) => {
     await services.cardService.removeWorkLink(card_id, link_id, resolveActor(auth), auth);
-    return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.getById(card_id, undefined, auth), null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify(withCardWebUrl(await services.cardService.getById(card_id, undefined, auth)), null, 2) }] };
   }));
   server.tool('list_work_links', { card_id: cardReferenceSchema, cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(), limit: z.number().int().min(1).max(100).optional() }, withPermission('list_work_links', auth, async ({ card_id, cursor, limit }) => {
     return { content: [{ type: 'text', text: JSON.stringify(await services.cardService.listWorkLinksPage(card_id, { cursor, limit }, undefined, auth), null, 2) }] };

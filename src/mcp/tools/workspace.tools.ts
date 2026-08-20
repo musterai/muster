@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { withPermission } from '../../shared/permission-enforcer.js';
 import { resolveActor, withMutationAudit, type McpToolContext } from '../tool-context.js';
+import { withCardWebUrl } from '../card-links.js';
 
 export function registerWorkspaceTools({ server, services, auth }: McpToolContext): void {
   // --- Project Tools ---
@@ -95,7 +96,12 @@ export function registerWorkspaceTools({ server, services, auth }: McpToolContex
     const cards = await services.cardService.listPage({ board_id }, {}, auth);
 
     return {
-      content: [{ type: 'text', text: JSON.stringify({ ...board, columns, cards: cards.items, card_page: cards.page }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({
+        ...board,
+        columns,
+        cards: cards.items.map(withCardWebUrl),
+        card_page: cards.page,
+      }, null, 2) }],
     };
   }));
 

@@ -12,6 +12,7 @@ import { registerDocumentTools } from './tools/document.tools.js';
 import { registerAgentTools } from './tools/agent.tools.js';
 import { registerKnowledgeTools } from './tools/knowledge.tools.js';
 import { registerRoleTools } from './tools/role.tools.js';
+import { cardLinkInstructions } from './card-links.js';
 
 const z = zod;
 type InternalMcpServer = {
@@ -428,9 +429,12 @@ export type { Services } from '../shared/services.js';
 
 
 export function createMcpServer(services: Services, req?: Request, auth: AuthContext = OPEN_AUTH_CONTEXT): McpServer {
+  const linkedCardGuidance = cardLinkInstructions();
   const server = new McpServer({
     name: 'muster',
     version: '1.0.0',
+  }, {
+    instructions: linkedCardGuidance,
   });
   installMcpPermissionBoundary(server, auth);
 
@@ -444,6 +448,9 @@ export function createMcpServer(services: Services, req?: Request, auth: AuthCon
           text: `# Muster — Standard Operating Protocol
 
 All AI agents and human operators collaborating within Muster must follow this protocol:
+
+**Linked Card References & Instance URL**:
+   - ${linkedCardGuidance}
 
 1. **Identity Lookup, Re-Binding & Status**:
    - Upon connecting, call \`list_agents\` to check if an existing identity (or UI pre-registration like \`antigravity-client\`) exists.

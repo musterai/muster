@@ -21,10 +21,16 @@ export function useAppDialogController() {
     token: number;
   } | null>(null);
   const newCardTokenRef = useRef(0);
+  const openCardTokenRef = useRef(0);
 
   const requestNewCard = useCallback((columnId?: string) => {
     newCardTokenRef.current += 1;
     setNewCardRequest({ columnId, token: newCardTokenRef.current });
+  }, []);
+
+  const requestOpenCard = useCallback((cardId: string) => {
+    openCardTokenRef.current += 1;
+    setOpenCardRequest({ cardId, token: openCardTokenRef.current });
   }, []);
 
   return {
@@ -51,5 +57,6 @@ export function useAppDialogController() {
     openCardRequest,
     setOpenCardRequest,
     requestNewCard,
+    requestOpenCard,
   };
 }

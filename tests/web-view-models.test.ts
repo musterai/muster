@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildAppPath, parseAppLocation } from '../src/web/navigation.js';
+import { cardWebPath, cardWebUrl } from '../src/shared/card-url.js';
 import { buildDisplayColumns, cardMatchesDisplayColumn, resolveCardDrop, resolveTargetColumnId } from '../src/web/kanban-view.js';
 import type { Board, Card, Column } from '../src/web/types.js';
 
@@ -20,6 +21,16 @@ describe('browser view models', () => {
     expect(parseAppLocation('/projects/muster/docs/doc-1').docId).toBe('doc-1');
     expect(parseAppLocation('/projects/muster/kb/entity-1').entityId).toBe('entity-1');
     expect(buildAppPath('muster', 'board', { boardSlug: 'development' })).toBe('/projects/muster/board/development');
+  });
+
+  it('builds and parses canonical card deep links', () => {
+    expect(cardWebPath('MUS-84')).toBe('/cards/MUS-84');
+    expect(cardWebUrl('https://muster.example.test/', 'MUS-84')).toBe('https://muster.example.test/cards/MUS-84');
+    expect(parseAppLocation('/cards/MUS-84')).toMatchObject({
+      projectSlug: null,
+      tab: 'board',
+      cardReference: 'MUS-84',
+    });
   });
 
   it('deduplicates aggregate lanes and resolves moves to the card-owning board', () => {

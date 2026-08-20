@@ -6,12 +6,30 @@ export interface AppLocation {
   boardSlug: string | null;
   docId: string | null;
   entityId: string | null;
+  cardReference: string | null;
 }
 
 const VALID_TABS: readonly AppTab[] = ['board', 'agents', 'docs', 'activity', 'kb', 'tokens', 'admin'];
 
 export function parseAppLocation(pathname: string): AppLocation {
   const parts = pathname.split('/').filter(Boolean);
+  if (parts[0] === 'cards' && parts[1]) {
+    let cardReference = parts[1];
+    try {
+      cardReference = decodeURIComponent(cardReference);
+    } catch {
+      // Leave malformed encodings untouched; the validated API boundary will
+      // reject them without making browser route parsing throw.
+    }
+    return {
+      projectSlug: null,
+      tab: 'board',
+      boardSlug: null,
+      docId: null,
+      entityId: null,
+      cardReference,
+    };
+  }
   if (parts[0] === 'projects' && parts[1]) {
     const projectSlug = parts[1];
     const rawTab = parts[2];
@@ -22,9 +40,10 @@ export function parseAppLocation(pathname: string): AppLocation {
       boardSlug: tab === 'board' && parts[3] ? parts[3] : null,
       docId: tab === 'docs' && parts[3] ? parts[3] : null,
       entityId: tab === 'kb' && parts[3] ? parts[3] : null,
+      cardReference: null,
     };
   }
-  return { projectSlug: null, tab: 'board', boardSlug: null, docId: null, entityId: null };
+  return { projectSlug: null, tab: 'board', boardSlug: null, docId: null, entityId: null, cardReference: null };
 }
 
 export function buildAppPath(

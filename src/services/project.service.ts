@@ -104,6 +104,7 @@ All AI agents and human operators collaborating within this project must observe
 4. **Mandatory Progress Comments on Cards**:
    - Agents **MUST ALWAYS** log their progress as comments directly on the target card using \`add_comment\`.
    - Post card comments for task pickup, sub-task completions, intermediate milestones, blockers, architectural decisions, and test/verification results.
+   - Read the current Muster web origin and linked-card rule from the MCP server initialization instructions. Card tool results include a canonical \`web_url\`; use it to render every card key as a Markdown link rather than bare text.
    - Always state current work using full human-readable task titles and work summaries out loud (e.g., \`Working on Muster Task "Create authentication middleware"\`), never raw ID strings like \`Work on card #01J3K...\`.
    - When implementation is completed, move the card to a \`review\` role lane if one exists, or directly to a \`terminal\` role lane after posting verification notes.`,
       }, actorId, db, auth);

@@ -126,6 +126,8 @@ exposes `operator_override`; the server records that bypass as a distinct
 
 When working on a card, agents **MUST ALWAYS log their progress as comments directly on the target card** via `add_comment`:
 
+- **Always Link Human-Readable Card Keys**: The MCP server initialization instructions declare the current Muster web origin, and card tool results include a canonical `web_url`. In every Markdown-capable response, comment, document, or progress report, render card keys as links using that URL, for example `[MUS-84](http://localhost:6878/cards/MUS-84)`. Never present a bare key such as `MUS-84`; reserve ULIDs for tool arguments and use the human-readable key as link text.
+
 - **State Task Titles Out Loud**: Always write out the full task title and summary of work clearly (e.g. `Working on Muster Task "Create user authentication middleware"`). **Never** refer to work using raw database ID strings like `Work on card #01J3K8...` or `card #123`.
 - **Log Progress as Card Comments**: As you work, you **MUST ALWAYS** post comments on the card using `add_comment` for:
   - Task pickup / work started

@@ -258,7 +258,16 @@ export class CardService {
    * and the frontend — accepts either form without duplicating the lookup.
    */
   async getById(idOrKey: string, db: DatabaseAdapter = this.db, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<CardDetails> {
-    const cardRows = await db.query<Card>('SELECT * FROM card WHERE id = ? OR key = ?', [idOrKey, idOrKey]);
+    const cardRows = await db.query<Card>(
+      `SELECT c.*, col.board_id AS board_id, b.name AS board_name, b.slug AS board_slug,
+              b.project_id AS project_id, p.slug AS project_slug
+       FROM card c
+       JOIN "column" col ON col.id = c.column_id
+       JOIN board b ON b.id = col.board_id
+       JOIN project p ON p.id = b.project_id
+       WHERE c.id = ? OR c.key = ?`,
+      [idOrKey, idOrKey],
+    );
     const card = cardRows[0];
     if (!card) throw new NotFoundError('Resource not found');
     await assertResourceWorkspace(db, auth, 'card', card.id);
