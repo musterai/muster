@@ -143,14 +143,14 @@ export function registerKnowledgeTools({ server, services, auth }: McpToolContex
   }));
 
   server.tool('search_knowledge', {
-    query: z.string(),
+    query: z.string().trim().min(1).max(512).describe('Meaningful search terms or a natural-language question; stop-word-only queries are rejected'),
     kb_id: z.string().optional(),
     project_id: z.string().optional(),
     cursor: z.string().min(1).max(2048).regex(/^[A-Za-z0-9_-]+$/).optional(),
     limit: z.number().int().min(1).max(100).optional(),
   }, withPermission('search_knowledge', auth, async ({ query, kb_id, project_id, cursor, limit }) => {
     const results = await services.kbService.searchKnowledgePage(query, kb_id ? [kb_id] : undefined, { cursor, limit }, project_id, auth);
-    return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    return mcpJson(results);
   }));
 
   server.tool('get_entity_knowledge', {

@@ -5,6 +5,7 @@ const files = {
   entry: 'assets/index-abc.js',
   board: 'assets/KanbanBoard-abc.js',
   knowledge: 'assets/KnowledgeBase-abc.js',
+  connections: 'assets/KnowledgeConnections-abc.js',
   agents: 'assets/AgentGrid-abc.js',
   graph: 'assets/vendor-graph-abc.js',
 };
@@ -27,6 +28,13 @@ function fixture() {
     'components/KnowledgeBase.tsx': {
       file: files.knowledge,
       src: 'components/KnowledgeBase.tsx',
+      isDynamicEntry: true,
+      imports: [],
+      dynamicImports: ['components/KnowledgeConnections.tsx'],
+    },
+    'components/KnowledgeConnections.tsx': {
+      file: files.connections,
+      src: 'components/KnowledgeConnections.tsx',
       isDynamicEntry: true,
       imports: ['_vendor-graph.js'],
     },
@@ -61,7 +69,8 @@ function fixture() {
     chunks: [
       chunk(files.entry, 'index', 'index.html', ['main.tsx'], [], [files.board, files.knowledge, files.agents], true),
       chunk(files.board, 'KanbanBoard', 'components/KanbanBoard.tsx', ['components/KanbanBoard.tsx']),
-      chunk(files.knowledge, 'KnowledgeBase', 'components/KnowledgeBase.tsx', ['components/KnowledgeBase.tsx'], [files.graph]),
+      chunk(files.knowledge, 'KnowledgeBase', 'components/KnowledgeBase.tsx', ['components/KnowledgeBase.tsx'], [], [files.connections]),
+      chunk(files.connections, 'KnowledgeConnections', 'components/KnowledgeConnections.tsx', ['components/KnowledgeConnections.tsx'], [files.graph]),
       chunk(files.agents, 'AgentGrid', 'components/AgentGrid.tsx', ['components/AgentGrid.tsx']),
       chunk(files.graph, 'vendor-graph', null, [
         'node_modules/vis-data/peer/esm/vis-data.mjs',
@@ -88,7 +97,7 @@ function fixture() {
           'node_modules/uuid/',
         ],
         requiredModulePrefixes: ['node_modules/vis-network/', 'node_modules/vis-data/'],
-        allowedImporterFacades: ['components/KnowledgeBase.tsx'],
+        allowedImporterFacades: ['components/KnowledgeConnections.tsx'],
       },
     },
   };
@@ -96,6 +105,7 @@ function fixture() {
     [files.entry]: { bytes: 10, gzipBytes: 10 },
     [files.board]: { bytes: 20, gzipBytes: 20 },
     [files.knowledge]: { bytes: 20, gzipBytes: 20 },
+    [files.connections]: { bytes: 20, gzipBytes: 20 },
     [files.agents]: { bytes: 20, gzipBytes: 20 },
     [files.graph]: { bytes: 500, gzipBytes: 500 },
   };
@@ -139,7 +149,7 @@ describe('frontend bundle budget provenance', () => {
     board.imports.push(files.graph);
     data.manifest['components/KanbanBoard.tsx'].imports.push('_vendor-graph.js');
     const failures = checkBundleBudget(data).failures.join('\n');
-    expect(failures).toMatch(/importers must be exactly components\/KnowledgeBase\.tsx/);
+    expect(failures).toMatch(/importers must be exactly components\/KnowledgeConnections\.tsx/);
     expect(failures).toMatch(/reachable from the default startup route/);
   });
 

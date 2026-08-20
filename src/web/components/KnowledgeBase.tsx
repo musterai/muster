@@ -1,5 +1,5 @@
 // File: src/web/components/KnowledgeBase.tsx
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { lazy, useState, useEffect, useMemo, useRef } from 'react';
 import {
   KnowledgeBase as KBType,
   KBFact,
@@ -15,11 +15,12 @@ import {
   Project
 } from '../types.js';
 import { api } from '../api.js';
-import { KnowledgeGraphCanvas } from './KnowledgeGraphCanvas.js';
-import { KnowledgeEntityRelationList } from './KnowledgeEntityRelationList.js';
 import { AccessibleDialog } from './AccessibleDialog.js';
+import { LazyBoundary } from './LazyBoundary.js';
 import { parseKnowledgeUrl, updateKnowledgeBrowserLocation, type KnowledgeUrlState } from '../navigation.js';
-import { BookOpen, Plus, PlusCircle, Pencil, Trash2, X, Search, Filter, Network, ChevronRight, CircleAlert } from 'lucide-react';
+import { BookOpen, Plus, PlusCircle, Pencil, Trash2, X, Search, Filter, Network, ChevronRight, CircleAlert, SlidersHorizontal, Sparkles, ArrowUpRight, Link2 } from 'lucide-react';
+
+const LazyKnowledgeConnections = lazy(() => import('./KnowledgeConnections.js'));
 
 interface KnowledgeBaseProps {
   currentProject: Project | null;
@@ -46,6 +47,33 @@ const EMPTY_OVERVIEW: KBKnowledgeOverview = {
 
 const NO_PROJECT_SCOPE = '__no_project__';
 const EXPLORE_PAGE_SIZE = 24;
+const QUESTION_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'can', 'could', 'do', 'does', 'for', 'how', 'in',
+  'is', 'it', 'of', 'on', 'please', 'tell', 'that', 'the', 'to', 'what',
+  'when', 'where', 'which', 'who', 'why', 'with', 'would',
+]);
+
+/** Keep question-shaped searches useful on the current keyword endpoint. */
+function normalizeKnowledgeQuery(value: string): string {
+  const terms = value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_-]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((term) => !QUESTION_WORDS.has(term));
+  return (terms.length ? terms : value.trim().split(/\s+/).filter(Boolean)).join(' ');
+}
+
+function displayKnowledgeType(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function formatKnowledgeDate(value?: string): string {
+  if (!value) return 'Date unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Date unknown' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
 
 function isAbortError(error: unknown): boolean {
   return (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError')
@@ -137,6 +165,8 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
   );
   const [selectedKbId, setSelectedKbId] = useState<string>(initialKnowledgeUrl.scope);
   const [viewMode, setViewMode] = useState<KnowledgeUrlState['view']>(initialKnowledgeUrl.view);
+  const [browseOpen, setBrowseOpen] = useState<boolean>(initialKnowledgeUrl.view !== 'explore');
+  const [showConnections, setShowConnections] = useState<boolean>(initialKnowledgeUrl.view === 'graph');
 
   const [searchQuery, setSearchQuery] = useState<string>(initialKnowledgeUrl.query);
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState<string>('');
@@ -381,7 +411,7 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
     const controller = new AbortController();
     dataAbortRef.current = controller;
     const scope = selectedScope();
-    const search = debouncedSearchQuery.trim();
+    const search = normalizeKnowledgeQuery(debouncedSearchQuery);
     const kbIdFilter = selectedKbId === 'all' ? undefined : selectedKbId;
     const scopedKbs = kbIdFilter ? kbs.filter(kb => kb.id === kbIdFilter) : kbs;
     const scopeCacheKey = scope
@@ -562,6 +592,8 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
       const next = parseKnowledgeUrl(window.location.search);
       setSelectedKbId(next.scope);
       setViewMode(next.view);
+      setBrowseOpen(next.view === 'facts' || next.view === 'entities');
+      setShowConnections(next.view === 'graph');
       setSearchQuery(next.query);
       setCategoryFilter(next.category);
       setEntityTypeFilter(next.entityType);
@@ -584,6 +616,7 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
     const entityId = initialEntityId || urlState.entityId;
     if (entityId) {
       setViewMode(urlState.view === 'explore' ? 'graph' : urlState.view);
+      setShowConnections(true);
       void loadContextData(entityId);
     }
   }, [initialEntityId]);
@@ -611,7 +644,7 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
 
   const handleAddFact = async (e: React.FormEvent) => {
     e.preventDefault();
-    const targetKbId = selectedKbId !== 'all' ? selectedKbId : (selectedEntity?.entity.kb_id || kbs[0]?.id);
+    const targetKbId = selectedKbId !== 'all' ? selectedKbId : (selectedEntity?.entity.kb_id || context?.root.knowledge_base.id || kbs[0]?.id);
     if (!targetKbId || !newFactTitle.trim() || !newFactContent.trim()) return;
 
     try {
@@ -753,6 +786,8 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
 
   const handleSelectGraphNode = async (node: KBGraphNode) => {
     setViewMode('graph');
+    setShowConnections(true);
+    setBrowseOpen(false);
     setContextDepth(1);
     updateKnowledgeUrl({ view: 'graph', entityId: node.id, factId: null, depth: 1 }, false);
     if (onSelectEntity) onSelectEntity(node.id);
@@ -762,6 +797,7 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
   const handleCloseInspector = () => {
     setSelectedEntity(null);
     setContext(null);
+    setGraphTree(EMPTY_GRAPH_TREE);
     updateKnowledgeUrl({ entityId: null }, true);
     if (onSelectEntity) {
       onSelectEntity(null);
@@ -771,20 +807,34 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
 
   const handleAddRelation = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedEntity || !relTargetEntityId) return;
+    const sourceEntity = selectedEntity?.entity || (context ? {
+      id: context.root.id,
+      kb_id: context.root.knowledge_base.id,
+      name: context.root.name,
+      type: context.root.type,
+      identifier: context.root.identifier,
+      metadata: {},
+      created_at: '',
+      updated_at: '',
+    } : null);
+    if (!sourceEntity || !relTargetEntityId) return;
 
     try {
       await api.addRelation({
-        kb_id: selectedEntity.entity.kb_id,
-        source_entity_id: selectedEntity.entity.id,
+        kb_id: sourceEntity.kb_id,
+        source_entity_id: sourceEntity.id,
         target_entity_id: relTargetEntityId,
         relation_type: relType,
         description: relDesc || undefined,
       });
       setShowAddRelationModal(false);
       setRelDesc('');
-      const updated = await api.getEntityKnowledge(selectedEntity.entity.id, selectedEntity.entity.kb_id);
-      setSelectedEntity(updated);
+      if (selectedEntity) {
+        const updated = await api.getEntityKnowledge(sourceEntity.id, sourceEntity.kb_id);
+        setSelectedEntity(updated);
+      } else {
+        await loadContextData(sourceEntity.id, sourceEntity.kb_id, context?.depth || 1);
+      }
       await refreshData();
     } catch (err) {
       console.error('Failed to add relation:', err);
@@ -794,6 +844,10 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
   const handleSelectEntitySummary = (entity: KBEntitySummary | KBGraphNode) => {
     const kbId = 'kb_id' in entity ? entity.kb_id : entity.knowledge_base.id;
     setViewMode('entities');
+    // Browsing is the discovery surface; once a subject is chosen, collapse it
+    // so its evidence drawer is immediately useful without another click.
+    setBrowseOpen(false);
+    setShowConnections(false);
     setContextDepth(1);
     updateKnowledgeUrl({ view: 'entities', entityId: entity.id, factId: null, depth: 1 }, false);
     if (onSelectEntity) onSelectEntity(entity.id);
@@ -810,6 +864,8 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
 
   const handleChangeView = (nextView: KnowledgeUrlState['view']) => {
     setViewMode(nextView);
+    setBrowseOpen(nextView === 'facts' || nextView === 'entities');
+    setShowConnections(nextView === 'graph');
     updateKnowledgeUrl({ view: nextView }, false);
     if (nextView === 'entities') {
       const scope = selectedScope();
@@ -822,6 +878,8 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
     setSelectedEntity(null);
     setContext(null);
     setSelectedFact(null);
+    setShowConnections(false);
+    setBrowseOpen(false);
     updateKnowledgeUrl({ scope, entityId: null, factId: null }, false);
     if (onSelectEntity) onSelectEntity(null);
   };
@@ -851,7 +909,6 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
   }));
 
   const activeFactDetail = selectedFact ? facts.find((fact) => fact.id === selectedFact.id) : null;
-  const scopeLabel = selectedKbId === 'all' ? 'All Linked & Global' : kbs.find((kb) => kb.id === selectedKbId)?.name || 'Knowledge base';
   const contextInspectorEntity: KBEntity | null = context ? {
     id: context.root.id,
     kb_id: context.root.knowledge_base.id,
@@ -863,7 +920,91 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
     updated_at: '',
   } : null;
   const contextInspectorFacts = context?.facts.items.map(summaryAsFact) ?? [];
-  const contextNodeNames = new Map(displayedGraph.nodes.map((node) => [node.id, node.name]));
+  const projectSummaries = exploreFactSummaries.filter((summary) => !kbs.find((kb) => kb.id === summary.knowledge_base.id)?.is_global);
+  const sharedSummaries = exploreFactSummaries.filter((summary) => Boolean(kbs.find((kb) => kb.id === summary.knowledge_base.id)?.is_global));
+  const detailEntity = contextInspectorEntity || selectedEntity?.entity || null;
+  const detailFacts = selectedEntity?.facts || contextInspectorFacts;
+  const hasContext = Boolean(context || selectedEntity || displayedGraph.nodes.length > 0);
+
+  const handleShowConnections = () => {
+    const entityId = context?.root.id || selectedEntity?.entity.id;
+    if (!entityId) return;
+    setShowConnections(true);
+    setBrowseOpen(false);
+    setViewMode('graph');
+    updateKnowledgeUrl({ view: 'graph', entityId, depth: context?.depth || contextDepth }, false);
+  };
+
+  const handleCloseConnections = () => {
+    setShowConnections(false);
+    setViewMode('explore');
+    updateKnowledgeUrl({ view: 'explore' }, true);
+  };
+
+  const handleOpenSummaryEntity = (summary: KBFactBrowseSummary) => {
+    if (!summary.entity) return;
+    const matchingEntity = displayedEntities.find((entity) => entity.id === summary.entity?.id);
+    handleSelectEntitySummary(matchingEntity || {
+      id: summary.entity.id,
+      name: summary.entity.name,
+      type: summary.entity.type,
+      identifier: summary.entity.identifier,
+      knowledge_base: summary.knowledge_base,
+      fact_count: 0,
+      incoming_relation_count: 0,
+      outgoing_relation_count: 0,
+      created_at: summary.created_at,
+      updated_at: summary.updated_at,
+    });
+  };
+
+  const renderAnswerList = (summaries: KBFactBrowseSummary[], label: string) => (
+    summaries.length === 0 ? null : (
+      <ul className="divide-y divide-muster-border" aria-label={label}>
+        {summaries.map((summary) => (
+          <li key={summary.id} className="group flex min-w-0 items-stretch gap-2 py-1">
+            <button
+              type="button"
+              onClick={() => void handleSelectFact(summary)}
+              className="flex min-w-0 flex-1 items-start gap-3 rounded-md px-2 py-3 text-left outline-none transition-colors hover:bg-muster-surface-hover focus-visible:bg-muster-surface-hover"
+            >
+              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-muster-border text-[10px] font-bold uppercase muster-accent" aria-hidden="true">
+                {summary.category.slice(0, 1)}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="truncate text-sm font-semibold muster-text-primary">{summary.title}</span>
+                  {summary.source && <span className="muster-badge muster-badge-success normal-case tracking-normal">Sourced</span>}
+                </span>
+                <span className="mt-1 block line-clamp-2 text-xs leading-relaxed muster-text-secondary">{summary.excerpt}</span>
+                <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] muster-text-muted">
+                  <span>{summary.knowledge_base.name}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{displayKnowledgeType(summary.category)}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{Math.round(summary.confidence * 100)}% confidence</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{formatKnowledgeDate(summary.updated_at || summary.created_at)}</span>
+                </span>
+              </span>
+              <ArrowUpRight className="mt-1 h-4 w-4 shrink-0 muster-text-faint" aria-hidden="true" />
+            </button>
+            {summary.entity && (
+              <button
+                type="button"
+                className="muster-btn muster-btn-ghost my-2 mr-1 max-w-[9rem] shrink-0 self-start px-2 text-left text-[11px]"
+                onClick={() => handleOpenSummaryEntity(summary)}
+                title={`Open subject ${summary.entity.name}`}
+              >
+                <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="truncate">{summary.entity.name}</span>
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+    )
+  );
 
   const categoryOptions = (
     <>
@@ -878,113 +1019,129 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden p-2 sm:gap-4 sm:p-6">
-      <div className="muster-panel flex flex-col gap-3 p-3.5 sm:p-4 md:flex-row md:items-center md:justify-between">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="muster-accent-bg muster-accent shrink-0 rounded-md border p-2 sm:p-2.5">
-            <BookOpen className="h-5 w-5 sm:h-6 sm:w-6" />
+      <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto" aria-labelledby="knowledge-home-title">
+        <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="muster-accent-bg muster-accent shrink-0 rounded-md border p-2.5" aria-hidden="true">
+              <BookOpen className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] muster-accent">Knowledge</p>
+              <h1 id="knowledge-home-title" className="mt-1 text-xl font-bold tracking-tight muster-text-primary sm:text-2xl">What do you need to know?</h1>
+              <p className="mt-1 max-w-2xl text-xs leading-relaxed muster-text-secondary sm:text-sm">Ask a question, scan the project ledger, or open evidence and connections when you need more context.</p>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-bold tracking-tight muster-text-primary sm:text-xl">Knowledge Base Explore</h1>
-            <p className="text-[11px] muster-text-muted sm:text-xs">Find the fact, entity, or context that answers the operational question.</p>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <label htmlFor="knowledge-home-scope" className="sr-only">Knowledge scope</label>
+            <select id="knowledge-home-scope" value={selectedKbId} onChange={(event) => handleScopeChange(event.target.value)} className="muster-input min-h-[44px] w-auto max-w-full cursor-pointer text-xs font-medium sm:text-sm">
+              <option value="all">This project + shared knowledge</option>
+              {kbs.map((kb: KBType) => <option key={kb.id} value={kb.id}>{kb.name}{kb.is_global ? ' · Shared' : ''}</option>)}
+            </select>
+            <button type="button" onClick={() => setShowCreateKbModal(true)} className="muster-btn muster-btn-secondary min-h-[44px] text-xs"><Plus className="h-3.5 w-3.5" />Manage</button>
+            <button type="button" onClick={() => setShowAddFactModal(true)} className="muster-btn muster-btn-primary min-h-[44px] text-xs"><PlusCircle className="h-3.5 w-3.5" />Add knowledge</button>
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <label htmlFor="knowledge-scope" className="sr-only">Knowledge scope</label>
-          <select id="knowledge-scope" value={selectedKbId} onChange={(event) => handleScopeChange(event.target.value)} className="muster-input w-auto max-w-full cursor-pointer py-1.5 text-xs font-medium sm:text-sm">
-            <option value="all">All Linked &amp; Global KBs</option>
-            {kbs.map((kb: KBType) => <option key={kb.id} value={kb.id}>{kb.name}{kb.is_global ? ' (Global)' : ''}</option>)}
-          </select>
-          <button type="button" onClick={() => setShowCreateKbModal(true)} className="muster-btn muster-btn-secondary text-xs"><Plus className="h-3.5 w-3.5" />New KB</button>
-          <button type="button" onClick={() => setShowAddFactModal(true)} className="muster-btn muster-btn-primary text-xs"><PlusCircle className="h-3.5 w-3.5" />Add Knowledge</button>
-        </div>
-      </div>
+        </header>
 
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative min-w-0 flex-1 sm:max-w-xl">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 muster-text-muted" aria-hidden="true" />
-          <label htmlFor="knowledge-search" className="sr-only">Search knowledge</label>
-          <input id="knowledge-search" type="text" placeholder="Search facts, IPs, hosts, emails, or entities…" value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); updateKnowledgeUrl({ query: event.target.value }, true); }} className="muster-input w-full py-2 pl-9 text-xs font-medium sm:text-sm" />
-        </div>
-        <div className="muster-segmented self-start overflow-x-auto sm:self-auto" role="tablist" aria-label="Knowledge view">
-          {(['explore', 'facts', 'entities', 'graph'] as const).map((tab) => (
-            <button key={tab} type="button" role="tab" aria-selected={viewMode === tab} onClick={() => handleChangeView(tab)} className="muster-segmented-item min-h-[44px] whitespace-nowrap text-xs">
-              {tab === 'explore' ? 'Explore' : tab[0].toUpperCase() + tab.slice(1)} {tab === 'facts' ? `(${overview?.totals.facts ?? displayedFactSummaries.length})` : tab === 'entities' ? `(${overview?.totals.entities ?? displayedEntities.length})` : tab === 'graph' ? `(${displayedGraph.nodes.length})` : ''}
+        <section className="muster-panel muster-accent-border p-3 sm:p-4" aria-labelledby="knowledge-question-title">
+          <div className="flex items-center gap-2 text-xs font-semibold muster-text-primary">
+            <Sparkles className="h-4 w-4 muster-accent" aria-hidden="true" />
+            <h2 id="knowledge-question-title">Ask the knowledge base</h2>
+          </div>
+          <div className="relative mt-3">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 muster-text-muted" aria-hidden="true" />
+            <label htmlFor="knowledge-home-search" className="sr-only">Ask what the team knows</label>
+            <input
+              id="knowledge-home-search"
+              type="text"
+              placeholder="Ask what the team knows…"
+              value={searchQuery}
+              onChange={(event) => { setSearchQuery(event.target.value); updateKnowledgeUrl({ query: event.target.value }, true); }}
+              onKeyDown={(event) => { if (event.key === 'Escape' && searchQuery) { setSearchQuery(''); updateKnowledgeUrl({ query: '' }, true); } }}
+              className="muster-input muster-input-lg w-full pl-10 pr-10 text-sm"
+            />
+            {searchQuery && (
+              <button type="button" className="muster-btn muster-btn-icon muster-btn-ghost absolute right-1 top-1/2 -translate-y-1/2" aria-label="Clear knowledge question" onClick={() => { setSearchQuery(''); updateKnowledgeUrl({ query: '' }, true); }}>
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] muster-text-muted">
+            <span>{overview?.totals.facts ?? '—'} answers in scope</span>
+            <span aria-hidden="true">·</span>
+            <span>{overview?.totals.entities ?? '—'} subjects</span>
+            <span aria-hidden="true">·</span>
+            <span>{overview?.totals.relations ?? '—'} connections</span>
+            {factsLoading && <span role="status" aria-live="polite" className="muster-accent">Updating answers…</span>}
+          </div>
+        </section>
+
+        {kbsError && <div role="alert" className="muster-badge muster-badge-danger flex w-full items-center justify-between gap-3 p-3 text-xs normal-case tracking-normal"><span>Knowledge bases could not be loaded: {kbsError}</span><button type="button" onClick={() => void loadKBs(false)} className="muster-btn muster-btn-danger-soft text-xs">Retry</button></div>}
+        {browseError && <div role="alert" className="muster-badge muster-badge-danger flex items-center gap-2 p-3 text-xs normal-case tracking-normal"><CircleAlert className="h-4 w-4 shrink-0" aria-hidden="true" />{browseError}<button type="button" onClick={() => void refreshData()} className="muster-btn muster-btn-secondary ml-auto text-xs">Retry</button></div>}
+        {factsError && displayedFactSummaries.length > 0 && <div role="status" className="muster-badge muster-badge-warning p-3 text-xs normal-case tracking-normal">{factsError} Showing the answers that loaded successfully.</div>}
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold muster-text-primary">{searchQuery.trim() ? `Answers for “${searchQuery.trim()}”` : 'Project knowledge'}</h2>
+            <p className="mt-1 text-xs muster-text-muted">{searchQuery.trim() ? 'Concise answers first. Open one for evidence.' : 'Relevant knowledge first, with shared material clearly marked.'}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" className={`muster-btn min-h-[40px] text-xs ${browseOpen ? 'muster-btn-soft' : 'muster-btn-secondary'}`} aria-expanded={browseOpen} onClick={() => { setBrowseOpen((open) => !open); if (!browseOpen) setViewMode('facts'); }}>
+              <SlidersHorizontal className="h-3.5 w-3.5" />Browse &amp; filters
             </button>
-          ))}
+            {hasContext && <button type="button" className="muster-btn muster-btn-secondary min-h-[40px] text-xs" onClick={handleShowConnections}><Network className="h-3.5 w-3.5" />Show connections</button>}
+          </div>
         </div>
-      </div>
 
-      {kbsError && <div role="alert" className="muster-badge muster-badge-danger flex w-full items-center justify-between gap-3 p-3 text-xs normal-case tracking-normal"><span>Knowledge bases could not be loaded: {kbsError}</span><button type="button" onClick={() => void loadKBs(false)} className="muster-btn muster-btn-danger-soft text-xs">Retry</button></div>}
-      {(kbsLoading || factsLoading || entitiesLoading || contextLoading) && <div role="status" aria-live="polite" className="muster-badge muster-badge-info w-fit text-xs normal-case tracking-normal">Loading {kbsLoading ? 'knowledge bases' : factsLoading ? 'knowledge summaries' : entitiesLoading ? 'entities' : 'entity context'}…</div>}
-
-      {overview && (
-        <div className="muster-panel flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2.5 text-xs" aria-label={`${scopeLabel} knowledge overview`}>
-          <span className="font-semibold muster-text-primary">{overview.totals.facts} facts</span>
-          <span className="muster-text-faint" aria-hidden="true">·</span>
-          <span className="muster-text-secondary">{overview.totals.entities} entities</span>
-          <span className="muster-text-faint" aria-hidden="true">·</span>
-          <span className="muster-text-secondary">{overview.totals.relations} relations</span>
-          <span className="muster-text-faint" aria-hidden="true">·</span>
-          <button
-            type="button"
-            className="muster-btn muster-btn-ghost min-h-0 px-1 py-0.5 text-xs"
-            onClick={() => {
-              setAttachedFilter('unattached');
-              setFiltersExpanded(true);
-              updateKnowledgeUrl({ attached: 'unattached' }, true);
-            }}
-          >
-            {overview.totals.unattached_facts} need linking
-          </button>
-        </div>
-      )}
-
-      <details
-        className="group"
-        open={filtersExpanded}
-        onToggle={(event) => setFiltersExpanded(event.currentTarget.open)}
-      >
-        <summary className="flex min-h-[40px] cursor-pointer list-none items-center gap-2 rounded-md px-1 py-1 text-xs font-semibold muster-text-muted outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-400 [&::-webkit-details-marker]:hidden">
-          <Filter className="h-3.5 w-3.5" aria-hidden="true" />
-          <span>Refine results</span>
-          {([categoryFilter, entityTypeFilter, attachedFilter !== 'all' ? attachedFilter : '', sourceFilter !== 'all' ? sourceFilter : ''].filter(Boolean).length > 0) && <span className="muster-badge muster-badge-accent normal-case tracking-normal">{[categoryFilter, entityTypeFilter, attachedFilter !== 'all' ? attachedFilter : '', sourceFilter !== 'all' ? sourceFilter : ''].filter(Boolean).length} active</span>}
-          <ChevronRight className="ml-auto h-4 w-4 transition-transform group-open:rotate-90" aria-hidden="true" />
-        </summary>
-        <div className="flex flex-wrap items-center gap-2 pb-1 pt-2" aria-label="Knowledge filters">
-          <label htmlFor="knowledge-category" className="sr-only">Category</label>
-          <select id="knowledge-category" value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); updateKnowledgeUrl({ category: event.target.value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="">All categories</option>{(overview?.facets.categories.items ?? []).map((facet) => <option key={facet.value} value={facet.value}>{facet.label || facet.value} ({facet.count})</option>)}{!overview && categoryOptions}</select>
-          <label htmlFor="knowledge-entity-type" className="sr-only">Entity type</label>
-          <select id="knowledge-entity-type" value={entityTypeFilter} onChange={(event) => { setEntityTypeFilter(event.target.value); updateKnowledgeUrl({ entityType: event.target.value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="">All entity types</option>{(overview?.facets.entity_types.items ?? []).map((facet) => <option key={facet.value} value={facet.value}>{facet.label || facet.value} ({facet.count})</option>)}</select>
-          <label htmlFor="knowledge-attached" className="sr-only">Attachment</label>
-          <select id="knowledge-attached" value={attachedFilter} onChange={(event) => { const value = event.target.value as KnowledgeUrlState['attached']; setAttachedFilter(value); updateKnowledgeUrl({ attached: value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="all">Attached: all</option><option value="attached">Attached only</option><option value="unattached">Unattached only</option></select>
-          <label htmlFor="knowledge-source" className="sr-only">Source</label>
-          <select id="knowledge-source" value={sourceFilter} onChange={(event) => { const value = event.target.value as KnowledgeUrlState['hasSource']; setSourceFilter(value); updateKnowledgeUrl({ hasSource: value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="all">Source: all</option><option value="with-source">With source</option><option value="without-source">Without source</option></select>
-        </div>
-      </details>
-
-      {browseError && <div role="alert" className="muster-badge muster-badge-danger flex items-center gap-2 p-3 text-xs normal-case tracking-normal"><CircleAlert className="h-4 w-4 shrink-0" aria-hidden="true" />{browseError}<button type="button" onClick={() => void refreshData()} className="muster-btn muster-btn-secondary ml-auto text-xs">Retry</button></div>}
-      {factsError && displayedFactSummaries.length > 0 && <div role="status" className="muster-badge muster-badge-warning p-3 text-xs normal-case tracking-normal">{factsError} Showing the successfully loaded facts.</div>}
-
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        {viewMode === 'explore' && (
-          <div className={selectedFact ? 'grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(280px,360px)]' : ''}>
-            <section className="muster-panel min-w-0 p-3 sm:p-4" aria-labelledby="knowledge-explore-title">
-              <div className="mb-3 flex items-center justify-between gap-2"><div><h2 id="knowledge-explore-title" className="text-sm font-semibold muster-text-primary">Explore {scopeLabel}</h2><p className="mt-0.5 text-xs muster-text-muted">A quick scan of recent knowledge. Open a row for full detail.</p></div><span className="text-xs muster-text-faint">{exploreFactSummaries.length}{overview && overview.totals.facts > exploreFactSummaries.length ? ` of ${overview.totals.facts}` : ''} shown</span></div>
-              {factsLoading ? <div className="py-16 text-center" role="status"><p className="text-sm muster-text-muted">Loading knowledge summaries…</p></div> : factsError && exploreFactSummaries.length === 0 ? <div className="py-10 text-center" role="alert"><p className="text-sm muster-text-danger">{factsError}</p><button type="button" onClick={() => void refreshData()} className="muster-btn muster-btn-secondary mt-3 text-xs">Retry</button></div> : exploreFactSummaries.length === 0 ? <div className="py-16 text-center"><p className="text-sm font-medium muster-text-muted">No facts match this scope and filter set.</p><p className="mt-1 text-xs muster-text-muted">Try clearing a filter or add a new operational learning.</p></div> : <ul className="divide-y divide-muster-border" aria-label="Knowledge stream">{exploreFactSummaries.map((summary) => <li key={summary.id}><button type="button" onClick={() => void handleSelectFact(summary)} className="group flex min-h-[76px] w-full min-w-0 items-start gap-3 px-1 py-3 text-left outline-none transition-colors hover:bg-muster-hover focus-visible:bg-muster-hover"><span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-muster-border text-[10px] font-bold uppercase muster-accent" aria-hidden="true">{summary.category.slice(0, 1)}</span><span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-x-2 gap-y-1"><span className="truncate text-sm font-semibold muster-text-primary">{summary.title}</span>{summary.entity && <span className="muster-chip max-w-[160px] truncate">{summary.entity.name}</span>}</span><span className="mt-1 block line-clamp-2 text-xs leading-relaxed muster-text-secondary">{summary.excerpt}</span><span className="mt-1.5 block text-[11px] muster-text-muted">{summary.knowledge_base.name} · {Math.round(summary.confidence * 100)}% confidence · {new Date(summary.updated_at || summary.created_at).toLocaleDateString()}</span></span><ChevronRight className="mt-1 h-4 w-4 shrink-0 muster-text-faint transition-transform group-hover:translate-x-0.5" aria-hidden="true" /></button></li>)}</ul>}
+        {!browseOpen && !showConnections && (
+          <div className={selectedFact || detailEntity ? 'grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,380px)]' : ''}>
+            <section className="muster-panel min-w-0 p-3 sm:p-4" aria-labelledby="knowledge-answers-title">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h3 id="knowledge-answers-title" className="text-xs font-semibold uppercase tracking-[0.14em] muster-text-muted">Answer ledger</h3>
+                <span className="text-xs muster-text-faint">{exploreFactSummaries.length}{overview && overview.totals.facts > exploreFactSummaries.length ? ` of ${overview.totals.facts}` : ''} shown</span>
+              </div>
+              {factsLoading && exploreFactSummaries.length === 0 ? <div className="space-y-3 py-3" role="status" aria-live="polite">{[1, 2, 3].map((item) => <div key={item} className="animate-pulse border-b border-muster-border py-4"><div className="h-3 w-2/3 rounded bg-muster-surface-hover" /><div className="mt-2 h-2 w-full rounded bg-muster-surface-hover" /><div className="mt-2 h-2 w-1/2 rounded bg-muster-surface-hover" /></div>)}</div> : factsError && exploreFactSummaries.length === 0 ? <div className="py-10 text-center" role="alert"><p className="text-sm muster-text-danger">{factsError}</p><button type="button" onClick={() => void refreshData()} className="muster-btn muster-btn-secondary mt-3 text-xs">Retry</button></div> : exploreFactSummaries.length === 0 ? <div className="py-12 text-center"><BookOpen className="mx-auto h-7 w-7 muster-text-faint" aria-hidden="true" /><p className="mt-2 text-sm font-medium muster-text-primary">{searchQuery.trim() ? 'No answers match this question' : 'No knowledge has been added yet'}</p><p className="mt-1 text-xs muster-text-muted">{searchQuery.trim() ? 'Try a few meaningful terms, or clear the question to browse.' : 'Add the first operational learning for this project.'}</p>{searchQuery.trim() ? <button type="button" className="muster-btn muster-btn-secondary mt-3 text-xs" onClick={() => { setSearchQuery(''); updateKnowledgeUrl({ query: '' }, true); }}>Clear question</button> : <button type="button" className="muster-btn muster-btn-primary mt-3 text-xs" onClick={() => setShowAddFactModal(true)}>Add knowledge</button>}</div> : (
+                <>
+                  {projectSummaries.length > 0 && <div className="mb-1"><p className="px-2 py-2 text-[11px] font-semibold uppercase tracking-[0.14em] muster-accent">Project knowledge</p>{renderAnswerList(projectSummaries, 'Project knowledge answers')}</div>}
+                  {sharedSummaries.length > 0 && <div className="mt-3"><p className="border-t border-muster-border px-2 py-3 text-[11px] font-semibold uppercase tracking-[0.14em] muster-text-muted">Shared knowledge</p>{renderAnswerList(sharedSummaries, 'Shared knowledge answers')}</div>}
+                </>
+              )}
             </section>
-            {selectedFact && <aside className="muster-panel min-w-0 p-3 sm:p-4" aria-labelledby="knowledge-detail-title">
-              <div className="flex items-center justify-between gap-2"><h2 id="knowledge-detail-title" className="text-sm font-semibold muster-text-primary">Fact detail</h2><button type="button" onClick={() => { setSelectedFact(null); updateKnowledgeUrl({ factId: null }, true); }} className="muster-btn muster-btn-icon muster-btn-ghost" aria-label="Close fact detail"><X className="h-4 w-4" /></button></div>
-              <div className="mt-3 space-y-3"><div><p className="text-xs font-semibold muster-text-primary">{selectedFact.title}</p><p className="mt-1 text-[11px] muster-text-muted">{selectedFact.knowledge_base.name} · {selectedFact.category}</p></div>{factDetailLoading ? <p role="status" className="text-xs muster-text-muted">Loading full fact…</p> : factDetailError ? <p role="alert" className="text-xs muster-text-danger">{factDetailError}</p> : <p className="whitespace-pre-wrap text-xs leading-relaxed muster-text-secondary">{activeFactDetail?.content || selectedFact.excerpt}</p>}{activeFactDetail && <div className="flex flex-wrap gap-2"><button type="button" onClick={() => handleOpenEditFact(activeFactDetail)} className="muster-btn muster-btn-secondary text-xs"><Pencil className="h-3.5 w-3.5" />Edit fact</button><button type="button" onClick={() => void handleDeleteFact(activeFactDetail.id)} className="muster-btn muster-btn-danger-soft text-xs"><Trash2 className="h-3.5 w-3.5" />Delete</button></div>}</div>
-            </aside>}
+
+            {selectedFact && (
+              <aside className="muster-panel muster-accent-border min-w-0 self-start p-4 lg:sticky lg:top-0" aria-labelledby="knowledge-answer-detail-title">
+                <div className="flex items-start justify-between gap-3"><div><p className="text-[11px] font-semibold uppercase tracking-[0.14em] muster-accent">Evidence</p><h3 id="knowledge-answer-detail-title" className="mt-1 text-base font-bold muster-text-primary">{selectedFact.title}</h3></div><button type="button" onClick={() => { setSelectedFact(null); updateKnowledgeUrl({ factId: null }, true); }} className="muster-btn muster-btn-icon muster-btn-ghost" aria-label="Close evidence"><X className="h-4 w-4" /></button></div>
+                <div className="mt-3 space-y-3"><div className="flex flex-wrap gap-2 text-[11px] muster-text-muted"><span className="muster-chip">{selectedFact.knowledge_base.name}</span><span>{displayKnowledgeType(selectedFact.category)}</span><span>{Math.round(selectedFact.confidence * 100)}% confidence</span></div>{factDetailLoading ? <div role="status" className="space-y-2"><div className="h-3 animate-pulse rounded bg-muster-surface-hover" /><div className="h-3 animate-pulse rounded bg-muster-surface-hover" /><div className="h-3 w-2/3 animate-pulse rounded bg-muster-surface-hover" /></div> : factDetailError ? <div role="alert" className="text-xs muster-text-danger"><p>{factDetailError}</p><button type="button" onClick={() => void handleSelectFact(selectedFact)} className="muster-btn muster-btn-secondary mt-3 text-xs">Retry</button></div> : <p className="whitespace-pre-wrap text-sm leading-relaxed muster-text-secondary">{activeFactDetail?.content || selectedFact.excerpt}</p>}<p className="text-[11px] muster-text-muted">Updated {formatKnowledgeDate(selectedFact.updated_at || selectedFact.created_at)}</p>{activeFactDetail && <div className="flex flex-wrap gap-2"><button type="button" onClick={() => handleOpenEditFact(activeFactDetail)} className="muster-btn muster-btn-secondary text-xs"><Pencil className="h-3.5 w-3.5" />Edit</button><button type="button" onClick={() => void handleDeleteFact(activeFactDetail.id)} className="muster-btn muster-btn-danger-soft text-xs"><Trash2 className="h-3.5 w-3.5" />Delete</button></div>}</div>
+              </aside>
+            )}
+
+            {!selectedFact && detailEntity && (
+              <aside className="muster-panel muster-accent-border min-w-0 self-start p-4 lg:sticky lg:top-0" aria-labelledby="knowledge-subject-detail-title">
+                <div className="flex items-start justify-between gap-3"><div><p className="text-[11px] font-semibold uppercase tracking-[0.14em] muster-accent">Subject</p><h3 id="knowledge-subject-detail-title" className="mt-1 text-base font-bold muster-text-primary">{detailEntity.name}</h3>{detailEntity.identifier && <p className="mt-1 font-mono text-xs muster-text-muted">{detailEntity.identifier}</p>}</div><button type="button" onClick={handleCloseInspector} className="muster-btn muster-btn-icon muster-btn-ghost" aria-label="Close subject detail"><X className="h-4 w-4" /></button></div>
+                <div className="mt-3 flex flex-wrap items-center gap-2"><span className="muster-badge muster-badge-neutral normal-case tracking-normal">{displayKnowledgeType(detailEntity.type)}</span><span className="muster-chip">{context?.root.knowledge_base.name || detailEntity.kb_id}</span></div>
+                <div className="mt-4 border-t border-muster-border pt-3"><h4 className="text-xs font-semibold muster-text-primary">Evidence about this subject</h4><div className="mt-2 space-y-2">{detailFacts.slice(0, 4).map((fact) => <button key={fact.id} type="button" className="block w-full rounded-md border border-muster-border p-2 text-left hover:bg-muster-surface-hover" onClick={() => void handleSelectFact(factAsSummary(fact, kbs))}><span className="block text-xs font-semibold muster-text-primary">{fact.title}</span><span className="mt-1 block line-clamp-2 text-[11px] muster-text-secondary">{fact.content}</span></button>)}{detailFacts.length === 0 && <p className="text-xs muster-text-muted">No facts are attached to this subject yet.</p>}</div></div>
+                <div className="mt-4 flex flex-wrap gap-2"><button type="button" className="muster-btn muster-btn-soft text-xs" onClick={handleShowConnections} disabled={!context}><Network className="h-3.5 w-3.5" />Show connections</button><button type="button" className="muster-btn muster-btn-secondary text-xs" onClick={() => handleOpenAddFactForEntity(detailEntity)}><PlusCircle className="h-3.5 w-3.5" />Add evidence</button><button type="button" className="muster-btn muster-btn-secondary text-xs" onClick={() => handleOpenEditEntity(detailEntity)}><Pencil className="h-3.5 w-3.5" />Edit subject</button><button type="button" className="muster-btn muster-btn-secondary text-xs" onClick={() => setShowAddRelationModal(true)} disabled={displayedEntities.filter((entity) => entity.id !== detailEntity.id).length === 0}><Link2 className="h-3.5 w-3.5" />Add connection</button></div>
+                {context && <p className="mt-2 text-[11px] muster-text-muted">{context.edges.length} visible connections · bounded to {context.depth}-hop context</p>}
+              </aside>
+            )}
           </div>
         )}
 
-        {viewMode === 'facts' && <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-labelledby="knowledge-facts-title"><h2 id="knowledge-facts-title" className="sr-only">Knowledge facts</h2>{factsLoading ? <div className="col-span-full muster-panel py-16 text-center" role="status">Loading gained knowledge…</div> : factsError && displayedFactSummaries.length === 0 ? <div className="col-span-full muster-panel px-4 py-10 text-center" role="alert"><p className="text-sm muster-text-danger">{factsError}</p><button type="button" onClick={() => void refreshData()} className="muster-btn muster-btn-secondary mt-3 text-xs">Retry</button></div> : displayedFactSummaries.length === 0 ? <div className="col-span-full muster-panel py-16 text-center"><p className="text-sm font-medium muster-text-muted">No gained knowledge facts matching search.</p><p className="mt-1 text-xs muster-text-muted">Click “Add Knowledge” above to log operational learnings.</p></div> : displayedFactSummaries.map((summary) => { const fullFact = facts.find((fact) => fact.id === summary.id); return <article key={summary.id} className="muster-panel group flex min-w-0 flex-col justify-between p-4"><button type="button" onClick={() => void handleSelectFact(summary)} className="text-left"><div className="mb-2 flex items-center justify-between gap-2"><span className="muster-badge muster-badge-accent">{summary.category}</span>{summary.entity && <span className="muster-chip max-w-[120px] truncate">{summary.entity.name}</span>}</div><h3 className="mb-1.5 text-sm font-semibold muster-text-primary">{summary.title}</h3><p className="line-clamp-5 whitespace-pre-wrap text-xs leading-relaxed muster-text-secondary">{summary.excerpt}</p></button><div className="mt-4 flex items-center justify-between border-t border-muster-border pt-3 text-[11px] muster-text-muted"><span>Confidence: {Math.round(summary.confidence * 100)}%</span><span>{new Date(summary.created_at).toLocaleDateString()}</span></div>{fullFact && <div className="mt-2 flex gap-1"><button type="button" onClick={() => handleOpenEditFact(fullFact)} className="muster-btn muster-btn-icon muster-btn-ghost" title="Edit Fact"><Pencil className="h-3.5 w-3.5" /></button><button type="button" onClick={() => void handleDeleteFact(fullFact.id)} className="muster-btn muster-btn-icon muster-btn-ghost-danger" title="Delete Fact"><Trash2 className="h-3.5 w-3.5" /></button></div>}</article>; })}</section>}
+        {browseOpen && !showConnections && (
+          <section className="min-w-0" aria-labelledby="knowledge-browse-title">
+            <div className="muster-panel mb-3 flex flex-wrap items-center justify-between gap-3 p-3"><div><h3 id="knowledge-browse-title" className="text-sm font-semibold muster-text-primary">Browse knowledge</h3><p className="mt-1 text-xs muster-text-muted">Use deterministic lists and filters when you already know what to look for.</p></div><div className="muster-segmented" role="group" aria-label="Browse mode"><button type="button" aria-pressed={viewMode === 'facts'} onClick={() => handleChangeView('facts')} className="muster-segmented-item min-h-[40px] text-xs">Answers {overview ? `(${overview.totals.facts})` : ''}</button><button type="button" aria-pressed={viewMode === 'entities'} onClick={() => handleChangeView('entities')} className="muster-segmented-item min-h-[40px] text-xs">Subjects {overview ? `(${overview.totals.entities})` : ''}</button></div></div>
+            <details className="group mb-3" open={filtersExpanded} onToggle={(event) => setFiltersExpanded(event.currentTarget.open)}><summary className="flex min-h-[40px] cursor-pointer list-none items-center gap-2 rounded-md px-1 py-1 text-xs font-semibold muster-text-muted outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-400 [&::-webkit-details-marker]:hidden"><Filter className="h-3.5 w-3.5" aria-hidden="true" /><span>Refine results</span><ChevronRight className="ml-auto h-4 w-4 transition-transform group-open:rotate-90" aria-hidden="true" /></summary><div className="flex flex-wrap items-center gap-2 pb-1 pt-2" aria-label="Knowledge filters"><label htmlFor="knowledge-category" className="sr-only">Category</label><select id="knowledge-category" value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); updateKnowledgeUrl({ category: event.target.value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="">All categories</option>{(overview?.facets.categories.items ?? []).map((facet) => <option key={facet.value} value={facet.value}>{facet.label || facet.value} ({facet.count})</option>)}</select><label htmlFor="knowledge-entity-type" className="sr-only">Subject type</label><select id="knowledge-entity-type" value={entityTypeFilter} onChange={(event) => { setEntityTypeFilter(event.target.value); updateKnowledgeUrl({ entityType: event.target.value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="">All subject types</option>{(overview?.facets.entity_types.items ?? []).map((facet) => <option key={facet.value} value={facet.value}>{facet.label || facet.value} ({facet.count})</option>)}</select><label htmlFor="knowledge-attached" className="sr-only">Attachment</label><select id="knowledge-attached" value={attachedFilter} onChange={(event) => { const value = event.target.value as KnowledgeUrlState['attached']; setAttachedFilter(value); updateKnowledgeUrl({ attached: value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="all">Attached: all</option><option value="attached">Attached only</option><option value="unattached">Unattached only</option></select><label htmlFor="knowledge-source" className="sr-only">Source</label><select id="knowledge-source" value={sourceFilter} onChange={(event) => { const value = event.target.value as KnowledgeUrlState['hasSource']; setSourceFilter(value); updateKnowledgeUrl({ hasSource: value }, true); }} className="muster-input min-h-[40px] w-auto max-w-full text-xs"><option value="all">Source: all</option><option value="with-source">With source</option><option value="without-source">Without source</option></select></div></details>
+            {viewMode === 'facts' && <section className="muster-panel p-3 sm:p-4">{factsLoading && displayedFactSummaries.length === 0 ? <div className="py-12 text-center text-sm muster-text-muted" role="status">Loading answers…</div> : displayedFactSummaries.length === 0 ? <div className="py-12 text-center text-sm muster-text-muted">No answers match these filters.</div> : renderAnswerList(displayedFactSummaries, 'Browse answers')}</section>}
+            {viewMode === 'entities' && <section className="muster-panel p-3 sm:p-4"><div className="mb-2 flex items-center justify-between"><h4 className="text-xs font-semibold uppercase tracking-[0.14em] muster-text-muted">Subjects</h4><span className="text-xs muster-text-faint">{displayedEntities.length} shown</span></div>{entitiesLoading ? <div className="py-12 text-center text-sm muster-text-muted" role="status">Loading subjects…</div> : entitiesError && displayedEntities.length === 0 ? <div role="alert" className="py-10 text-center text-sm muster-text-danger">{entitiesError}<button type="button" onClick={() => { const scope = selectedScope(); if (scope) void loadEntitiesData(scope); }} className="muster-btn muster-btn-secondary mt-3 text-xs">Retry</button></div> : displayedEntities.length === 0 ? <div className="py-12 text-center text-sm muster-text-muted">No subjects are attached to this scope.</div> : <ul className="divide-y divide-muster-border" aria-label="Knowledge subjects">{displayedEntities.map((entity) => <li key={entity.id}><button type="button" onClick={() => handleSelectEntitySummary(entity)} className="flex min-h-[64px] w-full items-center gap-3 px-2 py-3 text-left hover:bg-muster-surface-hover" aria-pressed={context?.root.id === entity.id}><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-muster-border text-xs font-semibold muster-accent" aria-hidden="true">{entity.name.slice(0, 1).toUpperCase()}</span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold muster-text-primary">{entity.name}</span><span className="block truncate text-xs muster-text-muted">{displayKnowledgeType(entity.type)}{entity.identifier ? ` · ${entity.identifier}` : ''}</span></span><span className="shrink-0 text-xs muster-text-muted">{entity.fact_count} facts · {entity.incoming_relation_count + entity.outgoing_relation_count} links</span><ChevronRight className="h-4 w-4 shrink-0 muster-text-faint" aria-hidden="true" /></button></li>)}</ul>}</section>}
+          </section>
+        )}
 
-        {viewMode === 'entities' && <div className="grid gap-3 lg:grid-cols-[minmax(240px,360px)_minmax(0,1fr)]"><section className="muster-panel p-3 sm:p-4" aria-labelledby="knowledge-entities-title"><div className="mb-3 flex items-center justify-between gap-2"><h2 id="knowledge-entities-title" className="text-sm font-semibold muster-text-primary">Entities</h2><span className="text-xs muster-text-faint">{displayedEntities.length} shown</span></div>{entitiesError && displayedEntities.length === 0 ? <div role="alert"><p className="text-xs muster-text-danger">{entitiesError}</p><button type="button" onClick={() => { const scope = selectedScope(); if (scope) void loadEntitiesData(scope); }} className="muster-btn muster-btn-secondary mt-3 text-xs">Retry</button></div> : displayedEntities.length === 0 ? <p className="text-xs muster-text-muted">No entities are available in this scope.</p> : <ul className="space-y-1" aria-label="Knowledge entities">{displayedEntities.map((entity) => <li key={entity.id}><button type="button" onClick={() => handleSelectEntitySummary(entity)} className={`muster-card flex min-h-[48px] w-full items-center gap-2 px-3 py-2 text-left ${context?.root.id === entity.id ? 'border-muster-accent' : ''}`} aria-pressed={context?.root.id === entity.id}><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-muster-border-subtle text-xs muster-text-muted" aria-hidden="true">{entity.name.slice(0, 1).toUpperCase()}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold muster-text-primary">{entity.name}</span><span className="block truncate text-[11px] muster-text-faint">{entity.type}{entity.identifier ? ` · ${entity.identifier}` : ''}</span></span><span className="text-[11px] muster-text-muted">{entity.fact_count}</span></button></li>)}</ul>}</section><section className="min-w-0 space-y-3"><div className="muster-panel min-h-[220px] p-3 sm:p-4">{contextLoading ? <div role="status" className="py-16 text-center text-xs muster-text-muted">Loading bounded entity context…</div> : contextError && !context ? <div role="alert" className="py-10 text-center"><p className="text-sm muster-text-danger">{contextError}</p></div> : context ? <KnowledgeEntityRelationList nodes={displayedGraph.nodes} links={displayedGraph.links} selectedEntityId={context.root.id} depth={context.depth} truncation={context.truncation} onSelectNode={handleSelectGraphNode} onRequestDepthTwo={context.depth < 2 ? handleRequestDepthTwo : undefined} /> : <div className="py-16 text-center"><Network className="mx-auto h-7 w-7 muster-text-faint" aria-hidden="true" /><p className="mt-2 text-sm font-medium muster-text-muted">Select an entity to open its context lens.</p></div>}</div></section></div>}
-
-        {viewMode === 'graph' && <div className="grid min-h-[420px] gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(300px,420px)]"><section className="flex min-h-[420px] min-w-0 flex-col gap-2">{graphError && displayedGraph.nodes.length > 0 && <div role="status" className="muster-badge muster-badge-warning flex-none p-3 text-xs normal-case tracking-normal">{graphError} Showing the successfully loaded graph data.</div>}{contextError && displayedGraph.nodes.length > 0 && <div role="status" className="muster-badge muster-badge-warning flex-none p-3 text-xs normal-case tracking-normal">{contextError} Showing the successfully loaded context data.</div>}{graphLoading || contextLoading ? <div className="muster-panel flex min-h-[420px] items-center justify-center" role="status"><p className="text-sm muster-text-muted">Loading focused context…</p></div> : graphError && displayedGraph.nodes.length === 0 ? <div className="muster-panel flex min-h-[420px] flex-col items-center justify-center px-4 text-center" role="alert"><p className="text-sm muster-text-danger">{graphError}</p><button type="button" onClick={() => void refreshData()} className="muster-btn muster-btn-secondary mt-3 text-xs">Retry</button></div> : displayedGraph.nodes.length === 0 ? <div className="muster-panel flex min-h-[420px] flex-col items-center justify-center px-4 text-center"><Network className="h-8 w-8 muster-text-faint" aria-hidden="true" /><p className="mt-2 text-sm font-medium muster-text-muted">Select an entity from Explore or Entities to open a bounded graph context.</p><button type="button" onClick={() => handleChangeView('entities')} className="muster-btn muster-btn-secondary mt-3 text-xs">Browse entities</button></div> : <div className="min-h-[420px] flex-1"><KnowledgeGraphCanvas data={displayedGraph} selectedEntityId={selectedEntity?.entity.id || context?.root.id} searchQuery={searchQuery} onSelectNode={handleSelectGraphNode} /></div>}{displayedGraph.nodes.length > 0 && <KnowledgeEntityRelationList nodes={displayedGraph.nodes} links={displayedGraph.links} selectedEntityId={selectedEntity?.entity.id || context?.root.id} depth={context?.depth || displayedGraph.depth || 0} totalNodes={overview?.totals.entities} totalLinks={overview?.totals.relations} truncation={displayedGraph.truncation} onSelectNode={handleSelectGraphNode} onRequestDepthTwo={context?.depth === 1 ? handleRequestDepthTwo : undefined} />}</section><aside className="muster-panel min-h-[420px] p-4">{selectedEntity ? <><div className="flex items-start justify-between gap-2 border-b border-muster-border pb-3"><div className="min-w-0"><span className="text-[10px] font-bold uppercase tracking-wider muster-accent">{selectedEntity.entity.type}</span><h2 className="flex items-center gap-2 text-base font-bold muster-text-primary">{selectedEntity.entity.name}<button type="button" onClick={() => handleOpenEditEntity(selectedEntity.entity)} className="muster-btn muster-btn-icon muster-btn-ghost" title="Edit Entity Node"><Pencil className="h-3.5 w-3.5" /></button></h2>{selectedEntity.entity.identifier && <p className="mt-0.5 text-xs font-mono muster-text-muted">{selectedEntity.entity.identifier}</p>}</div><button type="button" onClick={handleCloseInspector} className="muster-btn muster-btn-icon muster-btn-ghost" title="Close Panel"><X className="h-4 w-4" /></button></div><div className="mt-3 flex items-center justify-between gap-2"><h3 className="text-xs font-semibold uppercase tracking-wide muster-text-muted">Attached facts ({selectedEntity.facts.length})</h3><button type="button" onClick={() => handleOpenAddFactForEntity(selectedEntity.entity)} className="muster-btn muster-btn-soft text-xs">+ Add Fact</button></div><div className="mt-2 max-h-56 space-y-2 overflow-y-auto">{selectedEntity.facts.map((fact) => <div key={fact.id} className="rounded-md border border-muster-border p-2 text-xs"><p className="font-semibold muster-text-primary">{fact.title}</p><p className="mt-1 whitespace-pre-wrap muster-text-secondary">{fact.content}</p></div>)}{selectedEntity.facts.length === 0 && <p className="text-xs italic muster-text-muted">No facts attached directly.</p>}</div><div className="mt-4 border-t border-muster-border pt-3"><div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide muster-text-muted">Graph links</h3><button type="button" onClick={() => setShowAddRelationModal(true)} className="muster-btn muster-btn-soft text-xs">+ Edge</button></div><div className="mt-2 space-y-1.5">{[...selectedEntity.outgoing_relations, ...selectedEntity.incoming_relations].map((relation) => <div key={relation.id} className="rounded-md border border-muster-border p-2 text-xs muster-text-secondary">{relation.source_entity_name || selectedEntity.entity.name} — {relation.relation_type} — {relation.target_entity_name || selectedEntity.entity.name}</div>)}{selectedEntity.outgoing_relations.length + selectedEntity.incoming_relations.length === 0 && <p className="text-xs italic muster-text-muted">No graph edges linked to this entity.</p>}</div></div></> : contextInspectorEntity ? <><div className="flex items-start justify-between gap-2 border-b border-muster-border pb-3"><div className="min-w-0"><span className="text-[10px] font-bold uppercase tracking-wider muster-accent">{contextInspectorEntity.type}</span><h2 className="flex items-center gap-2 text-base font-bold muster-text-primary">{contextInspectorEntity.name}<button type="button" onClick={() => handleOpenEditEntity(contextInspectorEntity)} className="muster-btn muster-btn-icon muster-btn-ghost" title="Edit Entity Node"><Pencil className="h-3.5 w-3.5" /></button></h2>{contextInspectorEntity.identifier && <p className="mt-0.5 text-xs font-mono muster-text-muted">{contextInspectorEntity.identifier}</p>}</div><button type="button" onClick={handleCloseInspector} className="muster-btn muster-btn-icon muster-btn-ghost" aria-label="Close entity context"><X className="h-4 w-4" /></button></div><div className="mt-3 flex items-center justify-between gap-2"><h3 className="text-xs font-semibold uppercase tracking-wide muster-text-muted">Attached facts ({contextInspectorFacts.length})</h3><button type="button" onClick={() => handleOpenAddFactForEntity(contextInspectorEntity)} className="muster-btn muster-btn-soft text-xs">+ Add Fact</button></div><div className="mt-2 max-h-56 space-y-2 overflow-y-auto">{contextInspectorFacts.map((fact) => <div key={fact.id} className="rounded-md border border-muster-border p-2 text-xs"><p className="font-semibold muster-text-primary">{fact.title}</p><p className="mt-1 whitespace-pre-wrap muster-text-secondary">{fact.content}</p></div>)}{contextInspectorFacts.length === 0 && <p className="text-xs italic muster-text-muted">No facts attached directly.</p>}</div><div className="mt-4 border-t border-muster-border pt-3"><h3 className="text-xs font-semibold uppercase tracking-wide muster-text-muted">Graph links</h3><div className="mt-2 space-y-1.5">{context!.edges.map((relation) => <div key={relation.id} className="rounded-md border border-muster-border p-2 text-xs muster-text-secondary">{contextNodeNames.get(relation.source) || relation.source} — {relation.relation_type} — {contextNodeNames.get(relation.target) || relation.target}</div>)}{context!.edges.length === 0 && <p className="text-xs italic muster-text-muted">No graph edges linked to this entity.</p>}</div></div></> : <div className="flex min-h-[360px] flex-col items-center justify-center text-center"><p className="text-sm font-medium muster-text-primary">No entity selected</p><p className="mt-1 text-xs muster-text-muted">Choose a node from the context list to inspect facts and relations.</p></div>}</aside></div>}
-      </main>
+        {showConnections && (
+          <section className="min-w-0" aria-labelledby="knowledge-connections-surface-title">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h2 id="knowledge-connections-surface-title" className="text-sm font-semibold muster-text-primary">Connections for {context?.root.name || selectedEntity?.entity.name || 'this subject'}</h2><p className="mt-1 text-xs muster-text-muted">The visual is optional; the entity and relation list remains the complete accessible path.</p></div><button type="button" className="muster-btn muster-btn-secondary min-h-[40px] text-xs" onClick={handleCloseConnections}><X className="h-3.5 w-3.5" />Back to answers</button></div>
+            {contextLoading && !hasContext ? <div className="muster-panel flex min-h-[360px] items-center justify-center text-sm muster-text-muted" role="status">Loading bounded connections…</div> : contextError && !hasContext ? <div className="muster-panel flex min-h-[240px] flex-col items-center justify-center text-center" role="alert"><p className="text-sm muster-text-danger">{contextError}</p><button type="button" className="muster-btn muster-btn-secondary mt-3 text-xs" onClick={() => { const entityId = context?.root.id || selectedEntity?.entity.id; if (entityId) void loadContextData(entityId, context?.root.knowledge_base.id || selectedEntity?.entity.kb_id); }}>Retry</button></div> : hasContext && displayedGraph.nodes.length > 0 ? <LazyBoundary label="Knowledge connections" resetKey={`${selectedKbId}:${context?.root.id || selectedEntity?.entity.id || 'scope'}`}><LazyKnowledgeConnections data={displayedGraph} selectedEntityId={context?.root.id || selectedEntity?.entity.id} searchQuery={searchQuery} onSelectNode={handleSelectGraphNode} onRequestDepthTwo={context?.depth === 1 ? handleRequestDepthTwo : undefined} /></LazyBoundary> : <div className="muster-panel flex min-h-[240px] flex-col items-center justify-center text-center"><Network className="h-8 w-8 muster-text-faint" aria-hidden="true" /><p className="mt-2 text-sm font-medium muster-text-primary">Choose a subject before opening connections.</p><button type="button" className="muster-btn muster-btn-secondary mt-3 text-xs" onClick={() => { setShowConnections(false); setBrowseOpen(true); setViewMode('entities'); }}>Browse subjects</button></div>}
+          </section>
+        )}
+      </section>
 
 
       {/* Modal: Create Knowledge Base */}
@@ -1069,15 +1226,15 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
       )}
 
       {/* Modal: Add Relation */}
-      {showAddRelationModal && selectedEntity && (
+      {showAddRelationModal && detailEntity && (
         <AccessibleDialog onClose={() => setShowAddRelationModal(false)} titleId="add-kb-relation-title" descriptionId="add-kb-relation-description" className="w-full max-w-md p-6">
           <form onSubmit={handleAddRelation} className="w-full space-y-4">
             <h2 id="add-kb-relation-title" className="text-lg font-bold muster-text-primary">Link Graph Relation</h2>
             <p id="add-kb-relation-description" className="text-xs muster-text-muted">
-              Source: <span className="font-semibold muster-accent">{selectedEntity.entity.name}</span>
+              Source: <span className="font-semibold muster-accent">{detailEntity.name}</span>
             </p>
             <div><label htmlFor="add-kb-relation-type" className="muster-label">Relation Type</label><input id="add-kb-relation-type" data-dialog-initial-focus type="text" placeholder="e.g. runs_on, has_ip, depends_on, owned_by" value={relType} onChange={(e) => setRelType(e.target.value)} required className="muster-input" /></div>
-            <div><label htmlFor="add-kb-relation-target" className="muster-label">Target Entity</label><select id="add-kb-relation-target" value={relTargetEntityId} onChange={(e) => setRelTargetEntityId(e.target.value)} required className="muster-input"><option value="">Select target entity...</option>{graphTree.nodes.filter((n: KBGraphNode) => n.id !== selectedEntity.entity.id).map((n: KBGraphNode) => (<option key={n.id} value={n.id}>{n.name} ({n.type})</option>))}</select></div>
+            <div><label htmlFor="add-kb-relation-target" className="muster-label">Target Entity</label><select id="add-kb-relation-target" value={relTargetEntityId} onChange={(e) => setRelTargetEntityId(e.target.value)} required className="muster-input"><option value="">Select target entity...</option>{displayedEntities.filter((entity) => entity.id !== detailEntity.id).map((entity) => (<option key={entity.id} value={entity.id}>{entity.name} ({entity.type})</option>))}</select></div>
             <div><label htmlFor="add-kb-relation-notes" className="muster-label">Description (Optional)</label><input id="add-kb-relation-notes" type="text" placeholder="Additional notes about relation..." value={relDesc} onChange={(e) => setRelDesc(e.target.value)} className="muster-input" /></div>
             <div className="flex justify-end space-x-2 pt-2">
               <button type="button" onClick={() => setShowAddRelationModal(false)} className="muster-btn muster-btn-lg muster-btn-secondary">Cancel</button>

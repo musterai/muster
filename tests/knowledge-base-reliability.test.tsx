@@ -4,10 +4,14 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../src/web/api.js';
 import { KnowledgeBaseView } from '../src/web/components/KnowledgeBase.js';
-import type { KBFact, KBFactBrowseSummary, KBGraphTree, KBKnowledgeOverview, KnowledgeBase, Project } from '../src/web/types.js';
+import type { KBEntityContext, KBEntitySummary, KBFact, KBFactBrowseSummary, KBGraphTree, KBKnowledgeOverview, KnowledgeBase, Project } from '../src/web/types.js';
 
 vi.mock('../src/web/components/KnowledgeGraphCanvas.js', () => ({
   KnowledgeGraphCanvas: () => <div data-testid="knowledge-graph" />,
+}));
+
+vi.mock('../src/web/components/KnowledgeConnections.js', () => ({
+  default: () => <div data-testid="knowledge-connections" />,
 }));
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -116,12 +120,14 @@ describe('KnowledgeBaseView reliability', () => {
       expect.any(AbortSignal),
     );
     expect(getGraphTree).not.toHaveBeenCalled();
-    expect(container.querySelector('ul[aria-label="Knowledge stream"]')).not.toBeNull();
-    expect(container.querySelector('ul[aria-label="Knowledge stream"] .muster-card')).toBeNull();
-    expect(container.textContent).toContain('48 facts');
-    expect(container.textContent).toContain('27 need linking');
+    expect(container.querySelector('ul[aria-label="Shared knowledge answers"]')).not.toBeNull();
+    expect(container.querySelector('ul[aria-label="Shared knowledge answers"] li')).not.toBeNull();
+    expect(container.textContent).toContain('Fast stream fact');
+    expect(container.textContent).toContain('48 answers in scope');
+    expect(container.textContent).toContain('18 subjects');
+    expect(container.textContent).toContain('22 connections');
 
-    const searchInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    const searchInput = container.querySelector('#knowledge-home-search') as HTMLInputElement;
     await act(async () => {
       const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
       valueSetter.call(searchInput, 'stream');
@@ -161,21 +167,9 @@ describe('KnowledgeBaseView reliability', () => {
     expect(getKBFacts).toHaveBeenCalledWith(kbB.id, expect.any(AbortSignal));
     expect(getGraphTree).not.toHaveBeenCalled();
 
-    const factsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
-      .find((button) => button.textContent?.startsWith('Facts'))!;
-    await act(async () => factsTab.click());
     expect(container.textContent).toContain('Alpha fact');
     expect(container.textContent).toContain('Bravo fact');
-
-    const graphTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
-      .find((button) => button.textContent?.startsWith('Graph'))!;
-    await act(async () => {
-      graphTab.click();
-      await Promise.resolve();
-    });
-    await settle();
-    expect(getGraphTree).toHaveBeenCalledWith(kbA.id, undefined, expect.any(AbortSignal));
-    expect(getGraphTree).toHaveBeenCalledWith(kbB.id, undefined, expect.any(AbortSignal));
+    expect(container.querySelector('button[role="tab"]')).toBeNull();
   });
 
   it('ignores a superseded scope response after switching knowledge bases', async () => {
@@ -215,9 +209,6 @@ describe('KnowledgeBaseView reliability', () => {
     await act(async () => alpha.resolve([fact('fact-a-old', kbA.id, 'Alpha stale fact')]));
     await settle();
 
-    const factsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
-      .find((button) => button.textContent?.startsWith('Facts'))!;
-    await act(async () => factsTab.click());
     expect(container.textContent).toContain('Bravo newest fact');
     expect(container.textContent).not.toContain('Alpha stale fact');
   });
@@ -239,7 +230,7 @@ describe('KnowledgeBaseView reliability', () => {
     });
     await settle();
 
-    const searchInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    const searchInput = container.querySelector('#knowledge-home-search') as HTMLInputElement;
     await act(async () => {
       const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
       valueSetter.call(searchInput, 'Search');
@@ -248,8 +239,8 @@ describe('KnowledgeBaseView reliability', () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 300));
     });
     expect(searchKnowledge).toHaveBeenCalledTimes(2);
-    expect(searchKnowledge).toHaveBeenCalledWith('Search', kbA.id, undefined, expect.any(AbortSignal));
-    expect(searchKnowledge).toHaveBeenCalledWith('Search', kbB.id, undefined, expect.any(AbortSignal));
+    expect(searchKnowledge).toHaveBeenCalledWith('search', kbA.id, undefined, expect.any(AbortSignal));
+    expect(searchKnowledge).toHaveBeenCalledWith('search', kbB.id, undefined, expect.any(AbortSignal));
 
     await act(async () => {
       const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
@@ -261,22 +252,19 @@ describe('KnowledgeBaseView reliability', () => {
     await settle();
 
     expect(getKBFacts.mock.calls.length).toBeGreaterThan(2);
-    const factsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
-      .find((button) => button.textContent?.startsWith('Facts'))!;
-    await act(async () => factsTab.click());
     expect(container.textContent).toContain('Unfiltered browse fact');
     expect(container.textContent).not.toContain('Search-only fact');
   });
 
   it('keeps successful facts and graph data visible when one scoped request fails', async () => {
     vi.spyOn(api, 'getKBs').mockResolvedValue([kbA, kbB]);
+    const getGraphTree = vi.spyOn(api, 'getGraphTree').mockImplementation(async (kbId) => {
+      if (kbId === kbB.id) throw new Error('Bravo graph unavailable');
+      return graph(kbA.id, 'node-alpha');
+    });
     vi.spyOn(api, 'getKBFacts').mockImplementation(async (kbId) => {
       if (kbId === kbB.id) throw new Error('Bravo facts unavailable');
       return [fact('fact-a', kbA.id, 'Alpha fact survives')];
-    });
-    vi.spyOn(api, 'getGraphTree').mockImplementation(async (kbId) => {
-      if (kbId === kbB.id) throw new Error('Bravo graph unavailable');
-      return graph(kbA.id, 'node-alpha');
     });
 
     await act(async () => {
@@ -285,21 +273,98 @@ describe('KnowledgeBaseView reliability', () => {
     });
     await settle();
 
-    const factsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
-      .find((button) => button.textContent?.startsWith('Facts'))!;
-    await act(async () => factsTab.click());
     expect(container.textContent).toContain('Alpha fact survives');
-    expect(container.textContent).toContain('Showing the successfully loaded facts');
+    expect(container.textContent).toContain('Showing the answers that loaded successfully');
     expect(container.textContent).not.toContain('Knowledge facts could not be loaded');
+    expect(getGraphTree).not.toHaveBeenCalled();
+  });
 
-    const graphTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
-      .find((button) => button.textContent?.startsWith('Graph'))!;
+  it('opens subjects from Browse & filters and loads optional connections on demand', async () => {
+    vi.spyOn(api, 'getKBs').mockResolvedValue([kbA, kbB]);
+    vi.spyOn(api, 'getKnowledgeOverview').mockResolvedValue(overview());
+    vi.spyOn(api, 'listKnowledge').mockResolvedValue({
+      items: [browseSummary('summary-1', 'Answer with a subject')],
+      page: { limit: 24, has_more: false, next_cursor: null },
+    });
+    const subject: KBEntitySummary = {
+      id: 'entity-alpha',
+      name: 'Alpha server',
+      type: 'server',
+      identifier: 'alpha.local',
+      knowledge_base: { id: kbA.id, name: kbA.name },
+      fact_count: 1,
+      incoming_relation_count: 0,
+      outgoing_relation_count: 1,
+      created_at: '',
+      updated_at: '',
+    };
+    const context: KBEntityContext = {
+      scope: overview().scope,
+      root: subject,
+      facts: { items: [], page: { limit: 50, has_more: false, next_cursor: null } },
+      nodes: [{ ...subject, depth: 0 }],
+      edges: [],
+      depth: 1,
+      truncation: {
+        truncated: false,
+        node_limit: 50,
+        edge_limit: 200,
+        nodes_returned: 1,
+        edges_returned: 0,
+        expandable_entity_ids: [],
+      },
+    };
+    const listKnowledgeEntities = vi.spyOn(api, 'listKnowledgeEntities').mockResolvedValue({
+      items: [subject],
+      page: { limit: 100, has_more: false, next_cursor: null },
+    });
+    const getEntityContext = vi.spyOn(api, 'getEntityContext').mockResolvedValue(context);
+
     await act(async () => {
-      graphTab.click();
+      root.render(<KnowledgeBaseView currentProject={project} />);
       await Promise.resolve();
     });
     await settle();
-    expect(container.querySelector('[data-testid="knowledge-graph"]')).not.toBeNull();
-    expect(container.textContent).toContain('Showing the successfully loaded graph data');
+
+    expect(getEntityContext).not.toHaveBeenCalled();
+    const browseButton = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Browse & filters'))!;
+    await act(async () => browseButton.click());
+    expect(container.querySelector('[role="group"][aria-label="Browse mode"]')).not.toBeNull();
+    const subjectsButton = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.startsWith('Subjects'))!;
+    await act(async () => subjectsButton.click());
+    await settle();
+    expect(listKnowledgeEntities).toHaveBeenCalledWith({ project_id: project.id }, {}, { limit: 100 }, expect.any(AbortSignal));
+    expect(container.textContent).toContain('Alpha server');
+    expect(container.textContent).not.toContain('Connections for Alpha server');
+
+    const subjectButton = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Alpha server'))!;
+    await act(async () => subjectButton.click());
+    await settle();
+    expect(getEntityContext).toHaveBeenCalledWith(
+      { kb_id: kbA.id },
+      { entity_id: subject.id },
+      { depth: 1, max_nodes: 50, max_edges: 200, fact_limit: 50 },
+      expect.any(AbortSignal),
+    );
+    const showConnections = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Show connections'))!;
+    expect(showConnections).toBeDefined();
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .some((button) => button.textContent?.includes('Edit subject'))).toBe(true);
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .some((button) => button.textContent?.includes('Add connection'))).toBe(true);
+    await act(async () => showConnections.click());
+    await settle();
+    expect(container.textContent).toContain('Connections for Alpha server');
+    const backToAnswers = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Back to answers'))!;
+    await act(async () => backToAnswers.click());
+    const closeSubject = container.querySelector<HTMLButtonElement>('button[aria-label="Close subject detail"]')!;
+    await act(async () => closeSubject.click());
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .some((button) => button.textContent?.includes('Show connections'))).toBe(false);
   });
 });

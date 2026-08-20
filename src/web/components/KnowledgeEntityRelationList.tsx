@@ -166,7 +166,7 @@ export const KnowledgeEntityRelationList: React.FC<KnowledgeEntityRelationListPr
         <div className="min-w-0">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h3 className="text-xs font-semibold uppercase tracking-wide muster-text-muted">Entities</h3>
-            <span className="text-[11px] muster-text-faint">{visibleNodeCount} visible</span>
+            <span className="text-[11px] muster-text-muted">{visibleNodeCount} visible</span>
           </div>
           {orderedNodes.length === 0 ? (
             <p className="rounded-md border border-dashed border-muster-border p-3 text-xs muster-text-muted">
@@ -200,7 +200,7 @@ export const KnowledgeEntityRelationList: React.FC<KnowledgeEntityRelationListPr
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium muster-text-primary">{node.name}</span>
-                        <span className="block truncate muster-text-faint">
+                        <span className="block truncate muster-text-muted">
                           {displayType(node.type)}{node.identifier && node.identifier !== node.name ? ` · ${node.identifier}` : ''}
                         </span>
                       </span>
@@ -231,7 +231,7 @@ export const KnowledgeEntityRelationList: React.FC<KnowledgeEntityRelationListPr
         <div className="min-w-0">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h3 className="text-xs font-semibold uppercase tracking-wide muster-text-muted">Relations</h3>
-            <span className="text-[11px] muster-text-faint">{visibleLinkCount} visible</span>
+            <span className="text-[11px] muster-text-muted">{visibleLinkCount} visible</span>
           </div>
           {orderedLinks.length === 0 ? (
             <p className="rounded-md border border-dashed border-muster-border p-3 text-xs muster-text-muted">
@@ -256,7 +256,7 @@ export const KnowledgeEntityRelationList: React.FC<KnowledgeEntityRelationListPr
                       <ChevronRight className="h-3.5 w-3.5 shrink-0 muster-accent" aria-hidden="true" />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium muster-text-primary">{label}</span>
-                        {link.description && <span className="block truncate muster-text-faint">{link.description}</span>}
+                        {link.description && <span className="block truncate muster-text-muted">{link.description}</span>}
                       </span>
                     </button>
                   </li>
