@@ -63,12 +63,12 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 /** Follow only server-issued opaque cursors; every individual response stays bounded. */
-async function fetchAllPages<T>(url: string): Promise<T[]> {
+async function fetchAllPages<T>(url: string, signal?: AbortSignal): Promise<T[]> {
   const items: T[] = [];
   let cursor: string | null = null;
   do {
     const separator = url.includes('?') ? '&' : '?';
-    const response: Page<T> = await fetchJSON<Page<T>>(`${url}${separator}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    const response: Page<T> = await fetchJSON<Page<T>>(`${url}${separator}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
     items.push(...response.items);
     cursor = response.page.has_more ? response.page.next_cursor : null;
     if (response.page.has_more && !cursor) throw new Error('Paginated response omitted its continuation cursor');
@@ -274,13 +274,13 @@ export const api = {
   },
 
   // Knowledge Base
-  getKBs: (projectId?: string) => fetchAllPages<KnowledgeBase>(projectId ? `/kbs?project_id=${projectId}` : '/kbs'),
+  getKBs: (projectId?: string, signal?: AbortSignal) => fetchAllPages<KnowledgeBase>(projectId ? `/kbs?project_id=${projectId}` : '/kbs', signal),
   createKB: (data: { name: string; description?: string; is_global?: boolean; project_ids?: string[] }) =>
     fetchJSON<KnowledgeBase>('/kbs', { method: 'POST', body: JSON.stringify(data) }),
   linkKB: (kbId: string, projectId: string) => fetchJSON<void>(`/kbs/${kbId}/link`, { method: 'POST', body: JSON.stringify({ project_id: projectId }) }),
   unlinkKB: (kbId: string, projectId: string) => fetchJSON<void>(`/kbs/${kbId}/unlink`, { method: 'POST', body: JSON.stringify({ project_id: projectId }) }),
   deleteKB: (id: string) => fetchJSON<void>(`/kbs/${id}`, { method: 'DELETE' }),
-  searchKnowledge: (query: string, kbId?: string, projectId?: string) => {
+  searchKnowledge: (query: string, kbId?: string, projectId?: string, signal?: AbortSignal) => {
     let url = `/kbs/search?q=${encodeURIComponent(query)}`;
     if (kbId) url += `&kb_id=${kbId}`;
     if (projectId) url += `&project_id=${projectId}`;
@@ -289,47 +289,47 @@ export const api = {
       const entities: KBEntity[] = [];
       let cursor: string | null = null;
       do {
-        const response: { facts: KBFactSummary[]; entities: KBEntity[]; page: Page<never>['page'] } = await fetchJSON(`${url}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+        const response: { facts: KBFactSummary[]; entities: KBEntity[]; page: Page<never>['page'] } = await fetchJSON(`${url}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
         summaries.push(...response.facts);
         entities.push(...response.entities);
         cursor = response.page.has_more ? response.page.next_cursor : null;
       } while (cursor);
-      const facts = await Promise.all(summaries.map(summary => api.getKBFact(summary.id)));
+      const facts = await Promise.all(summaries.map(summary => api.getKBFact(summary.id, signal)));
       return { facts, entities };
     })();
   },
-  getGraphTree: async (kbId?: string, projectId?: string) => {
+  getGraphTree: async (kbId?: string, projectId?: string, signal?: AbortSignal) => {
     let url = '/kbs/graph';
     if (kbId) url += `?kb_id=${kbId}`;
     else if (projectId) url += `?project_id=${projectId}`;
     const nodes: KBGraphTree['nodes'] = []; const links: KBGraphTree['links'] = [];
     let cursor: string | null = null; let first: KBGraphTree | null = null;
     do {
-      const page: KBGraphTree = await fetchJSON(`${url}${url.includes('?') ? '&' : '?'}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      const page: KBGraphTree = await fetchJSON(`${url}${url.includes('?') ? '&' : '?'}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
       first ||= page; nodes.push(...page.nodes); links.push(...page.links);
       cursor = page.page.has_more ? page.page.next_cursor : null;
     } while (cursor);
     return { ...(first as KBGraphTree), nodes, links, page: { ...(first as KBGraphTree).page, has_more: false, next_cursor: null } };
   },
-  getEntityKnowledge: async (queryStr: string, kbId?: string) => {
+  getEntityKnowledge: async (queryStr: string, kbId?: string, signal?: AbortSignal) => {
     let url = `/kbs/entity-knowledge?q=${encodeURIComponent(queryStr)}`;
     if (kbId) url += `&kb_id=${kbId}`;
     const factSummaries: KBFactSummary[] = []; const outgoing: EntityKnowledgeResult['outgoing_relations'] = []; const incoming: EntityKnowledgeResult['incoming_relations'] = [];
     let cursor: string | null = null; let first: EntityKnowledgeResult | null = null;
     do {
-      const page: EntityKnowledgeResult = await fetchJSON(`${url}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      const page: EntityKnowledgeResult = await fetchJSON(`${url}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal });
       first ||= page; factSummaries.push(...page.facts); outgoing.push(...page.outgoing_relations); incoming.push(...page.incoming_relations);
       cursor = page.page.has_more ? page.page.next_cursor : null;
     } while (cursor);
     if (!first) throw new Error('Entity knowledge response was empty');
-    const facts = await Promise.all(factSummaries.map(f => api.getKBFact(f.id)));
+    const facts = await Promise.all(factSummaries.map(f => api.getKBFact(f.id, signal)));
     return { ...first, facts, outgoing_relations: outgoing, incoming_relations: incoming, page: { ...first.page, has_more: false, next_cursor: null } };
   },
-  getKBFacts: async (kbId: string) => {
-    const summaries = await fetchAllPages<KBFactSummary>(`/kbs/${kbId}/facts`);
-    return Promise.all(summaries.map(summary => api.getKBFact(summary.id)));
+  getKBFacts: async (kbId: string, signal?: AbortSignal) => {
+    const summaries = await fetchAllPages<KBFactSummary>(`/kbs/${kbId}/facts`, signal);
+    return Promise.all(summaries.map(summary => api.getKBFact(summary.id, signal)));
   },
-  getKBFact: (id: string) => fetchJSON<KBFact>(`/kbs/facts/${id}`),
+  getKBFact: (id: string, signal?: AbortSignal) => fetchJSON<KBFact>(`/kbs/facts/${id}`, { signal }),
   addFact: (data: { kb_id: string; title: string; content: string; category?: string; entity_name?: string; entity_identifier?: string; entity_type?: string }) =>
     fetchJSON<KBFact>('/kbs/facts', { method: 'POST', body: JSON.stringify(data) }),
   updateFact: (id: string, data: Partial<{ title: string; content: string; category: string; entity_name: string; entity_identifier: string; entity_type: string }>) =>

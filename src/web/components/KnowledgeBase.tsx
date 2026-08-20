@@ -1,5 +1,5 @@
 // File: src/web/components/KnowledgeBase.tsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   KnowledgeBase as KBType,
   KBFact,
@@ -21,6 +21,23 @@ interface KnowledgeBaseProps {
   onSelectEntity?: (entityId: string | null) => void;
 }
 
+const EMPTY_GRAPH_TREE: KBGraphTree = {
+  nodes: [],
+  links: [],
+  page: { limit: 100, has_more: false, next_cursor: null },
+};
+
+const NO_PROJECT_SCOPE = '__no_project__';
+
+function isAbortError(error: unknown): boolean {
+  return (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError')
+    || (error instanceof Error && error.name === 'AbortError');
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
   currentProject,
   initialEntityId,
@@ -32,10 +49,22 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
   const [viewMode, setViewMode] = useState<'facts' | 'graph'>('graph');
 
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState<string>('');
   const [facts, setFacts] = useState<KBFact[]>([]);
-  const [graphTree, setGraphTree] = useState<KBGraphTree>({ nodes: [], links: [], page: { limit: 100, has_more: false, next_cursor: null } });
+  const [graphTree, setGraphTree] = useState<KBGraphTree>(EMPTY_GRAPH_TREE);
   const [selectedEntity, setSelectedEntity] = useState<EntityKnowledgeResult | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [kbsLoading, setKbsLoading] = useState<boolean>(true);
+  const [kbsError, setKbsError] = useState<string | null>(null);
+  const [factsLoading, setFactsLoading] = useState<boolean>(false);
+  const [factsError, setFactsError] = useState<string | null>(null);
+  const [graphLoading, setGraphLoading] = useState<boolean>(false);
+  const [graphError, setGraphError] = useState<string | null>(null);
+  const [loadedKbsForProject, setLoadedKbsForProject] = useState<string | null>(null);
+
+  const kbRequestRef = useRef(0);
+  const kbAbortRef = useRef<AbortController | null>(null);
+  const dataRequestRef = useRef(0);
+  const dataAbortRef = useRef<AbortController | null>(null);
 
   // Modals
   const [showCreateKbModal, setShowCreateKbModal] = useState<boolean>(false);
@@ -76,64 +105,184 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
   const [relDesc, setRelDesc] = useState('');
 
   // Load KBs
-  const loadKBs = async () => {
+  const loadKBs = async (resetData = false) => {
+    const requestId = ++kbRequestRef.current;
+    kbAbortRef.current?.abort();
+    const controller = new AbortController();
+    kbAbortRef.current = controller;
+    const projectId = currentProject?.id;
+    const projectScope = projectId || NO_PROJECT_SCOPE;
+
+    if (resetData) {
+      dataAbortRef.current?.abort();
+      setSelectedKbId('all');
+      setFacts([]);
+      setGraphTree(EMPTY_GRAPH_TREE);
+      setSelectedEntity(null);
+      setLoadedKbsForProject(null);
+    }
+
     try {
-      setLoading(true);
-      const list = await api.getKBs(currentProject?.id);
+      setKbsLoading(true);
+      setKbsError(null);
+      const list = await api.getKBs(projectId, controller.signal);
+      if (requestId !== kbRequestRef.current || controller.signal.aborted) return;
       setKbs(list);
+      setLoadedKbsForProject(projectScope);
     } catch (err) {
-      console.error('Failed to load KBs:', err);
+      if (isAbortError(err) || requestId !== kbRequestRef.current) return;
+      setKbsError(getErrorMessage(err, 'Knowledge bases could not be loaded.'));
+      setKbs([]);
+      setLoadedKbsForProject(projectScope);
     } finally {
-      setLoading(false);
+      if (requestId === kbRequestRef.current && !controller.signal.aborted) {
+        setKbsLoading(false);
+      }
     }
   };
 
-  // Load Facts & Graph Tree
+  // Load facts and graph independently so a failure in one surface cannot hide valid data in the other.
   const refreshData = async () => {
-    try {
-      setLoading(true);
-      const kbIdFilter = selectedKbId === 'all' ? undefined : selectedKbId;
-      const projIdFilter = selectedKbId === 'all' ? currentProject?.id : undefined;
+    const projectId = currentProject?.id;
+    const projectScope = projectId || NO_PROJECT_SCOPE;
+    if (selectedKbId === 'all' && loadedKbsForProject !== projectScope) return;
 
-      if (searchQuery.trim()) {
-        const res = await api.searchKnowledge(searchQuery, kbIdFilter, projIdFilter);
-        setFacts(res.facts);
-      } else {
+    const requestId = ++dataRequestRef.current;
+    dataAbortRef.current?.abort();
+    const controller = new AbortController();
+    dataAbortRef.current = controller;
+    const kbIdFilter = selectedKbId === 'all' ? undefined : selectedKbId;
+    const search = debouncedSearchQuery.trim();
+    const scopedKbs = kbIdFilter ? kbs.filter(kb => kb.id === kbIdFilter) : kbs;
+    const isCurrent = () => requestId === dataRequestRef.current && !controller.signal.aborted;
+
+    setFactsLoading(true);
+    setFactsError(null);
+    setFacts([]);
+    setGraphLoading(true);
+    setGraphError(null);
+    setGraphTree(EMPTY_GRAPH_TREE);
+
+    const loadFacts = async () => {
+      try {
+        if (search) {
+          if (kbIdFilter || scopedKbs.length === 0) {
+            const result = await api.searchKnowledge(search, kbIdFilter, kbIdFilter ? undefined : projectId, controller.signal);
+            if (isCurrent()) setFacts(result.facts);
+            return;
+          }
+
+          // Search the same per-KB set used for aggregate browse. This keeps
+          // global and explicitly linked KBs consistent even when a server
+          // scope implementation is stricter than the selector contract.
+          const results = await Promise.allSettled(
+            scopedKbs.map(kb => api.searchKnowledge(search, kb.id, undefined, controller.signal)),
+          );
+          if (!isCurrent()) return;
+          const successfulFacts = results.flatMap(result => result.status === 'fulfilled' ? result.value.facts : []);
+          const failures = results.filter(result => result.status === 'rejected' && !isAbortError(result.reason));
+          setFacts(successfulFacts);
+          if (failures.length > 0) {
+            setFactsError(`${failures.length} knowledge base${failures.length === 1 ? '' : 's'} could not be searched.`);
+          }
+          return;
+        }
+
         if (kbIdFilter) {
-          const list = await api.getKBFacts(kbIdFilter);
-          setFacts(list);
-        } else {
-          const res = await api.searchKnowledge('', undefined, projIdFilter);
-          setFacts(res.facts);
+          const list = await api.getKBFacts(kbIdFilter, controller.signal);
+          if (isCurrent()) setFacts(list);
+          return;
         }
-      }
 
-      const tree = await api.getGraphTree(kbIdFilter, projIdFilter);
-      setGraphTree(prev => {
-        if (JSON.stringify(prev) === JSON.stringify(tree)) {
-          return prev;
+        // Aggregate browsing must not call search with an empty query. Fetch each
+        // selected KB directly so global and linked KBs share the same scope as
+        // the selector and remain compatible with strict REST search validation.
+        const results = await Promise.allSettled(
+          scopedKbs.map(kb => api.getKBFacts(kb.id, controller.signal)),
+        );
+        if (!isCurrent()) return;
+        const successfulFacts = results.flatMap(result => result.status === 'fulfilled' ? result.value : []);
+        const failures = results.filter(result => result.status === 'rejected' && !isAbortError(result.reason));
+        setFacts(successfulFacts);
+        if (failures.length > 0) {
+          setFactsError(`${failures.length} knowledge base${failures.length === 1 ? '' : 's'} could not be loaded.`);
         }
-        return tree;
-      });
-
-      if (selectedEntity) {
-        const updated = await api.getEntityKnowledge(selectedEntity.entity.id, selectedEntity.entity.kb_id);
-        setSelectedEntity(updated);
+      } catch (err) {
+        if (isAbortError(err) || !isCurrent()) return;
+        setFactsError(getErrorMessage(err, 'Knowledge facts could not be loaded.'));
+      } finally {
+        if (isCurrent()) setFactsLoading(false);
       }
-    } catch (err) {
-      console.error('Failed to refresh KB data:', err);
-    } finally {
-      setLoading(false);
-    }
+    };
+
+    const loadGraph = async () => {
+      try {
+        let trees: KBGraphTree[] = [];
+        if (kbIdFilter) {
+          trees = [await api.getGraphTree(kbIdFilter, undefined, controller.signal)];
+        } else if (scopedKbs.length > 0) {
+          const results = await Promise.allSettled(
+            scopedKbs.map(kb => api.getGraphTree(kb.id, undefined, controller.signal)),
+          );
+          if (!isCurrent()) return;
+          trees = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
+          const failures = results.filter(result => result.status === 'rejected' && !isAbortError(result.reason));
+          if (failures.length > 0) {
+            setGraphError(`${failures.length} knowledge base${failures.length === 1 ? '' : 's'} graph${failures.length === 1 ? '' : 's'} could not be loaded.`);
+          }
+        } else if (projectId) {
+          // Preserve a useful graph if the KB list is genuinely empty; normal
+          // aggregate loading uses the per-KB path above.
+          trees = [await api.getGraphTree(undefined, projectId, controller.signal)];
+        }
+
+        if (!isCurrent()) return;
+        const first = trees[0];
+        setGraphTree(first ? {
+          nodes: trees.flatMap(tree => tree.nodes),
+          links: trees.flatMap(tree => tree.links),
+          page: first.page,
+        } : EMPTY_GRAPH_TREE);
+      } catch (err) {
+        if (isAbortError(err) || !isCurrent()) return;
+        setGraphError(getErrorMessage(err, 'Knowledge graph could not be loaded.'));
+      } finally {
+        if (isCurrent()) setGraphLoading(false);
+      }
+    };
+
+    const refreshSelectedEntity = async () => {
+      if (!selectedEntity) return;
+      try {
+        const updated = await api.getEntityKnowledge(selectedEntity.entity.id, selectedEntity.entity.kb_id, controller.signal);
+        if (isCurrent()) setSelectedEntity(updated);
+      } catch (err) {
+        if (!isAbortError(err) && isCurrent()) console.error('Failed to refresh selected entity:', err);
+      }
+    };
+
+    void loadFacts();
+    void loadGraph();
+    void refreshSelectedEntity();
   };
 
   useEffect(() => {
-    loadKBs();
+    void loadKBs(true);
+    return () => {
+      kbAbortRef.current?.abort();
+      dataAbortRef.current?.abort();
+    };
   }, [currentProject?.id]);
 
   useEffect(() => {
-    refreshData();
-  }, [selectedKbId, searchQuery, currentProject?.id]);
+    const timer = window.setTimeout(() => setDebouncedSearchQuery(searchQuery), 250);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    void refreshData();
+    return () => dataAbortRef.current?.abort();
+  }, [selectedKbId, debouncedSearchQuery, currentProject?.id, loadedKbsForProject, kbs]);
 
   useEffect(() => {
     if (initialEntityId) {
@@ -403,62 +552,117 @@ export const KnowledgeBaseView: React.FC<KnowledgeBaseProps> = ({
         </div>
       </div>
 
+      {kbsError && (
+        <div role="alert" className="muster-badge muster-badge-danger normal-case tracking-normal text-xs p-3 w-full flex items-center justify-between gap-3">
+          <span>Knowledge bases could not be loaded: {kbsError}</span>
+          <button onClick={() => void loadKBs(false)} className="muster-btn muster-btn-danger-soft text-xs py-1.5">Retry</button>
+        </div>
+      )}
+
+      {(kbsLoading || factsLoading || graphLoading) && (
+        <div role="status" aria-live="polite" className="muster-badge muster-badge-info normal-case tracking-normal text-xs w-fit">
+          Loading knowledge{factsLoading && graphLoading ? ' facts and graph' : factsLoading ? ' facts' : graphLoading ? ' graph' : ' bases'}…
+        </div>
+      )}
+
       {/* Main Content Area */}
       {viewMode === 'facts' ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-          {facts.length === 0 ? (
-            <div className="col-span-full py-16 text-center muster-panel">
-              <p className="text-sm font-medium muster-text-muted">No gained knowledge facts matching search.</p>
-              <p className="text-xs mt-1 muster-text-muted">Click "Add Knowledge" above to log operational learnings.</p>
+          {factsLoading ? (
+            <div className="col-span-full py-16 text-center muster-panel" role="status">
+              <p className="text-sm font-medium muster-text-muted">Loading gained knowledge…</p>
+            </div>
+          ) : factsError && facts.length === 0 ? (
+            <div className="col-span-full py-10 px-4 text-center muster-panel" role="alert">
+              <p className="text-sm font-medium muster-text-danger">{factsError}</p>
+              <button onClick={() => void refreshData()} className="muster-btn muster-btn-secondary text-xs mt-3">Retry</button>
             </div>
           ) : (
-            facts.map((fact: KBFact) => (
-              <div key={fact.id} className="muster-panel p-4 flex flex-col justify-between group">
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="muster-badge muster-badge-accent">{fact.category}</span>
-                    <div className="flex items-center gap-1">
-                      {fact.entity_name && (
-                        <span className="muster-chip max-w-[120px] truncate">{fact.entity_name}</span>
-                      )}
-                      <button
-                        onClick={() => handleOpenEditFact(fact)}
-                        className="muster-btn muster-btn-icon muster-btn-ghost opacity-60 group-hover:opacity-100"
-                        title="Edit Fact"
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteFact(fact.id)}
-                        className="muster-btn muster-btn-icon muster-btn-ghost-danger opacity-60 group-hover:opacity-100"
-                        title="Delete Fact"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+            <>
+              {factsError && (
+                <div role="status" className="col-span-full muster-badge muster-badge-warning normal-case tracking-normal text-xs p-3">
+                  {factsError} Showing the successfully loaded facts.
+                </div>
+              )}
+              {facts.length === 0 ? (
+                <div className="col-span-full py-16 text-center muster-panel">
+                  <p className="text-sm font-medium muster-text-muted">No gained knowledge facts matching search.</p>
+                  <p className="text-xs mt-1 muster-text-muted">Click "Add Knowledge" above to log operational learnings.</p>
+                </div>
+              ) : facts.map((fact: KBFact) => (
+                <div key={fact.id} className="muster-panel p-4 flex flex-col justify-between group">
+                  <div>
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="muster-badge muster-badge-accent">{fact.category}</span>
+                      <div className="flex items-center gap-1">
+                        {fact.entity_name && (
+                          <span className="muster-chip max-w-[120px] truncate">{fact.entity_name}</span>
+                        )}
+                        <button
+                          onClick={() => handleOpenEditFact(fact)}
+                          className="muster-btn muster-btn-icon muster-btn-ghost opacity-60 group-hover:opacity-100"
+                          title="Edit Fact"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteFact(fact.id)}
+                          className="muster-btn muster-btn-icon muster-btn-ghost-danger opacity-60 group-hover:opacity-100"
+                          title="Delete Fact"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
+                    <h3 className="text-sm font-semibold mb-1.5 muster-text-primary">{fact.title}</h3>
+                    <p className="text-xs whitespace-pre-wrap leading-relaxed muster-text-secondary">{fact.content}</p>
                   </div>
-                  <h3 className="text-sm font-semibold mb-1.5 muster-text-primary">{fact.title}</h3>
-                  <p className="text-xs whitespace-pre-wrap leading-relaxed muster-text-secondary">{fact.content}</p>
-                </div>
 
-                <div className="mt-4 pt-3 border-t border-muster-border flex items-center justify-between text-[11px] muster-text-muted">
-                  <span>Confidence: {Math.round(fact.confidence * 100)}%</span>
-                  <span>{new Date(fact.created_at).toLocaleDateString()}</span>
+                  <div className="mt-4 pt-3 border-t border-muster-border flex items-center justify-between text-[11px] muster-text-muted">
+                    <span>Confidence: {Math.round(fact.confidence * 100)}%</span>
+                    <span>{new Date(fact.created_at).toLocaleDateString()}</span>
+                  </div>
                 </div>
-              </div>
-            ))
+              ))}
+            </>
           )}
         </div>
       ) : (
         <div className="flex-1 flex gap-4 min-h-0 h-full relative overflow-hidden">
           <div className="flex-1 h-full min-w-0">
 
-            <KnowledgeGraphCanvas
-              data={graphTree}
-              selectedEntityId={selectedEntity?.entity.id}
-              searchQuery={searchQuery}
-              onSelectNode={handleSelectGraphNode}
-            />
+            {graphLoading ? (
+              <div className="h-full min-h-[450px] muster-panel flex items-center justify-center" role="status">
+                <p className="text-sm font-medium muster-text-muted">Loading knowledge graph…</p>
+              </div>
+            ) : graphError && graphTree.nodes.length === 0 ? (
+              <div className="h-full min-h-[450px] muster-panel flex flex-col items-center justify-center text-center px-4" role="alert">
+                <p className="text-sm font-medium muster-text-danger">{graphError}</p>
+                <button onClick={() => void refreshData()} className="muster-btn muster-btn-secondary text-xs mt-3">Retry</button>
+              </div>
+            ) : (
+              <div className="h-full flex flex-col gap-2">
+                {graphError && (
+                  <div role="status" className="muster-badge muster-badge-warning normal-case tracking-normal text-xs p-3 flex-none">
+                    {graphError} Showing the successfully loaded graph data.
+                  </div>
+                )}
+                {graphTree.nodes.length === 0 ? (
+                  <div className="flex-1 min-h-[450px] muster-panel flex items-center justify-center text-center px-4">
+                    <p className="text-sm font-medium muster-text-muted">No graph entities are available in this knowledge scope.</p>
+                  </div>
+                ) : (
+                  <div className="flex-1 min-h-0">
+                    <KnowledgeGraphCanvas
+                      data={graphTree}
+                      selectedEntityId={selectedEntity?.entity.id}
+                      searchQuery={searchQuery}
+                      onSelectNode={handleSelectGraphNode}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
 
           </div>
 
