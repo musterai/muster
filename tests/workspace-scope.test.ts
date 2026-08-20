@@ -15,6 +15,7 @@ import {
   DocumentService,
   EventService,
   KBService,
+  KBReadScopeResolver,
   ProjectService,
   RoleService,
   UserService,
@@ -69,7 +70,7 @@ describe('MUS-66 workspace isolation', () => {
     columns = new ColumnService(db, events);
     cards = createCardServiceForTest(db, events);
     documents = createDocumentServiceForTest(db, events);
-    kbs = new KBService(db, events);
+    kbs = new KBService(db, events, new KBReadScopeResolver(db));
     agents = new AgentService(db, events);
     users = new UserService(db);
     await roles.seedPreset('ws-a');

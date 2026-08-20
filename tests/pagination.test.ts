@@ -144,12 +144,16 @@ describe('bounded collection pagination', () => {
       expect(secondEvents.items.some(event => firstEvents.items.some(first => first.id === event.id))).toBe(false);
     }
 
-    const indexes = await db.query<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%_id'");
+    const indexes = await db.query<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'");
     expect(indexes.map(index => index.name)).toEqual(expect.arrayContaining([
       'idx_card_column_archived_position_id',
       'idx_document_project_title_id',
       'idx_event_project_created_id',
       'idx_kb_fact_kb_created_id',
+      'idx_project_kb_kb_project',
+      'idx_kb_fact_updated_id',
+      'idx_kb_entity_type_name_id',
+      'idx_kb_relation_source_created_id',
     ]));
   });
 

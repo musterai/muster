@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createDatabaseAdapter } from '../src/db/factory.js';
 import { DatabaseAdapter } from '../src/db/adapter.js';
 import { Migrator } from '../src/db/migrator.js';
-import { KBService, ProjectService, EventService } from '../src/services/index.js';
+import { KBReadScopeResolver, KBService, ProjectService, EventService } from '../src/services/index.js';
 
 const TEST_DB = path.join(process.cwd(), 'data', 'kb-test.db');
 
@@ -33,7 +33,7 @@ describe('KBService Knowledge Base & Graph Integration Tests', () => {
     );
 
     eventService = new EventService(db);
-    kbService = new KBService(db, eventService);
+    kbService = new KBService(db, eventService, new KBReadScopeResolver(db));
     projectService = new ProjectService(db, eventService);
   });
 

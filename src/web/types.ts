@@ -315,10 +315,174 @@ export interface KBGraphLink {
   description?: string | null;
 }
 
+/**
+ * Limits and continuation hints returned by the bounded graph/context reads.
+ *
+ * The web client deliberately keeps this metadata alongside the graph rows so
+ * a renderer cannot accidentally present a partial neighborhood as the whole
+ * knowledge base.
+ */
+export interface KBGraphTruncation {
+  truncated: boolean;
+  node_limit: number;
+  edge_limit: number;
+  nodes_returned: number;
+  edges_returned: number;
+  expandable_entity_ids: string[];
+}
+
+export interface KBGraphFilters {
+  kb_ids?: string[];
+  entity_types?: string[];
+  relation_types?: string[];
+}
+
 export interface KBGraphTree {
   nodes: KBGraphNode[];
   links: KBGraphLink[];
   page: Page<unknown>['page'];
+  /** Context roots are optional for compatibility with the legacy graph read. */
+  root_id?: string | null;
+  /** Effective graph depth. A selected subject defaults to one hop. */
+  depth?: number;
+  /** API totals describe the scope, not only the rendered neighborhood. */
+  total_nodes?: number;
+  total_links?: number;
+  truncation?: KBGraphTruncation;
+  /** MUS-87 may call these rows edges; links remains the legacy UI name. */
+  edges?: KBGraphLink[];
+}
+
+/** Scope selector shared by the Explore controller and the bounded read APIs. */
+export interface KBReadScopeInput {
+  kb_id?: string;
+  project_id?: string;
+}
+
+export interface KBReadScopeSummary {
+  kind: 'knowledge_base' | 'project';
+  id: string;
+  name: string;
+  knowledge_base_count: number;
+}
+
+export interface KBIdentitySummary {
+  id: string;
+  name: string;
+}
+
+export interface KBEntityIdentitySummary {
+  id: string;
+  name: string;
+  type: string;
+  identifier: string | null;
+}
+
+export interface KBSourceSummary {
+  principal_id: string;
+  kind: string | null;
+  display_name: string | null;
+}
+
+export interface KBFactBrowseSummary {
+  id: string;
+  title: string;
+  excerpt: string;
+  knowledge_base: KBIdentitySummary;
+  category: string;
+  confidence: number;
+  entity: KBEntityIdentitySummary | null;
+  source: KBSourceSummary | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KBFacetBucket {
+  value: string;
+  count: number;
+  label?: string;
+}
+
+export interface KBBoundedFacet {
+  items: KBFacetBucket[];
+  has_more: boolean;
+}
+
+export interface KBKnowledgeOverview {
+  scope: KBReadScopeSummary;
+  totals: {
+    facts: number;
+    attached_facts: number;
+    unattached_facts: number;
+    entities: number;
+    relations: number;
+  };
+  facets: {
+    knowledge_bases: KBBoundedFacet;
+    categories: KBBoundedFacet;
+    entity_types: KBBoundedFacet;
+    relation_types: KBBoundedFacet;
+  };
+}
+
+export interface KBBrowseFilters {
+  query?: string;
+  category?: string;
+  entity_id?: string;
+  entity_type?: string;
+  attached?: boolean;
+  has_source?: boolean;
+}
+
+export interface KBEntityListFilters {
+  type?: string;
+}
+
+export interface KBEntityReference {
+  entity_id?: string;
+  query?: string;
+}
+
+export interface KBEntityContextOptions {
+  depth?: number;
+  max_nodes?: number;
+  max_edges?: number;
+  fact_cursor?: string;
+  fact_limit?: number;
+  relation_types?: string[];
+  entity_types?: string[];
+}
+
+export interface KBEntitySummary extends KBEntityIdentitySummary {
+  knowledge_base: KBIdentitySummary;
+  fact_count: number;
+  incoming_relation_count: number;
+  outgoing_relation_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KBEntityCandidate extends KBEntityIdentitySummary {
+  knowledge_base: KBIdentitySummary;
+}
+
+export interface KBEntityContextNode extends KBEntitySummary {
+  depth: number;
+}
+
+export interface KBEntityContextEdge extends KBGraphLink {
+  kb_id: string;
+  created_at: string;
+}
+
+export interface KBEntityContext {
+  scope: KBReadScopeSummary;
+  root: KBEntityCandidate;
+  facts: Page<KBFactBrowseSummary>;
+  nodes: KBEntityContextNode[];
+  edges: KBEntityContextEdge[];
+  depth: number;
+  truncation: KBGraphTruncation;
 }
 
 /** Response shape of GET /auth/me — the signed-in state of the current browser session. */

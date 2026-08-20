@@ -30,7 +30,7 @@
         "node_modules/vis-network/",
         "node_modules/vis-data/"
       ],
-      "allowedImporterFacades": ["components/KnowledgeBase.tsx"]
+      "allowedImporterFacades": ["components/KnowledgeConnections.tsx"]
     }
   }
 }
