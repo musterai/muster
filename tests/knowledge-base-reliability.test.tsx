@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../src/web/api.js';
 import { KnowledgeBaseView } from '../src/web/components/KnowledgeBase.js';
-import type { KBFact, KBGraphTree, KnowledgeBase, Project } from '../src/web/types.js';
+import type { KBFact, KBFactBrowseSummary, KBGraphTree, KBKnowledgeOverview, KnowledgeBase, Project } from '../src/web/types.js';
 
 vi.mock('../src/web/components/KnowledgeGraphCanvas.js', () => ({
   KnowledgeGraphCanvas: () => <div data-testid="knowledge-graph" />,
@@ -34,6 +34,30 @@ const fact = (id: string, kb_id: string, title: string): KBFact => ({
 const graph = (kb_id: string, id: string): KBGraphTree => ({
   nodes: [{ id, kb_id, name: id, type: 'server', identifier: null, fact_count: 1 }],
   links: [], page: { limit: 100, has_more: false, next_cursor: null },
+});
+
+const browseSummary = (id: string, title: string): KBFactBrowseSummary => ({
+  id,
+  title,
+  excerpt: `${title} excerpt`,
+  knowledge_base: { id: kbA.id, name: kbA.name },
+  category: 'general',
+  confidence: 1,
+  entity: null,
+  source: null,
+  created_at: '',
+  updated_at: '',
+});
+
+const overview = (): KBKnowledgeOverview => ({
+  scope: { kind: 'project', id: project.id, name: project.name, knowledge_base_count: 2 },
+  totals: { facts: 48, attached_facts: 21, unattached_facts: 27, entities: 18, relations: 22 },
+  facets: {
+    knowledge_bases: { items: [], has_more: false },
+    categories: { items: [], has_more: false },
+    entity_types: { items: [], has_more: false },
+    relation_types: { items: [], has_more: false },
+  },
 });
 
 function deferred<T>() {
@@ -68,6 +92,55 @@ afterEach(async () => {
 });
 
 describe('KnowledgeBaseView reliability', () => {
+  it('renders the bounded read model as a stream and caches overview while searching', async () => {
+    vi.spyOn(api, 'getKBs').mockResolvedValue([kbA, kbB]);
+    const getKnowledgeOverview = vi.spyOn(api, 'getKnowledgeOverview').mockResolvedValue(overview());
+    const listKnowledge = vi.spyOn(api, 'listKnowledge').mockResolvedValue({
+      items: [browseSummary('summary-1', 'Fast stream fact')],
+      page: { limit: 24, has_more: true, next_cursor: 'next' },
+    });
+    const searchKnowledge = vi.spyOn(api, 'searchKnowledge').mockRejectedValue(new Error('legacy search should not run'));
+    const getGraphTree = vi.spyOn(api, 'getGraphTree');
+
+    await act(async () => {
+      root.render(<KnowledgeBaseView currentProject={project} />);
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(getKnowledgeOverview).toHaveBeenCalledTimes(1);
+    expect(listKnowledge).toHaveBeenCalledWith(
+      { project_id: project.id },
+      expect.objectContaining({ q: undefined }),
+      { limit: 24 },
+      expect.any(AbortSignal),
+    );
+    expect(getGraphTree).not.toHaveBeenCalled();
+    expect(container.querySelector('ul[aria-label="Knowledge stream"]')).not.toBeNull();
+    expect(container.querySelector('ul[aria-label="Knowledge stream"] .muster-card')).toBeNull();
+    expect(container.textContent).toContain('48 facts');
+    expect(container.textContent).toContain('27 need linking');
+
+    const searchInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      valueSetter.call(searchInput, 'stream');
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    });
+    await settle();
+
+    expect(searchKnowledge).not.toHaveBeenCalled();
+    expect(getKnowledgeOverview).toHaveBeenCalledTimes(1);
+    expect(listKnowledge).toHaveBeenLastCalledWith(
+      { project_id: project.id },
+      expect.objectContaining({ q: 'stream' }),
+      { limit: 24 },
+      expect.any(AbortSignal),
+    );
+  });
+
   it('browses the aggregate scope directly instead of issuing an empty search', async () => {
     const getKBs = vi.spyOn(api, 'getKBs').mockResolvedValue([kbA, kbB]);
     const searchKnowledge = vi.spyOn(api, 'searchKnowledge').mockRejectedValue(new Error('empty search should not run'));
@@ -86,14 +159,23 @@ describe('KnowledgeBaseView reliability', () => {
     expect(searchKnowledge).not.toHaveBeenCalled();
     expect(getKBFacts).toHaveBeenCalledWith(kbA.id, expect.any(AbortSignal));
     expect(getKBFacts).toHaveBeenCalledWith(kbB.id, expect.any(AbortSignal));
-    expect(getGraphTree).toHaveBeenCalledWith(kbA.id, undefined, expect.any(AbortSignal));
-    expect(getGraphTree).toHaveBeenCalledWith(kbB.id, undefined, expect.any(AbortSignal));
+    expect(getGraphTree).not.toHaveBeenCalled();
 
     const factsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
       .find((button) => button.textContent?.startsWith('Facts'))!;
     await act(async () => factsTab.click());
     expect(container.textContent).toContain('Alpha fact');
     expect(container.textContent).toContain('Bravo fact');
+
+    const graphTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
+      .find((button) => button.textContent?.startsWith('Graph'))!;
+    await act(async () => {
+      graphTab.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(getGraphTree).toHaveBeenCalledWith(kbA.id, undefined, expect.any(AbortSignal));
+    expect(getGraphTree).toHaveBeenCalledWith(kbB.id, undefined, expect.any(AbortSignal));
   });
 
   it('ignores a superseded scope response after switching knowledge bases', async () => {
@@ -212,7 +294,11 @@ describe('KnowledgeBaseView reliability', () => {
 
     const graphTab = Array.from(container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
       .find((button) => button.textContent?.startsWith('Graph'))!;
-    await act(async () => graphTab.click());
+    await act(async () => {
+      graphTab.click();
+      await Promise.resolve();
+    });
+    await settle();
     expect(container.querySelector('[data-testid="knowledge-graph"]')).not.toBeNull();
     expect(container.textContent).toContain('Showing the successfully loaded graph data');
   });
