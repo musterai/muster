@@ -13,23 +13,51 @@ import {
 import { KnowledgeEntityRelationList } from '../src/web/components/KnowledgeEntityRelationList.js';
 import type { KBGraphNode, KBGraphTree } from '../src/web/types.js';
 
+const fakeNetworkState = vi.hoisted(() => ({
+  instances: [] as Array<{
+    options: any;
+    handlers: Record<string, (params: any) => void>;
+    fitCalls: any[];
+    focusCalls: any[];
+    stopSimulationCalls: number;
+    clusterCalls: any[];
+    openClusterCalls: any[];
+    data: { nodes: any; edges: any };
+  }>,
+}));
+
 vi.mock('vis-network/standalone/esm/vis-network.js', () => ({
   Network: class FakeNetwork {
-    on() {}
+    options: any;
+    handlers: Record<string, (params: any) => void> = {};
+    fitCalls: any[] = [];
+    focusCalls: any[] = [];
+    stopSimulationCalls = 0;
+    clusterCalls: any[] = [];
+    openClusterCalls: any[] = [];
+    data: { nodes: any; edges: any };
+
+    constructor(_container: HTMLElement, data: { nodes: any; edges: any }, options: any) {
+      this.data = data;
+      this.options = options;
+      fakeNetworkState.instances.push(this);
+    }
+
+    on(event: string, handler: (params: any) => void) { this.handlers[event] = handler; }
     setOptions() {}
     setSize() {}
     redraw() {}
     getPositions() { return {}; }
     getScale() { return 1; }
-    fit() {}
-    focus() {}
+    fit(options: any) { this.fitCalls.push(options); }
+    focus(options: any) { this.focusCalls.push(options); }
     moveTo() {}
     selectNodes() {}
-    stopSimulation() {}
+    stopSimulation() { this.stopSimulationCalls += 1; }
     storePositions() {}
     isCluster() { return false; }
-    openCluster() {}
-    cluster() {}
+    openCluster(id: string) { this.openClusterCalls.push(id); }
+    cluster(options: any) { this.clusterCalls.push(options); }
     destroy() {}
   },
 }));
@@ -56,6 +84,7 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  fakeNetworkState.instances.length = 0;
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -169,5 +198,129 @@ describe('accessible graph representation', () => {
 
     expect(container.querySelector('[role="img"][aria-label*="entity and relation list"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="knowledge-entity-relation-list"]')).not.toBeNull();
+  });
+});
+
+describe('stable canvas lifecycle', () => {
+  it('disables physics, uses deterministic coordinates, and does not refit on visual state changes', async () => {
+    const nodes = [node('a1'), node('a2')];
+    const links = [{ id: 'r1', source: 'a1', target: 'a2', relation_type: 'owns' }];
+
+    await act(async () => root.render(
+      <KnowledgeGraphCanvas
+        data={graph(nodes, links, { root_id: 'a1', depth: 1 })}
+        selectedEntityId="a1"
+        searchQuery="server"
+        onSelectNode={() => {}}
+        reducedMotion={false}
+      />,
+    ));
+
+    const network = fakeNetworkState.instances[0];
+    expect(network).toBeDefined();
+    expect(network.options.layout.improvedLayout).toBe(false);
+    expect(network.options.physics).toEqual({ enabled: false, stabilization: false });
+    expect(network.fitCalls).toHaveLength(1);
+    expect(network.fitCalls[0]).toEqual({ animation: false });
+    expect(network.focusCalls).toHaveLength(0);
+    expect(network.stopSimulationCalls).toBe(0);
+
+    const initialPosition = {
+      x: network.data.nodes.get('a1').x,
+      y: network.data.nodes.get('a1').y,
+    };
+
+    await act(async () => root.render(
+      <KnowledgeGraphCanvas
+        data={graph([node('a2'), node('a1')], links, { root_id: 'a1', depth: 1 })}
+        selectedEntityId="a2"
+        searchQuery="a2"
+        onSelectNode={() => {}}
+        reducedMotion={false}
+      />,
+    ));
+
+    expect(network.fitCalls).toHaveLength(1);
+    expect(network.focusCalls).toHaveLength(0);
+    expect(network.data.nodes.get('a1')).toMatchObject(initialPosition);
+
+    await act(async () => {
+      network.handlers.hoverEdge?.({ edge: 'r1' });
+    });
+
+    expect(network.fitCalls).toHaveLength(1);
+    expect(network.focusCalls).toHaveLength(0);
+  });
+
+  it('fits once when a genuinely new node context arrives', async () => {
+    const firstNodes = [node('a1'), node('a2')];
+    const firstLinks = [{ id: 'r1', source: 'a1', target: 'a2', relation_type: 'owns' }];
+    await act(async () => root.render(
+      <KnowledgeGraphCanvas
+        data={graph(firstNodes, firstLinks, { root_id: 'a1', depth: 1 })}
+        selectedEntityId="a1"
+        onSelectNode={() => {}}
+        reducedMotion
+      />,
+    ));
+
+    const network = fakeNetworkState.instances[0];
+    expect(network.fitCalls).toHaveLength(1);
+
+    await act(async () => root.render(
+      <KnowledgeGraphCanvas
+        data={graph(
+          [node('a1'), node('a3')],
+          [{ id: 'r2', source: 'a1', target: 'a3', relation_type: 'runs_on' }],
+          { root_id: 'a1', depth: 1 },
+        )}
+        selectedEntityId="a1"
+        onSelectNode={() => {}}
+        reducedMotion
+      />,
+    ));
+
+    expect(network.fitCalls).toHaveLength(2);
+    expect(network.fitCalls[1]).toEqual({ animation: false });
+  });
+
+  it('does not rebuild overview clusters for search or hover styling', async () => {
+    const nodes = Array.from({ length: DEFAULT_GRAPH_NODE_LIMIT + 8 }, (_, index) => node(`a${index}`));
+    const links = nodes.slice(1).map((entry, index) => ({
+      id: `r${index}`,
+      source: nodes[0].id,
+      target: entry.id,
+      relation_type: 'owns',
+    }));
+    const overview = graph(nodes, links);
+
+    await act(async () => root.render(
+      <KnowledgeGraphCanvas
+        data={overview}
+        searchQuery=""
+        onSelectNode={() => {}}
+        reducedMotion
+      />,
+    ));
+
+    const network = fakeNetworkState.instances[0];
+    expect(network.clusterCalls).toHaveLength(1);
+    expect(network.fitCalls).toHaveLength(1);
+
+    await act(async () => root.render(
+      <KnowledgeGraphCanvas
+        data={overview}
+        searchQuery="Entity a"
+        onSelectNode={() => {}}
+        reducedMotion
+      />,
+    ));
+    await act(async () => {
+      network.handlers.hoverEdge?.({ edge: 'r1' });
+    });
+
+    expect(network.clusterCalls).toHaveLength(1);
+    expect(network.openClusterCalls).toHaveLength(0);
+    expect(network.fitCalls).toHaveLength(1);
   });
 });

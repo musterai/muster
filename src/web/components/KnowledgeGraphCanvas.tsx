@@ -101,10 +101,13 @@ function hashString(value: string): number {
   return hash >>> 0;
 }
 
-function stablePosition(id: string, index: number, count: number): { x: number; y: number } {
+function stablePosition(id: string): { x: number; y: number } {
   const hash = hashString(id);
   const angle = ((hash % 360) * Math.PI) / 180;
-  const radius = 90 + ((hash >>> 8) % Math.max(1, count)) * 24 + index * 3;
+  // Coordinates are a property of the entity, not of the current response
+  // order or graph size. That keeps a legacy/full-graph fallback deterministic
+  // even when facts are refreshed or a filter changes the ranking order.
+  const radius = 120 + ((hash >>> 8) % 7) * 34;
   return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
 }
 
@@ -360,9 +363,8 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
   const nodesDataSetRef = useRef<DataSet<any> | null>(null);
   const edgesDataSetRef = useRef<DataSet<any> | null>(null);
   const dataNodesRef = useRef<KBGraphNode[]>([]);
-  const hasFittedRef = useRef(false);
-  const lastContextKeyRef = useRef('');
-  const fitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fittedNodeSetKeyRef = useRef<string | null>(null);
+  const renderedClusterKeyRef = useRef<string | null>(null);
   const clusterIdsRef = useRef<Set<string>>(new Set());
   const onSelectNodeRef = useRef(onSelectNode);
 
@@ -385,17 +387,21 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     );
   }, [boundedGraph.nodes, searchQuery]);
   const isSearchActive = Boolean(searchQuery?.trim());
-  const contextKey = useMemo(
-    () => [
-      boundedGraph.rootId ?? 'overview',
-      boundedGraph.depth,
-      boundedGraph.nodes.map((node) => node.id).join(','),
-      boundedGraph.links.map((link) => link.id).join(','),
-    ].join('|'),
-    [boundedGraph],
-  );
-  const layoutSeed = useMemo(() => hashString(contextKey), [contextKey]);
   const isOverviewClustered = !boundedGraph.rootId && data.nodes.length > DEFAULT_GRAPH_NODE_LIMIT;
+  // A node-set change is the only context change that warrants an automatic
+  // fit. Root/selection, labels, edge focus, and metadata refreshes must keep
+  // the operator's current viewport intact.
+  const nodeSetKey = useMemo(
+    () => boundedGraph.nodes.map((node) => node.id).sort().join(','),
+    [boundedGraph.nodes],
+  );
+  const clusterKey = useMemo(
+    () => [
+      isOverviewClustered ? 'clustered' : 'plain',
+      boundedGraph.nodes.map((node) => `${node.id}:${node.kb_id}`).sort().join(','),
+    ].join('|'),
+    [boundedGraph.nodes, isOverviewClustered],
+  );
 
   useEffect(() => {
     onSelectNodeRef.current = onSelectNode;
@@ -411,11 +417,7 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
 
   useEffect(() => {
     dataNodesRef.current = boundedGraph.nodes;
-    if (lastContextKeyRef.current !== contextKey) {
-      hasFittedRef.current = false;
-      lastContextKeyRef.current = contextKey;
-    }
-  }, [boundedGraph, contextKey]);
+  }, [boundedGraph.nodes]);
 
   // Mount Network once. The HTML list below is the complete keyboard path;
   // this canvas is an optional visual enhancement and never the only control.
@@ -428,21 +430,15 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     edgesDataSetRef.current = edgesDataSet;
 
     const options = {
-      layout: { improvedLayout: true, randomSeed: layoutSeed },
+      // Every rendered node receives an explicit deterministic coordinate
+      // below. Disable vis' layout/physics work so updates cannot restart a
+      // stabilization pass and move the graph under the operator's cursor.
+      layout: { improvedLayout: false },
       nodes: { scaling: { min: 14, max: 48 } },
       edges: { smooth: { type: 'continuous', roundness: 0.2 } },
       physics: {
-        enabled: !motionReduced,
-        solver: 'barnesHut',
-        barnesHut: {
-          gravitationalConstant: -8000,
-          centralGravity: 0.15,
-          springLength: 170,
-          springConstant: 0.03,
-          damping: 0.1,
-          avoidOverlap: 1,
-        },
-        stabilization: { enabled: !motionReduced, iterations: 120, fit: false },
+        enabled: false,
+        stabilization: false,
       },
       interaction: {
         hover: true,
@@ -487,10 +483,6 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     network.on('zoom', (params: { scale?: number }) => {
       if (typeof params.scale === 'number') setZoomScale(params.scale);
     });
-    network.on('stabilized', () => {
-      network.stopSimulation?.();
-      if (!clusterIdsRef.current.size) network.storePositions?.();
-    });
     network.on('afterDrawing', (context: CanvasRenderingContext2D) => {
       const nodes = dataNodesRef.current;
       const positions = network.getPositions?.(nodes.map((node) => node.id)) ?? {};
@@ -510,24 +502,15 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
 
     return () => {
       resizeObserver?.disconnect();
-      if (fitTimerRef.current) clearTimeout(fitTimerRef.current);
       network.destroy?.();
       networkRef.current = null;
       nodesDataSetRef.current = null;
       edgesDataSetRef.current = null;
       clusterIdsRef.current.clear();
     };
-    // Mount must be stable; runtime motion preference is applied below.
+    // Mount must be stable; graph motion is explicitly disabled below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    networkRef.current?.setOptions?.({
-      layout: { randomSeed: layoutSeed },
-      physics: { enabled: !motionReduced, stabilization: { enabled: !motionReduced } },
-    });
-    if (motionReduced) networkRef.current?.stopSimulation?.();
-  }, [layoutSeed, motionReduced]);
 
   const closeExistingClusters = () => {
     const network = networkRef.current;
@@ -569,7 +552,8 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     const network = networkRef.current;
     if (!nodesDataSet || !edgesDataSet || !network) return;
 
-    closeExistingClusters();
+    const clusterStructureChanged = renderedClusterKeyRef.current !== clusterKey;
+    if (clusterStructureChanged) closeExistingClusters();
     const degreeMap = new Map<string, number>();
     boundedGraph.links.forEach((link) => {
       degreeMap.set(link.source, (degreeMap.get(link.source) ?? 0) + 1);
@@ -580,7 +564,7 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     existingNodeIds.forEach((id) => {
       if (!nodeIds.has(id)) nodesDataSet.remove(id);
     });
-    nodesDataSet.update(boundedGraph.nodes.map((node, index) => {
+    nodesDataSet.update(boundedGraph.nodes.map((node) => {
       const existing = nodesDataSet.get(node.id) as { x?: number; y?: number } | null;
       const formatted = formatNode(
         node,
@@ -594,7 +578,7 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
       );
       return existing?.x !== undefined && existing?.y !== undefined
         ? { ...formatted, x: existing.x, y: existing.y }
-        : { ...formatted, ...stablePosition(node.id, index, boundedGraph.nodes.length) };
+        : { ...formatted, ...stablePosition(node.id) };
     }));
 
     const linkIds = new Set(boundedGraph.links.map((link) => link.id));
@@ -633,21 +617,24 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     }));
 
     if (selectedEntityId) network.selectNodes?.([selectedEntityId]);
-    if (isOverviewClustered) {
+    if (clusterStructureChanged && isOverviewClustered) {
       // The cluster operation is intentionally limited to overview mode. A
       // selected context keeps real node identities and stable positions.
       applyOverviewClusters();
     }
-    if (!hasFittedRef.current && boundedGraph.nodes.length > 0) {
-      hasFittedRef.current = true;
-      fitTimerRef.current = setTimeout(() => {
-        if (!networkRef.current) return;
-        networkRef.current.fit?.({ animation: motionAnimation(motionReduced, 350) });
-        if (motionReduced) networkRef.current.stopSimulation?.();
-      }, motionReduced ? 0 : 120);
+    if (clusterStructureChanged) {
+      renderedClusterKeyRef.current = clusterKey;
+    }
+    if (boundedGraph.nodes.length > 0 && fittedNodeSetKeyRef.current !== nodeSetKey) {
+      fittedNodeSetKeyRef.current = nodeSetKey;
+      // A context fit is intentionally immediate. Selection, search, hover,
+      // theme, and zoom updates never reach this branch, so the viewport is
+      // preserved while the operator explores the current graph.
+      network.fit?.({ animation: false });
     }
   }, [
     boundedGraph,
+    clusterKey,
     focusedEdgeIds,
     isDark,
     isOverviewClustered,
@@ -655,25 +642,9 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     motionReduced,
     searchMatchedIds,
     selectedEntityId,
+    nodeSetKey,
     zoomScale,
   ]);
-
-  useEffect(() => {
-    if (!isSearchActive || searchMatchedIds.size === 0 || !networkRef.current) return;
-    networkRef.current.fit?.({
-      nodes: [...searchMatchedIds],
-      animation: motionAnimation(motionReduced, 350),
-    });
-  }, [isSearchActive, motionReduced, searchMatchedIds]);
-
-  useEffect(() => {
-    if (!selectedEntityId || !networkRef.current || !boundedGraph.nodes.some((node) => node.id === selectedEntityId)) return;
-    networkRef.current.selectNodes?.([selectedEntityId]);
-    networkRef.current.focus?.(selectedEntityId, {
-      scale: 1.1,
-      animation: motionAnimation(motionReduced, 300),
-    });
-  }, [boundedGraph.nodes, motionReduced, selectedEntityId]);
 
   const handleZoomIn = () => {
     const network = networkRef.current;
@@ -762,4 +733,3 @@ export const KnowledgeGraphCanvas: React.FC<KnowledgeGraphCanvasProps> = ({
     </div>
   );
 };
-
