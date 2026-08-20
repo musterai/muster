@@ -45,7 +45,7 @@ describe('migration ledger and atomic execution', () => {
     const rows = await db.query<{ id: string; checksum: string; applied_at: string; schema_version: string; tool_version: string }>(
       'SELECT id, checksum, applied_at, schema_version, tool_version FROM schema_migrations ORDER BY id',
     );
-    expect(rows).toHaveLength(11);
+    expect(rows).toHaveLength(12);
     expect(rows.every(row => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
     expect(rows.every(row => row.applied_at && row.schema_version === '1' && row.tool_version)).toBe(true);
   });
@@ -141,6 +141,7 @@ describe('migration ledger and atomic execution', () => {
       '009-event-order.sql',
       '010-pagination-indexes.sql',
       '011-workflow-lane-roles.sql',
+      '012-kb-read-indexes.sql',
     ]);
 
     expect(await db.query<{ name: string }>('PRAGMA table_info("event")'))
