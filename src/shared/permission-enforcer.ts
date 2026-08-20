@@ -128,12 +128,17 @@ export const OPERATION_PERMISSIONS = {
   list_agents: WORKSPACE_READ,
 
   // ── KB Tools ──
-  list_knowledge_bases: WORKSPACE_READ,
+  list_knowledge_bases: 'kb.read',
   create_knowledge_base: 'kb.write',
   link_knowledge_base: 'kb.write',
-  search_knowledge: WORKSPACE_READ,
-  get_entity_knowledge: WORKSPACE_READ,
-  get_gained_knowledge: WORKSPACE_READ,
+  search_knowledge: 'kb.read',
+  get_entity_knowledge: 'kb.read',
+  get_gained_knowledge: 'kb.read',
+  get_knowledge_overview: 'kb.read',
+  list_knowledge: 'kb.read',
+  list_kb_entities: 'kb.read',
+  list_kb_relations: 'kb.read',
+  get_entity_context: 'kb.read',
   add_gained_knowledge: 'kb.write',
   upsert_kb_entity: 'kb.write',
   update_gained_knowledge: 'kb.write',
@@ -316,6 +321,10 @@ export const REST_ROUTE_PERMISSIONS: RoutePattern[] = [
 
   // ── KB ──
   { method: 'GET', pattern: /^\/api\/v1\/kbs$/, operation: 'list_knowledge_bases' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs\/overview$/, operation: 'get_knowledge_overview' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs\/facts$/, operation: 'list_knowledge' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs\/entities$/, operation: 'list_kb_entities' },
+  { method: 'GET', pattern: /^\/api\/v1\/kbs\/entity-context$/, operation: 'get_entity_context' },
   { method: 'GET', pattern: /^\/api\/v1\/kbs\/search$/, operation: 'search_knowledge' },
   { method: 'GET', pattern: /^\/api\/v1\/kbs\/entity-knowledge$/, operation: 'get_entity_knowledge' },
   { method: 'GET', pattern: /^\/api\/v1\/kbs\/facts\/[^/]+$/, operation: 'get_gained_knowledge' },

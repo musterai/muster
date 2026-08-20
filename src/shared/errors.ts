@@ -33,6 +33,17 @@ export class ValidationError extends AppError {
   }
 }
 
+export class KBEntityAmbiguityError extends AppError {
+  constructor(details: Record<string, unknown>) {
+    super(
+      'Entity reference matches multiple knowledge-base entities',
+      409,
+      'KB_ENTITY_AMBIGUOUS',
+      details,
+    );
+  }
+}
+
 /** A structured domain-rule refusal that is safe for both REST and MCP callers to act on. */
 export class CardRuleError extends AppError {
   constructor(code: string, message: string, details: Record<string, unknown>) {

@@ -7,9 +7,11 @@ import { validateRequest } from '../middleware/validate.js';
 import {
   idParamsSchema,
   kbActorSchema,
+  kbBrowseQuerySchema,
   kbCreateSchema,
   kbEntityCreateSchema,
   kbEntityKnowledgeQuerySchema,
+  kbEntityContextQuerySchema,
   kbEntityListQuerySchema,
   kbEntityUpdateSchema,
   kbFactsQuerySchema,
@@ -17,9 +19,11 @@ import {
   kbFactUpdateSchema,
   kbGraphQuerySchema,
   kbListQuerySchema,
+  kbOverviewQuerySchema,
   kbProjectLinkSchema,
   kbRelationCreateSchema,
   kbSearchQuerySchema,
+  kbScopedEntityListQuerySchema,
 } from '../schemas.js';
 
 /**
@@ -59,6 +63,78 @@ export function createKBRouter(kbService: KBService): Router {
       const { actor_id: claimedActorId, ...data } = req.body;
       const kb = await kbService.create(data, getActorId(req, claimedActorId), undefined, req.authContext);
       res.status(201).json(kb);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/kbs/overview', ...validateRequest({ query: kbOverviewQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const overview = await kbService.getKnowledgeOverview({
+        kb_id: req.query.kb_id as string | undefined,
+        project_id: req.query.project_id as string | undefined,
+      }, { facet_limit: req.query.facet_limit as number | undefined }, req.authContext);
+      res.json(overview);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/kbs/facts', ...validateRequest({ query: kbBrowseQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const page = await kbService.listKnowledgePage({
+        kb_id: req.query.kb_id as string | undefined,
+        project_id: req.query.project_id as string | undefined,
+      }, {
+        q: req.query.q as string | undefined,
+        category: req.query.category as string | undefined,
+        entity_id: req.query.entity_id as string | undefined,
+        entity_type: req.query.entity_type as string | undefined,
+        attached: req.query.attached as boolean | undefined,
+        has_source: req.query.has_source as boolean | undefined,
+      }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
+      res.json(page);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/kbs/entities', ...validateRequest({ query: kbScopedEntityListQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const page = await kbService.listScopedEntitiesPage({
+        kb_id: req.query.kb_id as string | undefined,
+        project_id: req.query.project_id as string | undefined,
+      }, { type: req.query.type as string | undefined }, {
+        cursor: req.query.cursor as string | undefined,
+        limit: req.query.limit as number | undefined,
+      }, req.authContext);
+      res.json(page);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/kbs/entity-context', ...validateRequest({ query: kbEntityContextQuerySchema }), async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const context = await kbService.getEntityContext({
+        kb_id: req.query.kb_id as string | undefined,
+        project_id: req.query.project_id as string | undefined,
+      }, {
+        entity_id: req.query.entity_id as string | undefined,
+        query: req.query.q as string | undefined,
+      }, {
+        depth: req.query.depth as number | undefined,
+        max_nodes: req.query.max_nodes as number | undefined,
+        max_edges: req.query.max_edges as number | undefined,
+        fact_cursor: req.query.fact_cursor as string | undefined,
+        fact_limit: req.query.fact_limit as number | undefined,
+        relation_types: req.query.relation_types as string[] | undefined,
+        entity_types: req.query.entity_types as string[] | undefined,
+      }, req.authContext);
+      res.json(context);
     } catch (err) {
       next(err);
     }

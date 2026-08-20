@@ -14,24 +14,39 @@ import {
   EntityKnowledgeResult,
   KBGraphTree,
   KBGraphNode,
-  KBGraphLink
+  KBGraphLink,
+  KBReadScopeInput,
+  KBFactBrowseSummary,
+  KBKnowledgeOverview,
+  KBEntitySummary,
+  KBEntityCandidate,
+  KBEntityContext,
+  KBEntityContextNode,
+  KBEntityContextEdge,
+  KBKnowledgeOverviewOptions,
+  KBBrowseFilters,
+  KBEntityListFilters,
+  KBEntityReference,
+  KBEntityContextOptions,
 } from '../shared/types.js';
 import { EventService } from './event.service.js';
 import { decodeCursor, encodeCursor, normalizePageLimit, Page, PageInfo, PageOptions, toPage } from '../shared/pagination.js';
 import type { AuthContext } from '../shared/auth-context.js';
 import { OPEN_AUTH_CONTEXT } from '../shared/auth-context.js';
-import { NotFoundError, ValidationError } from '../shared/errors.js';
+import { KBEntityAmbiguityError, NotFoundError, ValidationError } from '../shared/errors.js';
 import {
   assertResourceWorkspace,
   assertResourcesShareWorkspace,
   assertResourcesWorkspace,
   workspaceIdFor,
 } from './helpers/workspace-scope.helper.js';
+import { KBReadScopeResolver, ResolvedKBReadScope } from './kb-read-scope.js';
 
 export class KBService {
   constructor(
     private db: DatabaseAdapter,
-    private eventService?: EventService
+    private eventService: EventService | undefined,
+    private readonly readScopeResolver: KBReadScopeResolver,
   ) {}
 
   private async logEventForKb(
@@ -730,6 +745,399 @@ export class KBService {
     await this.db.execute('DELETE FROM kb_relation WHERE id = ?', [id]);
   }
 
+  // --- Bounded read model ---
+
+  async getKnowledgeOverview(
+    scopeInput: KBReadScopeInput,
+    options: KBKnowledgeOverviewOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<KBKnowledgeOverview> {
+    const scope = await this.readScopeResolver.resolve(scopeInput, auth);
+    const facetLimit = this.boundedInteger(options.facet_limit, 20, 1, 50, 'facet_limit');
+    const factScope = scope.predicate('f.kb_id');
+    const factCounts = await this.db.query<{ facts: number | string; attached_facts: number | string; unattached_facts: number | string }>(
+      `SELECT COUNT(*) AS facts,
+       SUM(CASE WHEN f.entity_id IS NOT NULL THEN 1 ELSE 0 END) AS attached_facts,
+       SUM(CASE WHEN f.entity_id IS NULL THEN 1 ELSE 0 END) AS unattached_facts
+       FROM kb_fact f WHERE ${factScope.sql}`,
+      factScope.params,
+    );
+    const entityScope = scope.predicate('e.kb_id');
+    const entityCounts = await this.db.query<{ count: number | string }>(
+      `SELECT COUNT(*) AS count FROM kb_entity e WHERE ${entityScope.sql}`, entityScope.params,
+    );
+    const relationScope = scope.predicate('r.kb_id');
+    const relationCounts = await this.db.query<{ count: number | string }>(
+      `SELECT COUNT(*) AS count FROM kb_relation r WHERE ${relationScope.sql}`, relationScope.params,
+    );
+    const kbScope = scope.predicate('kb.id');
+    const kbRows = await this.db.query<{ value: string; label: string; count: number | string }>(
+      `SELECT kb.id AS value, kb.name AS label, COUNT(f.id) AS count
+       FROM knowledge_base kb LEFT JOIN kb_fact f ON f.kb_id = kb.id
+       WHERE ${kbScope.sql} GROUP BY kb.id, kb.name
+       ORDER BY count DESC, kb.name ASC, kb.id ASC LIMIT ?`,
+      [...kbScope.params, facetLimit + 1],
+    );
+    const categoryScope = scope.predicate('f.kb_id');
+    const categoryRows = await this.db.query<{ value: string; count: number | string }>(
+      `SELECT f.category AS value, COUNT(*) AS count FROM kb_fact f
+       WHERE ${categoryScope.sql} GROUP BY f.category
+       ORDER BY count DESC, f.category ASC LIMIT ?`,
+      [...categoryScope.params, facetLimit + 1],
+    );
+    const typeScope = scope.predicate('e.kb_id');
+    const typeRows = await this.db.query<{ value: string; count: number | string }>(
+      `SELECT e.type AS value, COUNT(*) AS count FROM kb_entity e
+       WHERE ${typeScope.sql} GROUP BY e.type
+       ORDER BY count DESC, e.type ASC LIMIT ?`,
+      [...typeScope.params, facetLimit + 1],
+    );
+    const relationTypeScope = scope.predicate('r.kb_id');
+    const relationTypeRows = await this.db.query<{ value: string; count: number | string }>(
+      `SELECT r.relation_type AS value, COUNT(*) AS count FROM kb_relation r
+       WHERE ${relationTypeScope.sql} GROUP BY r.relation_type
+       ORDER BY count DESC, r.relation_type ASC LIMIT ?`,
+      [...relationTypeScope.params, facetLimit + 1],
+    );
+    const first = factCounts[0];
+    const facet = (rows: Array<{ value: string; label?: string; count: number | string }>) => ({
+      items: rows.slice(0, facetLimit).map(row => ({
+        value: row.value,
+        ...(row.label ? { label: row.label } : {}),
+        count: Number(row.count || 0),
+      })),
+      has_more: rows.length > facetLimit,
+    });
+    return {
+      scope: scope.summary,
+      totals: {
+        facts: Number(first?.facts || 0),
+        attached_facts: Number(first?.attached_facts || 0),
+        unattached_facts: Number(first?.unattached_facts || 0),
+        entities: Number(entityCounts[0]?.count || 0),
+        relations: Number(relationCounts[0]?.count || 0),
+      },
+      facets: {
+        knowledge_bases: facet(kbRows),
+        categories: facet(categoryRows),
+        entity_types: facet(typeRows),
+        relation_types: facet(relationTypeRows),
+      },
+    };
+  }
+
+  async listKnowledgePage(
+    scopeInput: KBReadScopeInput,
+    filters: KBBrowseFilters = {},
+    options: PageOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<Page<KBFactBrowseSummary>> {
+    const scope = await this.readScopeResolver.resolve(scopeInput, auth);
+    if (filters.entity_id) await assertResourceWorkspace(this.db, auth, 'kb_entity', filters.entity_id);
+    const query = filters.q?.trim() || undefined;
+    const limit = normalizePageLimit(options.limit);
+    const cursorScope = `knowledge-browse:${scope.cursor_key}:${JSON.stringify({
+      q: query || null,
+      category: filters.category || null,
+      entity_id: filters.entity_id || null,
+      entity_type: filters.entity_type || null,
+      attached: filters.attached ?? null,
+      has_source: filters.has_source ?? null,
+    })}`;
+    const cursor = decodeCursor(options.cursor, cursorScope, 2);
+    const resolvedScope = scope.predicate('f.kb_id');
+    let sql = `SELECT f.id, f.title, SUBSTR(f.content, 1, 280) AS excerpt,
+      f.category, f.confidence, f.created_at, f.updated_at,
+      kb.id AS kb_id, kb.name AS kb_name,
+      e.id AS entity_id, e.name AS entity_name, e.type AS entity_type, e.identifier AS entity_identifier,
+      pr.id AS source_principal_id, pr.kind AS source_kind,
+      COALESCE(agent.name, app_user.display_name) AS source_display_name
+      FROM kb_fact f JOIN knowledge_base kb ON kb.id = f.kb_id
+      LEFT JOIN kb_entity e ON e.id = f.entity_id AND e.kb_id = f.kb_id
+      LEFT JOIN principal pr ON pr.id = f.source_principal_id
+      LEFT JOIN agent ON agent.id = pr.id LEFT JOIN app_user ON app_user.id = pr.id
+      WHERE ${resolvedScope.sql}`;
+    const params: unknown[] = [...resolvedScope.params];
+    if (query) {
+      const pattern = `%${query}%`;
+      sql += ` AND (
+        LOWER(f.title) LIKE LOWER(?) OR LOWER(f.content) LIKE LOWER(?) OR LOWER(f.category) LIKE LOWER(?)
+        OR LOWER(COALESCE(e.name, '')) LIKE LOWER(?) OR LOWER(COALESCE(e.identifier, '')) LIKE LOWER(?)
+      )`;
+      params.push(pattern, pattern, pattern, pattern, pattern);
+    }
+    if (filters.category) { sql += ' AND f.category = ?'; params.push(filters.category); }
+    if (filters.entity_id) { sql += ' AND f.entity_id = ?'; params.push(filters.entity_id); }
+    if (filters.entity_type) { sql += ' AND e.type = ?'; params.push(filters.entity_type); }
+    if (filters.attached === true) sql += ' AND f.entity_id IS NOT NULL';
+    if (filters.attached === false) sql += ' AND f.entity_id IS NULL';
+    if (filters.has_source === true) sql += ' AND f.source_principal_id IS NOT NULL';
+    if (filters.has_source === false) sql += ' AND f.source_principal_id IS NULL';
+    if (cursor) {
+      sql += ' AND (f.updated_at < ? OR (f.updated_at = ? AND f.id < ?))';
+      params.push(cursor[0], cursor[0], cursor[1]);
+    }
+    sql += ' ORDER BY f.updated_at DESC, f.id DESC LIMIT ?'; params.push(limit + 1);
+    const rows = await this.db.query<Record<string, unknown>>(sql, params);
+    const included = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const last = included.at(-1);
+    return {
+      items: included.map(row => this.mapFactBrowseSummary(row)),
+      page: {
+        limit,
+        has_more: hasMore,
+        next_cursor: hasMore && last ? encodeCursor(cursorScope, [String(last.updated_at), String(last.id)]) : null,
+      },
+    };
+  }
+
+  async listScopedEntitiesPage(
+    scopeInput: KBReadScopeInput,
+    filters: KBEntityListFilters = {},
+    options: PageOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<Page<KBEntitySummary>> {
+    const scope = await this.readScopeResolver.resolve(scopeInput, auth);
+    const limit = normalizePageLimit(options.limit);
+    const cursorScope = `knowledge-entities:${scope.cursor_key}:${JSON.stringify({ type: filters.type || null })}`;
+    const cursor = decodeCursor(options.cursor, cursorScope, 3);
+    const resolvedScope = scope.predicate('e.kb_id');
+    let sql = `${this.entitySummarySelect()} WHERE ${resolvedScope.sql}`;
+    const params: unknown[] = [...resolvedScope.params];
+    if (filters.type) { sql += ' AND e.type = ?'; params.push(filters.type); }
+    if (cursor) {
+      sql += ` AND (LOWER(e.name) > ? OR (LOWER(e.name) = ? AND
+        (e.name > ? OR (e.name = ? AND e.id > ?))))`;
+      params.push(cursor[0], cursor[0], cursor[1], cursor[1], cursor[2]);
+    }
+    sql += ' ORDER BY LOWER(e.name) ASC, e.name ASC, e.id ASC LIMIT ?'; params.push(limit + 1);
+    const rows = await this.db.query<Record<string, unknown>>(sql, params);
+    const included = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const last = included.at(-1);
+    return {
+      items: included.map(row => this.mapEntitySummary(row)),
+      page: {
+        limit,
+        has_more: hasMore,
+        next_cursor: hasMore && last
+          ? encodeCursor(cursorScope, [String(last.name).toLowerCase(), String(last.name), String(last.id)])
+          : null,
+      },
+    };
+  }
+
+  async getEntityContext(
+    scopeInput: KBReadScopeInput,
+    reference: KBEntityReference,
+    options: KBEntityContextOptions = {},
+    auth: AuthContext = OPEN_AUTH_CONTEXT,
+  ): Promise<KBEntityContext> {
+    const scope = await this.readScopeResolver.resolve(scopeInput, auth);
+    const hasId = Boolean(reference.entity_id);
+    const hasQuery = Boolean(reference.query?.trim());
+    if (hasId === hasQuery) {
+      throw new ValidationError('Exactly one of entity_id or query is required', {
+        fields: ['entity_id', 'query'], code: 'KB_ENTITY_REFERENCE_REQUIRED',
+      });
+    }
+    const depth = this.boundedInteger(options.depth, 1, 0, 2, 'depth');
+    const nodeLimit = this.boundedInteger(options.max_nodes, 50, 1, 100, 'max_nodes');
+    const edgeLimit = this.boundedInteger(options.max_edges, 200, 1, 500, 'max_edges');
+    const factLimit = this.boundedInteger(options.fact_limit, 20, 1, 100, 'fact_limit');
+    const relationTypes = [...new Set(options.relation_types || [])].sort();
+    const entityTypes = [...new Set(options.entity_types || [])].sort();
+    if (relationTypes.length > 50 || entityTypes.length > 50) {
+      throw new ValidationError('Context filter lists may contain at most 50 values');
+    }
+
+    const candidateScope = scope.predicate('e.kb_id');
+    const candidateParams: unknown[] = [...candidateScope.params];
+    let candidateWhere: string;
+    if (reference.entity_id) {
+      candidateWhere = 'e.id = ?'; candidateParams.push(reference.entity_id);
+    } else {
+      candidateWhere = '(e.identifier = ? OR LOWER(e.name) = LOWER(?))';
+      candidateParams.push(reference.query!.trim(), reference.query!.trim());
+    }
+    const candidateRows = await this.db.query<Record<string, unknown>>(
+      `SELECT e.id, e.kb_id, e.name, e.type, e.identifier, kb.name AS kb_name
+       FROM kb_entity e JOIN knowledge_base kb ON kb.id = e.kb_id
+       WHERE ${candidateScope.sql} AND ${candidateWhere}
+       ORDER BY kb.name ASC, kb.id ASC, LOWER(e.name) ASC, e.name ASC, e.id ASC LIMIT 21`,
+      candidateParams,
+    );
+    if (candidateRows.length === 0) throw new NotFoundError('Entity knowledge not found');
+    if (candidateRows.length > 1) {
+      throw new KBEntityAmbiguityError({
+        candidates: candidateRows.slice(0, 20).map(row => this.mapEntityCandidate(row)),
+        candidate_count_at_least: candidateRows.length > 20 ? 21 : candidateRows.length,
+        candidates_truncated: candidateRows.length > 20,
+      });
+    }
+    const root = this.mapEntityCandidate(candidateRows[0]);
+    const facts = await this.listKnowledgePage(
+      scopeInput, { entity_id: root.id }, { cursor: options.fact_cursor, limit: factLimit }, auth,
+    );
+    const depths = new Map<string, number>([[root.id, 0]]);
+    let frontier = [root.id];
+    const edges = new Map<string, KBEntityContextEdge>();
+    const expandable = new Set<string>();
+    let truncated = false;
+
+    for (let hop = 1; hop <= depth && frontier.length > 0; hop += 1) {
+      const placeholders = frontier.map(() => '?').join(',');
+      const params: unknown[] = [root.knowledge_base.id, ...frontier, ...frontier];
+      let sql = `SELECT r.id, r.kb_id, r.source_entity_id, r.target_entity_id, r.relation_type, r.created_at,
+        source.type AS source_type, target.type AS target_type
+        FROM kb_relation r
+        JOIN kb_entity source ON source.id = r.source_entity_id AND source.kb_id = r.kb_id
+        JOIN kb_entity target ON target.id = r.target_entity_id AND target.kb_id = r.kb_id
+        WHERE r.kb_id = ? AND (r.source_entity_id IN (${placeholders}) OR r.target_entity_id IN (${placeholders}))`;
+      if (relationTypes.length) {
+        sql += ` AND r.relation_type IN (${relationTypes.map(() => '?').join(',')})`;
+        params.push(...relationTypes);
+      }
+      sql += ' ORDER BY r.created_at ASC, r.id ASC LIMIT ?'; params.push(edgeLimit + 1);
+      const relationRows = await this.db.query<Record<string, unknown>>(sql, params);
+      if (relationRows.length > edgeLimit) {
+        truncated = true; frontier.forEach(id => expandable.add(id));
+      }
+      const nextFrontier = new Set<string>();
+      for (const row of relationRows.slice(0, edgeLimit)) {
+        const edgeId = String(row.id);
+        if (edges.has(edgeId)) continue;
+        const sourceId = String(row.source_entity_id);
+        const targetId = String(row.target_entity_id);
+        const sourceInFrontier = frontier.includes(sourceId);
+        const neighborId = sourceInFrontier ? targetId : sourceId;
+        const neighborType = String(sourceInFrontier ? row.target_type : row.source_type);
+        if (entityTypes.length && !entityTypes.includes(neighborType)) continue;
+        if (!depths.has(neighborId)) {
+          if (depths.size >= nodeLimit) {
+            truncated = true; frontier.forEach(id => expandable.add(id)); continue;
+          }
+          depths.set(neighborId, hop); nextFrontier.add(neighborId);
+        }
+        if (edges.size >= edgeLimit) {
+          truncated = true; frontier.forEach(id => expandable.add(id)); break;
+        }
+        edges.set(edgeId, {
+          id: edgeId,
+          kb_id: String(row.kb_id),
+          source: sourceId,
+          target: targetId,
+          relation_type: String(row.relation_type),
+          created_at: String(row.created_at),
+        });
+      }
+      frontier = [...nextFrontier];
+    }
+    if (frontier.length > 0 && depth > 0) frontier.forEach(id => expandable.add(id));
+    const nodeRows = await this.entitySummaryRows(scope, [...depths.keys()]);
+    const nodes: KBEntityContextNode[] = nodeRows
+      .map(row => ({ ...this.mapEntitySummary(row), depth: depths.get(String(row.id)) || 0 }))
+      .sort((a, b) => a.depth - b.depth || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+    return {
+      scope: scope.summary,
+      root,
+      facts,
+      nodes,
+      edges: [...edges.values()],
+      depth,
+      truncation: {
+        truncated,
+        node_limit: nodeLimit,
+        edge_limit: edgeLimit,
+        nodes_returned: nodes.length,
+        edges_returned: edges.size,
+        expandable_entity_ids: [...expandable].sort(),
+      },
+    };
+  }
+
+  private async entitySummaryRows(scope: ResolvedKBReadScope, entityIds: string[]): Promise<Record<string, unknown>[]> {
+    if (entityIds.length === 0) return [];
+    const resolvedScope = scope.predicate('e.kb_id');
+    return this.db.query<Record<string, unknown>>(
+      `${this.entitySummarySelect()} WHERE ${resolvedScope.sql}
+       AND e.id IN (${entityIds.map(() => '?').join(',')})`,
+      [...resolvedScope.params, ...entityIds],
+    );
+  }
+
+  private entitySummarySelect(): string {
+    return `SELECT e.id, e.name, e.type, e.identifier, e.created_at, e.updated_at,
+      kb.id AS kb_id, kb.name AS kb_name,
+      (SELECT COUNT(*) FROM kb_fact fact WHERE fact.entity_id = e.id AND fact.kb_id = e.kb_id) AS fact_count,
+      (SELECT COUNT(*) FROM kb_relation incoming WHERE incoming.target_entity_id = e.id AND incoming.kb_id = e.kb_id) AS incoming_relation_count,
+      (SELECT COUNT(*) FROM kb_relation outgoing WHERE outgoing.source_entity_id = e.id AND outgoing.kb_id = e.kb_id) AS outgoing_relation_count
+      FROM kb_entity e JOIN knowledge_base kb ON kb.id = e.kb_id`;
+  }
+
+  private mapFactBrowseSummary(row: Record<string, unknown>): KBFactBrowseSummary {
+    const sourceId = row.source_principal_id ? String(row.source_principal_id) : null;
+    const entityId = row.entity_id ? String(row.entity_id) : null;
+    return {
+      id: String(row.id),
+      title: String(row.title),
+      excerpt: String(row.excerpt || ''),
+      knowledge_base: { id: String(row.kb_id), name: String(row.kb_name) },
+      category: String(row.category),
+      confidence: Number(row.confidence),
+      entity: entityId ? {
+        id: entityId,
+        name: String(row.entity_name),
+        type: String(row.entity_type),
+        identifier: row.entity_identifier === null || row.entity_identifier === undefined
+          ? null : String(row.entity_identifier),
+      } : null,
+      source: sourceId ? {
+        principal_id: sourceId,
+        kind: row.source_kind ? String(row.source_kind) : null,
+        display_name: row.source_display_name ? String(row.source_display_name) : null,
+      } : null,
+      created_at: String(row.created_at),
+      updated_at: String(row.updated_at),
+    };
+  }
+
+  private mapEntitySummary(row: Record<string, unknown>): KBEntitySummary {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      type: String(row.type),
+      identifier: row.identifier === null || row.identifier === undefined ? null : String(row.identifier),
+      knowledge_base: { id: String(row.kb_id), name: String(row.kb_name) },
+      fact_count: Number(row.fact_count || 0),
+      incoming_relation_count: Number(row.incoming_relation_count || 0),
+      outgoing_relation_count: Number(row.outgoing_relation_count || 0),
+      created_at: String(row.created_at),
+      updated_at: String(row.updated_at),
+    };
+  }
+
+  private mapEntityCandidate(row: Record<string, unknown>): KBEntityCandidate {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      type: String(row.type),
+      identifier: row.identifier === null || row.identifier === undefined ? null : String(row.identifier),
+      knowledge_base: { id: String(row.kb_id), name: String(row.kb_name) },
+    };
+  }
+
+  private boundedInteger(value: number | undefined, fallback: number, min: number, max: number, field: string): number {
+    const resolved = value ?? fallback;
+    if (!Number.isSafeInteger(resolved) || resolved < min || resolved > max) {
+      throw new ValidationError(`${field} must be an integer between ${min} and ${max}`, {
+        field, minimum: min, maximum: max,
+      });
+    }
+    return resolved;
+  }
+
   // --- Aggregated Knowledge & Graph Queries ---
 
   async getEntityKnowledge(queryStr: string, kbIds?: string[], optionsOrAuth: PageOptions | AuthContext = {}, auth: AuthContext = OPEN_AUTH_CONTEXT): Promise<EntityKnowledgeResult | null> {
@@ -879,7 +1287,9 @@ export class KBService {
     projectId?: string,
     auth: AuthContext = OPEN_AUTH_CONTEXT,
   ): Promise<{ facts: KBFactSummary[]; entities: KBEntity[]; page: PageInfo }> {
-    if (projectId) await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const projectScope = projectId
+      ? await this.readScopeResolver.resolve({ project_id: projectId }, auth)
+      : null;
     if (kbIds?.length) await assertResourcesWorkspace(this.db, auth, kbIds.map(id => ['knowledge_base', id]));
     const scopedWorkspace = workspaceIdFor(auth);
     const limit = normalizePageLimit(options.limit ?? 20);
@@ -902,7 +1312,10 @@ export class KBService {
         sql += ` AND f.kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
         params.push(...normalizedKbIds);
       }
-      if (projectId) { sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=f.kb_id AND pkb.project_id=?)'; params.push(projectId); }
+      if (projectScope) {
+        const resolved = projectScope.predicate('f.kb_id');
+        sql += ` AND ${resolved.sql}`; params.push(...resolved.params);
+      }
       if (scopedWorkspace) {
         sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=f.kb_id AND p.workspace_id=?) AND NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=f.kb_id AND p2.workspace_id<>?) AND (f.entity_id IS NULL OR EXISTS (SELECT 1 FROM kb_entity valid_entity WHERE valid_entity.id=f.entity_id AND valid_entity.kb_id=f.kb_id))';
         params.push(scopedWorkspace, scopedWorkspace);
@@ -923,7 +1336,10 @@ export class KBService {
         sql += ` AND kb_id IN (${normalizedKbIds.map(() => '?').join(',')})`;
         params.push(...normalizedKbIds);
       }
-      if (projectId) { sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=kb_entity.kb_id AND pkb.project_id=?)'; params.push(projectId); }
+      if (projectScope) {
+        const resolved = projectScope.predicate('kb_entity.kb_id');
+        sql += ` AND ${resolved.sql}`; params.push(...resolved.params);
+      }
       if (scopedWorkspace) {
         sql += ' AND EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=kb_entity.kb_id AND p.workspace_id=?) AND NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=kb_entity.kb_id AND p2.workspace_id<>?)';
         params.push(scopedWorkspace, scopedWorkspace);
@@ -969,7 +1385,9 @@ export class KBService {
     const options: PageOptions = isAuth ? {} : optionsOrAuth as PageOptions;
     if (isAuth) auth = optionsOrAuth as AuthContext;
     if (kbId) await assertResourceWorkspace(this.db, auth, 'knowledge_base', kbId);
-    if (projectId) await assertResourceWorkspace(this.db, auth, 'project', projectId);
+    const projectScope = projectId
+      ? await this.readScopeResolver.resolve({ project_id: projectId }, auth)
+      : null;
     const scopedWorkspace = workspaceIdFor(auth);
     const limit = normalizePageLimit(options.limit);
     const scope = `kb-graph:${kbId || ''}:${projectId || ''}:${scopedWorkspace || 'open'}`;
@@ -979,7 +1397,10 @@ export class KBService {
     const filter = (alias: string) => {
       const clauses: string[] = [];
       if (kbId) { params.push(kbId); clauses.push(`${alias}.kb_id = ?`); }
-      if (projectId) { params.push(projectId); clauses.push(`EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=${alias}.kb_id AND pkb.project_id=?)`); }
+      if (projectScope) {
+        const resolved = projectScope.predicate(`${alias}.kb_id`);
+        clauses.push(resolved.sql); params.push(...resolved.params);
+      }
       if (scopedWorkspace) {
         clauses.push(`EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=${alias}.kb_id AND p.workspace_id=?)`);
         clauses.push(`NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=${alias}.kb_id AND p2.workspace_id<>?)`);
@@ -1008,7 +1429,10 @@ export class KBService {
       const linkParams: unknown[] = [];
       const linkClauses: string[] = [];
       if (kbId) { linkClauses.push('r.kb_id=?'); linkParams.push(kbId); }
-      if (projectId) { linkClauses.push('EXISTS (SELECT 1 FROM project_knowledge_base pkb WHERE pkb.kb_id=r.kb_id AND pkb.project_id=?)'); linkParams.push(projectId); }
+      if (projectScope) {
+        const resolved = projectScope.predicate('r.kb_id');
+        linkClauses.push(resolved.sql); linkParams.push(...resolved.params);
+      }
       if (scopedWorkspace) {
         linkClauses.push('EXISTS (SELECT 1 FROM project_knowledge_base ok JOIN project p ON p.id=ok.project_id WHERE ok.kb_id=r.kb_id AND p.workspace_id=?)');
         linkClauses.push('NOT EXISTS (SELECT 1 FROM project_knowledge_base bad JOIN project p2 ON p2.id=bad.project_id WHERE bad.kb_id=r.kb_id AND p2.workspace_id<>?)');

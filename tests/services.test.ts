@@ -15,6 +15,7 @@ import {
   AgentService,
   EventService,
   KBService,
+  KBReadScopeResolver,
 } from '../src/services/index.js';
 import { rankBetween } from '../src/shared/lexorank.js';
 
@@ -57,7 +58,7 @@ describe('Domain Services Integration Tests', () => {
     commentService = new CommentService(db, eventService);
     documentService = createDocumentServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
-    kbService = new KBService(db, eventService);
+    kbService = new KBService(db, eventService, new KBReadScopeResolver(db));
   });
 
   afterEach(async () => {

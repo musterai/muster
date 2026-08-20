@@ -15,6 +15,7 @@ import {
   DocumentService,
   EventService,
   KBService,
+  KBReadScopeResolver,
   RoleService,
 } from '../src/services/index.js';
 import { createMcpServer, Services } from '../src/mcp/server.js';
@@ -74,7 +75,7 @@ describe('Atomic card claiming and lease expiry', () => {
     commentService = new CommentService(db, eventService);
     documentService = createDocumentServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
-    kbService = new KBService(db, eventService);
+    kbService = new KBService(db, eventService, new KBReadScopeResolver(db));
   });
 
   afterEach(async () => {

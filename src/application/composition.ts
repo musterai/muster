@@ -17,6 +17,7 @@ import {
   EventService,
   InvitationService,
   KBService,
+  KBReadScopeResolver,
   McpOAuthService,
   OidcService,
   ProjectService,
@@ -91,6 +92,8 @@ export function createApplicationServices(
     assignmentOperations: cardAssignmentOperations,
     relationOperations: cardRelationOperations,
   });
+  const kbReadScopeResolver = new KBReadScopeResolver(db);
+  const kbService = new KBService(db, eventService, kbReadScopeResolver);
 
   return {
     db,
@@ -111,7 +114,7 @@ export function createApplicationServices(
     projectService: new ProjectService(db, eventService, boardService, documentService),
     columnService: new ColumnService(db, eventService, auditService),
     commentService: new CommentService(db, eventService),
-    kbService: new KBService(db, eventService),
+    kbService,
     roleService: new RoleService(db, eventService),
     sessionService: new SessionService(db),
     oidcService: new OidcService(db),

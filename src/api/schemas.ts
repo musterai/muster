@@ -55,6 +55,15 @@ const queryInteger = (min: number, max: number) => z.preprocess((value) => {
   return value;
 }, z.number().int().min(min).max(max));
 
+const queryStringList = (maxItems: number) => z.preprocess(
+  value => typeof value === 'string' ? [value] : value,
+  z.array(textSchema(MAX_LABEL)).max(maxItems),
+);
+const optionalQueryText = z.preprocess(
+  value => typeof value === 'string' && value.trim() === '' ? undefined : value,
+  textSchema(MAX_QUERY).optional(),
+);
+
 const metadataSchema = z.record(z.unknown()).refine((value) => JSON.stringify(value).length <= 100_000, {
   message: 'metadata is too large',
 });
@@ -289,6 +298,47 @@ export const kbSearchQuerySchema = strictObject({
   ...paginationQuery,
 });
 export const kbGraphQuerySchema = strictObject({ kb_id: optionalId, project_id: optionalId, ...paginationQuery });
+const requireKBReadScope = <T extends z.AnyZodObject>(schema: T) => schema.refine(
+  value => Boolean(value.kb_id) !== Boolean(value.project_id),
+  { message: 'exactly one of kb_id or project_id is required' },
+);
+export const kbOverviewQuerySchema = requireKBReadScope(strictObject({
+  kb_id: optionalId,
+  project_id: optionalId,
+  facet_limit: queryInteger(1, 50).optional(),
+}));
+export const kbBrowseQuerySchema = requireKBReadScope(strictObject({
+  kb_id: optionalId,
+  project_id: optionalId,
+  q: optionalQueryText,
+  category: textSchema(MAX_LABEL).optional(),
+  entity_id: optionalId,
+  entity_type: textSchema(MAX_LABEL).optional(),
+  attached: queryBoolean.optional(),
+  has_source: queryBoolean.optional(),
+  ...paginationQuery,
+}));
+export const kbScopedEntityListQuerySchema = requireKBReadScope(strictObject({
+  kb_id: optionalId,
+  project_id: optionalId,
+  type: textSchema(MAX_LABEL).optional(),
+  ...paginationQuery,
+}));
+export const kbEntityContextQuerySchema = requireKBReadScope(strictObject({
+  kb_id: optionalId,
+  project_id: optionalId,
+  entity_id: optionalId,
+  q: textSchema(MAX_QUERY).optional(),
+  depth: queryInteger(0, 2).optional(),
+  max_nodes: queryInteger(1, 100).optional(),
+  max_edges: queryInteger(1, 500).optional(),
+  fact_cursor: paginationQuery.cursor,
+  fact_limit: queryInteger(1, 100).optional(),
+  relation_types: queryStringList(50).optional(),
+  entity_types: queryStringList(50).optional(),
+})).refine(value => Boolean(value.entity_id) !== Boolean(value.q), {
+  message: 'exactly one of entity_id or q is required',
+});
 export const kbEntityKnowledgeQuerySchema = strictObject({
   q: textSchema(MAX_QUERY).optional(),
   identifier: textSchema(MAX_QUERY).optional(),

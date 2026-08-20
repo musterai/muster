@@ -25,6 +25,7 @@ import {
   CommentService,
   DocumentService,
   KBService,
+  KBReadScopeResolver,
 } from '../src/services/index.js';
 import {
   TOOL_PERMISSIONS,
@@ -124,7 +125,7 @@ describe('MUS-22: Permission enforcement', () => {
     commentService = new CommentService(db, eventService);
     documentService = createDocumentServiceForTest(db, eventService);
     agentService = new AgentService(db, eventService);
-    kbService = new KBService(db, eventService);
+    kbService = new KBService(db, eventService, new KBReadScopeResolver(db));
 
     await roleService.seedPreset(wsId);
   });
@@ -582,6 +583,31 @@ describe('MUS-22: Permission enforcement', () => {
     expect(() => requirePermission('delete_project', auth, {})).toThrow(PermissionDeniedError);
   });
 
+  it('requires explicit kb.read for legacy and bounded KB read operations', () => {
+    (config.auth as any).mode = 'enforced';
+    const withoutKBRead = makeAuth([], 'observer');
+    const withKBRead = makeAuth(['kb.read'], 'observer');
+    const operations = [
+      'list_knowledge_bases',
+      'search_knowledge',
+      'get_entity_knowledge',
+      'get_gained_knowledge',
+      'get_knowledge_overview',
+      'list_knowledge',
+      'list_kb_entities',
+      'list_kb_relations',
+      'get_entity_context',
+    ];
+
+    for (const operation of operations) {
+      expect(() => requirePermission(operation, withoutKBRead, {}))
+        .toThrowError(expect.objectContaining({
+          refusal: expect.objectContaining({ required_permission: 'kb.read' }),
+        }));
+      expect(() => requirePermission(operation, withKBRead, {})).not.toThrow();
+    }
+  });
+
   it('requirePermission allows workspace.admin through all checks', () => {
     (config.auth as any).mode = 'enforced';
     const auth = makeAuth(['workspace.admin']);
@@ -863,6 +889,25 @@ describe('MUS-22: Permission enforcement', () => {
     expect(() => requireRestPermission('POST', '/api/v1/projects', auth)).not.toThrow();
   });
 
+  it('requires explicit kb.read for bounded KB REST reads', () => {
+    (config.auth as any).mode = 'enforced';
+    const withoutKBRead = makeAuth([], 'observer');
+    const withKBRead = makeAuth(['kb.read'], 'observer');
+
+    for (const path of [
+      '/api/v1/kbs/overview',
+      '/api/v1/kbs/facts',
+      '/api/v1/kbs/entities',
+      '/api/v1/kbs/entity-context',
+    ]) {
+      expect(() => requireRestPermission('GET', path, withoutKBRead))
+        .toThrowError(expect.objectContaining({
+          refusal: expect.objectContaining({ required_permission: 'kb.read' }),
+        }));
+      expect(() => requireRestPermission('GET', path, withKBRead)).not.toThrow();
+    }
+  });
+
   it('uses agent registration authority for MCP OAuth consent instead of project creation', () => {
     (config.auth as any).mode = 'enforced';
     expect(() => requireRestPermission(
@@ -969,9 +1014,18 @@ describe('MUS-22: Permission enforcement', () => {
     expect(TOOL_PERMISSIONS['list_documents']).toBe(WORKSPACE_READ);
   });
 
-  it('uses the same membership requirement for knowledge reads', () => {
-    expect(TOOL_PERMISSIONS['search_knowledge']).toBe(WORKSPACE_READ);
-    expect(TOOL_PERMISSIONS['get_entity_knowledge']).toBe(WORKSPACE_READ);
+  it('uses explicit kb.read for legacy and bounded knowledge reads', () => {
+    for (const operation of [
+      'list_knowledge_bases',
+      'search_knowledge',
+      'get_entity_knowledge',
+      'get_gained_knowledge',
+      'get_knowledge_overview',
+      'list_knowledge',
+      'list_kb_entities',
+      'list_kb_relations',
+      'get_entity_context',
+    ]) expect(TOOL_PERMISSIONS[operation]).toBe('kb.read');
   });
 
   it('enforces implicit MCP reads from membership, not write permissions', () => {

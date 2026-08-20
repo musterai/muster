@@ -12,6 +12,7 @@ import { InvitationService } from '../src/services/invitation.service.js';
 import { RoleService } from '../src/services/role.service.js';
 import { CardService } from '../src/services/card.service.js';
 import { KBService } from '../src/services/kb.service.js';
+import { KBReadScopeResolver } from '../src/services/kb-read-scope.js';
 import { AuditService } from '../src/services/audit.service.js';
 import { TokenService } from '../src/services/token.service.js';
 import type { AuthContext } from '../src/shared/auth-context.js';
@@ -162,7 +163,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     await db.execute('INSERT INTO project_knowledge_base (project_id, kb_id, created_at) VALUES (?, ?, ?)', [project.id, kbId, now]);
 
     const failing = new FailingAdapter(db, sql => /INSERT INTO kb_fact/i.test(sql));
-    const kb = new KBService(failing, new EventService(failing));
+    const kb = new KBService(failing, new EventService(failing), new KBReadScopeResolver(failing));
     await expect(kb.addFact({ kb_id: kbId, title: 'Fact', content: '10.0.0.1' })).rejects.toThrow('injected failure');
     expect((await db.query('SELECT * FROM kb_fact')).length).toBe(0);
     expect((await db.query('SELECT * FROM kb_entity')).length).toBe(0);
@@ -199,11 +200,15 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     })).rejects.toThrow('injected failure');
     expect((await db.query('SELECT id FROM comment WHERE card_id = ?', [card.id])).length).toBe(0);
 
-    const kb = new KBService(db, events);
+    const kb = new KBService(db, events, new KBReadScopeResolver(db));
     const knowledgeBase = await kb.create({ name: 'Boundary KB', project_ids: [project.id] });
     const entity = await kb.upsertEntity({ kb_id: knowledgeBase.id, name: 'Original', type: 'service' });
     const failingKbDb = new FailingAdapter(db, sql => /INSERT INTO event/i.test(sql));
-    await expect(new KBService(failingKbDb, new EventService(failingKbDb)).updateEntity(entity.id, { name: 'Transient' }))
+    await expect(new KBService(
+      failingKbDb,
+      new EventService(failingKbDb),
+      new KBReadScopeResolver(failingKbDb),
+    ).updateEntity(entity.id, { name: 'Transient' }))
       .rejects.toThrow('injected failure');
     expect((await db.query<{ name: string }>('SELECT name FROM kb_entity WHERE id = ?', [entity.id]))[0].name).toBe('Original');
   });
@@ -426,7 +431,7 @@ describe('MUS-65: multi-write transaction rollback boundaries', () => {
     const commentService = new (await import('../src/services/comment.service.js')).CommentService(db, events);
     const documentService = createDocumentServiceForTest(db, events);
     const agentService = new (await import('../src/services/agent.service.js')).AgentService(db, events);
-    const kbService = new KBService(db, events);
+    const kbService = new KBService(db, events, new KBReadScopeResolver(db));
     const roleService = new RoleService(db, events);
     const auditService = new AuditService(db);
     await db.execute(

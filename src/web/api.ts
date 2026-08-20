@@ -1,5 +1,5 @@
 // File: src/web/api.ts
-import { Project, Board, Column, Card, CardSummary, CardDetails, Document, DocumentSummary, DocumentVersion, DocumentVersionSummary, Agent, User, AuthMe, Role, Invitation, CreatedInvitation, DeviceGrantInfo, McpAuthorizeDetails, AuditRecord, Event, ProjectSummary, Label, KnowledgeBase, KBEntity, KBFact, KBFactSummary, KBRelation, EntityKnowledgeResult, KBGraphTree, CardLinkRelationType, CreateCardWorkLink, ApiToken, CreatedApiToken, Page, ColumnWorkflowRole } from './types.js';
+import { Project, Board, Column, Card, CardSummary, CardDetails, Document, DocumentSummary, DocumentVersion, DocumentVersionSummary, Agent, User, AuthMe, Role, Invitation, CreatedInvitation, DeviceGrantInfo, McpAuthorizeDetails, AuditRecord, Event, ProjectSummary, Label, KnowledgeBase, KBEntity, KBFact, KBFactSummary, KBRelation, EntityKnowledgeResult, KBGraphTree, CardLinkRelationType, CreateCardWorkLink, ApiToken, CreatedApiToken, Page, ColumnWorkflowRole, KBReadScopeInput, KBKnowledgeOverview, KBFactBrowseSummary, KBBrowseFilters, KBEntityListFilters, KBEntitySummary, KBEntityContext, KBEntityReference, KBEntityContextOptions } from './types.js';
 
 const API_BASE = '/api/v1';
 
@@ -74,6 +74,25 @@ async function fetchAllPages<T>(url: string, signal?: AbortSignal): Promise<T[]>
     if (response.page.has_more && !cursor) throw new Error('Paginated response omitted its continuation cursor');
   } while (cursor);
   return items;
+}
+
+function knowledgeQuery(
+  scope: KBReadScopeInput,
+  values: Record<string, string | number | boolean | null | undefined | string[]> = {},
+): string {
+  const params = new URLSearchParams();
+  if (scope.kb_id) params.set('kb_id', scope.kb_id);
+  if (scope.project_id) params.set('project_id', scope.project_id);
+  Object.entries(values).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => params.append(key, item));
+    } else {
+      params.set(key, String(value));
+    }
+  });
+  const serialized = params.toString();
+  return serialized ? `?${serialized}` : '';
 }
 
 type AllBoardsPage = Board & {
@@ -275,6 +294,26 @@ export const api = {
 
   // Knowledge Base
   getKBs: (projectId?: string, signal?: AbortSignal) => fetchAllPages<KnowledgeBase>(projectId ? `/kbs?project_id=${projectId}` : '/kbs', signal),
+  getKnowledgeOverview: (scope: KBReadScopeInput, options: { facet_limit?: number } = {}, signal?: AbortSignal) =>
+    fetchJSON<KBKnowledgeOverview>(`/kbs/overview${knowledgeQuery(scope, options)}`, { signal }),
+  listKnowledge: (
+    scope: KBReadScopeInput,
+    filters: KBBrowseFilters = {},
+    options: { cursor?: string; limit?: number } = {},
+    signal?: AbortSignal,
+  ) => fetchJSON<Page<KBFactBrowseSummary>>(`/kbs/facts${knowledgeQuery(scope, { ...filters, ...options })}`, { signal }),
+  listKnowledgeEntities: (
+    scope: KBReadScopeInput,
+    filters: KBEntityListFilters = {},
+    options: { cursor?: string; limit?: number } = {},
+    signal?: AbortSignal,
+  ) => fetchJSON<Page<KBEntitySummary>>(`/kbs/entities${knowledgeQuery(scope, { ...filters, ...options })}`, { signal }),
+  getEntityContext: (
+    scope: KBReadScopeInput,
+    reference: KBEntityReference,
+    options: KBEntityContextOptions = {},
+    signal?: AbortSignal,
+  ) => fetchJSON<KBEntityContext>(`/kbs/entity-context${knowledgeQuery(scope, { ...reference, ...options })}`, { signal }),
   createKB: (data: { name: string; description?: string; is_global?: boolean; project_ids?: string[] }) =>
     fetchJSON<KnowledgeBase>('/kbs', { method: 'POST', body: JSON.stringify(data) }),
   linkKB: (kbId: string, projectId: string) => fetchJSON<void>(`/kbs/${kbId}/link`, { method: 'POST', body: JSON.stringify({ project_id: projectId }) }),
