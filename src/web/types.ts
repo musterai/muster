@@ -63,6 +63,8 @@ export interface Card {
   board_id?: string;
   board_name?: string;
   board_slug?: string;
+  project_id?: string;
+  project_slug?: string;
 }
 
 export type CardSummary = Omit<Card, 'description'>;

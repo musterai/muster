@@ -240,6 +240,8 @@ export interface Card {
   board_id?: string;
   board_name?: string;
   board_slug?: string;
+  project_id?: string;
+  project_slug?: string;
 }
 
 /** Collection representation: large markdown bodies are detail-only. */

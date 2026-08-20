@@ -119,6 +119,7 @@ export const App: React.FC = () => {
     openCardRequest,
     setOpenCardRequest,
     requestNewCard,
+    requestOpenCard,
   } = useAppDialogController();
 
   const rememberSelectedBoard = useCallback((boardId: string | null) => {
@@ -153,23 +154,34 @@ export const App: React.FC = () => {
       setProjects(list);
 
       const nav = parseLocation();
+      const linkedCard = nav.cardReference
+        ? await api.getCardDetails(nav.cardReference)
+        : null;
       const projectFromRoute = nav.projectSlug
         ? list.find((project) => project.slug === nav.projectSlug)
         : undefined;
       const selectedProject = selectId
         ? list.find((project) => project.id === selectId)
-        : projectFromRoute || list[0];
+        : list.find((project) => project.id === linkedCard?.project_id) || projectFromRoute || list[0];
 
       if (selectedProject) {
-        const boardSlug = selectedProject.id === projectFromRoute?.id ? nav.boardSlug : null;
+        const boardSlug = linkedCard?.board_slug
+          || (selectedProject.id === projectFromRoute?.id ? nav.boardSlug : null);
         selectedBoardSlugRef.current = boardSlug;
+        rememberSelectedBoard(linkedCard?.board_id ?? null);
+        if (linkedCard) {
+          setActiveTab('board');
+          requestOpenCard(linkedCard.id);
+        }
         setSelectedProjectId(selectedProject.id);
-        updateLocation(selectedProject.slug, activeTab, selectedDocId, selectedEntityId, boardSlug, true);
+        if (!linkedCard) {
+          updateLocation(selectedProject.slug, activeTab, selectedDocId, selectedEntityId, boardSlug, true);
+        }
       }
     } catch (err) {
       console.error('Error loading projects:', err);
     }
-  }, [activeTab, selectedDocId, selectedEntityId]);
+  }, [activeTab, rememberSelectedBoard, requestOpenCard, selectedDocId, selectedEntityId]);
 
   // Load Selected Project Data
   const loadProjectData = useCallback(async () => {
@@ -307,7 +319,20 @@ export const App: React.FC = () => {
   // Handle Browser Back / Forward buttons (popstate)
   useEffect(() => {
     const handlePopState = () => {
-      const { projectSlug, tab, boardSlug, docId, entityId } = parseLocation();
+      const { projectSlug, tab, boardSlug, docId, entityId, cardReference } = parseLocation();
+      if (cardReference) {
+        api.getCardDetails(cardReference)
+          .then((linkedCard) => {
+            selectedBoardSlugRef.current = linkedCard.board_slug ?? null;
+            rememberSelectedBoard(linkedCard.board_id ?? null);
+            setSelectedProjectId(linkedCard.project_id ?? null);
+            setActiveTab('board');
+            setViewFocusVersion((version) => version + 1);
+            requestOpenCard(linkedCard.id);
+          })
+          .catch((err) => console.error('Failed to open linked card:', err));
+        return;
+      }
       const project = projects.find((candidate) => candidate.slug === projectSlug);
       if (project) {
         setSelectedProjectId(project.id);
@@ -330,7 +355,7 @@ export const App: React.FC = () => {
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [boards, loadProjectData, projects, rememberSelectedBoard, selectedProjectId]);
+  }, [boards, loadProjectData, projects, rememberSelectedBoard, requestOpenCard, selectedProjectId]);
 
 
   useEffect(() => {

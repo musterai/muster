@@ -479,6 +479,12 @@ describe('Domain Services Integration Tests', () => {
     const target = await cardService.create({ column_id: columns[0].id, title: 'Keyed target' });
     const agent = await agentService.register({ name: 'Keyed Writes Agent' });
 
+    const linkedDetails = await cardService.getById(source.key);
+    expect(linkedDetails.board_id).toBe(boards[0].id);
+    expect(linkedDetails.board_slug).toBe(boards[0].slug);
+    expect(linkedDetails.project_id).toBe(project.id);
+    expect(linkedDetails.project_slug).toBe(project.slug);
+
     const updated = await cardService.update(source.key, { title: 'Updated by key' });
     expect(updated.id).toBe(source.id);
     expect(updated.title).toBe('Updated by key');
