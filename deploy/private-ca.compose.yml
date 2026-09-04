@@ -1,0 +1,10 @@
+# Optional overlay for an OIDC provider signed by a private CA.
+services:
+  muster-server:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/secrets/private_ca
+    secrets:
+      - private_ca
+secrets:
+  private_ca:
+    file: ${MUSTER_CA_BUNDLE_FILE:?Set an absolute path to the trusted CA PEM bundle}

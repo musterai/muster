@@ -1,0 +1,17 @@
+# Static configuration. Merge these sections with your existing Traefik setup.
+entryPoints:
+  websecure:
+    address: ":443"
+    # The immediate TLS edge must not trust headers supplied by arbitrary clients.
+    forwardedHeaders:
+      insecure: false
+    transport:
+      respondingTimeouts:
+        readTimeout: 60s
+        writeTimeout: 0s
+        idleTimeout: 180s
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+# No Docker socket, dashboard, access log, or certificate resolver is required.

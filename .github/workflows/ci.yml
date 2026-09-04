@@ -2,7 +2,7 @@ name: MusterAI CI
 
 on:
   push:
-    branches: [ main, feat/*, rebuild/* ]
+    branches: [ main, feat/*, feature/*, rebuild/* ]
   pull_request:
     branches: [ main ]
 
@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         # Node 22 is the oldest supported maintained LTS line; Node 24 is
         # the newer line used by the production image. Keep both in the
@@ -56,12 +57,8 @@ jobs:
           fi
 
       - name: Install Dependencies
-        run: npm ci --engine-strict
-
-      - name: Reject High-Severity Dependency Advisories
-        run: |
-          npm run audit:runtime
-          npm run audit
+        # The explicit audit gate below checks both runtime and all dependencies.
+        run: npm ci --engine-strict --no-audit
 
       - name: Run Build (Vite SPA + TypeScript)
         run: npm run build
@@ -77,3 +74,65 @@ jobs:
 
       - name: Verify Health Route Unit Test
         run: npx vitest run tests/health.test.ts --passWithNoTests
+
+      # Always obtain test results before a registry outage can fail the audit gate.
+      - name: Reject High-Severity Dependency Advisories
+        run: |
+          audit_with_retries() {
+            for audit_attempt in 1 2 3; do
+              if "$@" -- --fetch-timeout=30000 --fetch-retries=0; then
+                return 0
+              fi
+              if [ "$audit_attempt" -lt 3 ]; then
+                echo "Audit attempt $audit_attempt failed; retrying in 10 seconds."
+                sleep 10
+              fi
+            done
+            # Registry errors and advisories above the threshold still fail CI.
+            return 1
+          }
+          audit_with_retries npm run audit:runtime
+          audit_with_retries npm run audit
+
+  office-proxies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify supplied TLS certificates and NGINX/Traefik streaming
+        run: node scripts/remote-test/proxy-smoke.mjs
+      - name: Upload sanitized proxy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-proxies
+          path: scratch/office-proxy-*/report.json
+          if-no-files-found: warn
+
+  remote-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify real HTTPS, Keycloak, browsers, and independent MCP clients
+        env:
+          MUSTER_TEST_BACKEND: ${{ matrix.backend }}
+          MUSTER_TEST_CLIENTS: 10
+        run: npm run test:remote
+      - name: Upload sanitized remote verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-${{ matrix.backend }}
+          path: scratch/remote-*/results/report.json
+          if-no-files-found: warn

@@ -12,9 +12,8 @@
 		# Do not relay a client-provided forwarding chain. Caddy's defaults are
 		# already spoof-resistant; these explicit overwrites keep that property
 		# clear and make the one-hop Compose contract auditable.
-		header_up -X-Forwarded-For
-		header_up -X-Forwarded-Proto
-		header_up -X-Forwarded-Host
+		# Set replaces existing values. Do not also delete these fields:
+		# Caddy applies deletions after sets, which erases the new values.
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Forwarded-Proto {scheme}
 		header_up X-Forwarded-Host {http.request.host}

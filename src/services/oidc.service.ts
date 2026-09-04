@@ -55,6 +55,11 @@ export class OidcService {
       this.discoveryPromise = client.discovery(issuerUrl, clientId, clientSecret, undefined, { execute: executeSteps }).then((c) => {
         this.discoveryConfig = c;
         return c;
+      }).catch((error: unknown) => {
+        // A failed first discovery must not poison every future login. Keep
+        // sharing in-flight requests, but retry discovery after an IdP outage.
+        this.discoveryPromise = null;
+        throw error;
       });
     }
     return this.discoveryPromise;

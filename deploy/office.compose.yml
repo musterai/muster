@@ -1,0 +1,37 @@
+# Run behind an existing TLS terminator. See docs/remote-testing.md.
+# No certificate issuer or edge proxy is selected by this file.
+name: muster-office
+services:
+  muster-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MUSTER_HOST: 0.0.0.0
+      MUSTER_PORT: "6878"
+      MUSTER_AUTH_MODE: enforced
+      MUSTER_PUBLIC_URL: ${MUSTER_PUBLIC_URL:?Set the browser-facing HTTPS origin}
+      MUSTER_TRUST_PROXY: ${MUSTER_TRUST_PROXY:?Set the exact immediate TLS proxy peer IP}
+      MUSTER_OIDC_ISSUER: ${MUSTER_OIDC_ISSUER:?Set the OIDC issuer URL}
+      MUSTER_OIDC_CLIENT_ID: ${MUSTER_OIDC_CLIENT_ID:?Set the OIDC client ID}
+      MUSTER_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      MUSTER_BOOTSTRAP_OWNER_SUBJECT: ${MUSTER_BOOTSTRAP_OWNER_SUBJECT:?Set the pinned owner subject}
+      MUSTER_DB_PATH: /app/data/muster.db
+    ports:
+      - "${MUSTER_BACKEND_BIND_ADDRESS:-127.0.0.1}:${MUSTER_BACKEND_PORT:-6878}:6878"
+    volumes:
+      - muster-data:/app/data
+    secrets:
+      - oidc_client_secret
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:6878/api/v1/health/ready]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+volumes:
+  muster-data: {}
+secrets:
+  oidc_client_secret:
+    file: ../secrets/oidc_client_secret

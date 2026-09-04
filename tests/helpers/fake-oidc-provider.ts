@@ -25,6 +25,7 @@ export class FakeOidcProvider {
   public issuer = '';
   private privateKey!: CryptoKey;
   private publicJwk!: jose.JWK;
+  private previousJwks: jose.JWK[] = [];
   private kid = 'test-key-1';
 
   // code -> pending authorization details, single-use (deleted on redemption)
@@ -36,6 +37,7 @@ export class FakeOidcProvider {
   overrideNonce: string | null = null;
   /** When set, sign the next ID token with this key instead of the provider's own (simulates an unknown-key attack). */
   useForeignKeyForNextToken = false;
+  discoveryUnavailable = false;
   private foreignPrivateKey: CryptoKey | null = null;
 
   private constructor() {}
@@ -72,6 +74,15 @@ export class FakeOidcProvider {
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
+  /** Publish a replacement signing key while retaining the old verification key. */
+  async rotateSigningKey(): Promise<void> {
+    this.previousJwks.push(this.publicJwk);
+    const { privateKey, publicKey } = await jose.generateKeyPair('RS256', { extractable: true });
+    this.privateKey = privateKey;
+    this.kid = crypto.randomUUID();
+    this.publicJwk = { ...await jose.exportJWK(publicKey), kid: this.kid, alg: 'RS256', use: 'sig' };
+  }
+
   /** Simulates the user completing the consent screen at the authorization_endpoint. */
   authorize(params: URLSearchParams): URL {
     const redirectUri = params.get('redirect_uri')!;
@@ -95,6 +106,11 @@ export class FakeOidcProvider {
     const url = new URL(req.url || '/', this.issuer);
 
     if (url.pathname === '/.well-known/openid-configuration') {
+      if (this.discoveryUnavailable) {
+        res.writeHead(503);
+        res.end('temporarily unavailable');
+        return;
+      }
       this.json(res, {
         issuer: this.issuer,
         authorization_endpoint: `${this.issuer}/authorize`,
@@ -110,7 +126,7 @@ export class FakeOidcProvider {
     }
 
     if (url.pathname === '/jwks') {
-      this.json(res, { keys: [this.publicJwk] });
+      this.json(res, { keys: [...this.previousJwks, this.publicJwk] });
       return;
     }
 

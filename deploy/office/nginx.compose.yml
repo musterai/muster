@@ -1,0 +1,29 @@
+# Combine with deploy/office.compose.yml; paths resolve relative to deploy/.
+services:
+  muster-server:
+    networks:
+      default:
+        mac_address: ${MUSTER_DEFAULT_MAC:-02:4d:55:53:54:01}
+      office-edge:
+        ipv4_address: ${MUSTER_BACKEND_IP:?Set Muster's IPv4 address in the office-edge subnet}
+        mac_address: ${MUSTER_BACKEND_MAC:-02:4d:55:53:54:02}
+  tls-proxy:
+    image: nginx:1.30.4-alpine
+    restart: unless-stopped
+    depends_on: [muster-server]
+    ports:
+      - "${MUSTER_HTTPS_BIND_ADDRESS:-127.0.0.1}:${MUSTER_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./office/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${MUSTER_TLS_CERT_FILE:?Set the absolute full certificate chain PEM path}:/certs/fullchain.pem:ro
+      - ${MUSTER_TLS_KEY_FILE:?Set the absolute private key PEM path}:/certs/privkey.pem:ro
+    networks:
+      office-edge:
+        ipv4_address: ${MUSTER_TRUST_PROXY:?Set the proxy IPv4 address in the office-edge subnet}
+        mac_address: ${MUSTER_PROXY_MAC:-02:4d:55:53:54:03}
+networks:
+  office-edge:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${MUSTER_PROXY_SUBNET:?Set an unused private IPv4 subnet for the proxy network}

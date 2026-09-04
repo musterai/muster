@@ -122,7 +122,7 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
   });
 
   /** Drives login -> fake IdP consent -> callback, returning the session cookie header and the callback response. */
-  async function signIn(sub: string, email: string | null): Promise<{ setCookie: string | undefined; callbackRes: Response }> {
+  async function signIn(sub: string, email: string | null, sessionState?: string): Promise<{ setCookie: string | undefined; callbackRes: Response }> {
     provider.setNextIdentity(sub, email);
 
     const loginRes = await fetch(`${baseUrl}/api/v1/auth/login`, { redirect: 'manual' });
@@ -130,11 +130,18 @@ describe('MUS-25: auth routes (end-to-end over HTTP)', () => {
     const authorizeUrl = new URL(loginRes.headers.get('location')!);
 
     const callbackUrl = provider.authorize(authorizeUrl.searchParams);
+    if (sessionState) callbackUrl.searchParams.set('session_state', sessionState);
     const callbackRes = await fetch(callbackUrl.href.replace(callbackUrl.origin, baseUrl), { redirect: 'manual' });
 
     const setCookie = parseSetCookie(callbackRes.headers);
     return { setCookie: setCookie || undefined, callbackRes };
   }
+
+  it('accepts the OIDC session_state parameter returned by Keycloak', async () => {
+    const { callbackRes, setCookie } = await signIn('keycloak-owner', 'owner@example.com', 'opaque-keycloak-session');
+    expect(callbackRes.status).toBe(302);
+    expect(setCookie).toContain('muster_session=');
+  });
 
   it('admits the first user to sign in as workspace owner', async () => {
     const { setCookie } = await signIn('sub-first', 'first@example.com');

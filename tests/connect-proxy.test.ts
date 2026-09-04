@@ -228,4 +228,43 @@ describe('MUS-27: muster connect proxy', () => {
     expect(body.error).toBe('upstream_unreachable');
     expect(body.message).toContain('http://127.0.0.1:1');
   });
+
+  it('closes the upstream SSE connection when the local subscriber disconnects', async () => {
+    const upstream = express();
+    let closed = false;
+    upstream.get('/api/v1/stream', (_req: Request, res: Response) => {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.write('data: connected\n\n');
+      res.once('close', () => { closed = true; });
+    });
+    const up = await listen(upstream);
+    upstreamServer = up.server;
+    await startProxy(up.baseUrl);
+    const controller = new AbortController();
+    const response = await fetch(`${proxyUrl}/api/v1/stream`, {
+      headers: { Authorization: `Bearer ${LOCAL_TOKEN}` }, signal: controller.signal,
+    });
+    await response.body!.getReader().read();
+    controller.abort();
+    await expect.poll(() => closed, { timeout: 2000 }).toBe(true);
+  });
+
+  it('forwards SSE headers immediately even when the first event has not arrived', async () => {
+    const upstream = express();
+    upstream.get('/api/v1/stream', (_req: Request, res: Response) => {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.flushHeaders();
+    });
+    const up = await listen(upstream);
+    upstreamServer = up.server;
+    await startProxy(up.baseUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1000);
+    try {
+      const response = await fetch(`${proxyUrl}/api/v1/stream`, {
+        headers: { Authorization: `Bearer ${LOCAL_TOKEN}` }, signal: controller.signal,
+      });
+      expect(response.status).toBe(200);
+    } finally { clearTimeout(timeout); controller.abort(); }
+  });
 });

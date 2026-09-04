@@ -164,7 +164,12 @@ export function checkBundleBudget({ manifest, metadata, budget, sizeOf }) {
       }
     }
     if (record.src !== undefined) {
-      canonicalRelativePath(`Vite manifest ${source}.src`, record.src);
+      // Vite's root is src/web, so dependency font asset identifiers are
+      // relative to that root. They are provenance labels, never paths read
+      // from disk. Output filenames and all JavaScript sources stay strict.
+      const dependencyFont = typeof record.file === 'string' && record.file.endsWith('.woff2')
+        && typeof record.src === 'string' && record.src.startsWith('../../node_modules/');
+      canonicalRelativePath(`Vite manifest ${source}.src`, dependencyFont ? record.src.slice(6) : record.src);
       if (record.src !== source) {
         throw new Error(`Vite manifest source ${source} must equal its normalized src ${record.src}`);
       }

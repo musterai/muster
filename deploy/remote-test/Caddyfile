@@ -1,0 +1,17 @@
+{
+    admin off
+    auto_https disable_redirects
+}
+https://muster.test {
+    tls /certs/server.crt /certs/server.key
+    reverse_proxy muster-backend:6878 {
+        # Replacement is sufficient; deletion runs after replacement in Caddy.
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {http.request.host}
+    }
+}
+https://sso.muster.test {
+    tls /certs/server.crt /certs/server.key
+    reverse_proxy keycloak:8080
+}

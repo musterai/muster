@@ -1,0 +1,40 @@
+# Dynamic file-provider configuration. Replace hostname and upstream as needed.
+http:
+  routers:
+    muster:
+      rule: Host(`muster.office.example`)
+      entryPoints: [websecure]
+      service: muster
+      middlewares: [muster-forwarding]
+      tls: {}
+  middlewares:
+    muster-forwarding:
+      headers:
+        customRequestHeaders:
+          Host: muster.office.example
+          X-Forwarded-Host: muster.office.example
+          X-Forwarded-Proto: https
+          X-Forwarded-Port: "443"
+          Forwarded: ""
+  services:
+    muster:
+      loadBalancer:
+        passHostHeader: true
+        serversTransport: muster
+        responseForwarding:
+          flushInterval: -1ms
+        servers:
+          - url: http://muster-server:6878
+  serversTransports:
+    muster:
+      forwardingTimeouts:
+        # Bound connection establishment without shortening SSE streams or
+        # changing other applications' transports in an existing Traefik.
+        dialTimeout: 3s
+tls:
+  certificates:
+    - certFile: /certs/fullchain.pem
+      keyFile: /certs/privkey.pem
+  options:
+    default:
+      minVersion: VersionTLS12

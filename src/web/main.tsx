@@ -3,6 +3,8 @@ import React, { lazy } from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App.js';
 import { LazyBoundary } from './components/LazyBoundary.js';
+import '@fontsource-variable/inter/wght.css';
+import '@fontsource-variable/jetbrains-mono/wght.css';
 import './index.css';
 import './styles/semantic-utilities.css';
 import './styles/markdown.css';
