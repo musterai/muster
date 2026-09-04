@@ -60,6 +60,22 @@ jobs:
         # The explicit audit gate below checks both runtime and all dependencies.
         run: npm ci --engine-strict --no-audit
 
+      - name: Run Build (Vite SPA + TypeScript)
+        run: npm run build
+
+      - name: Verify Frontend Bundle Budget
+        run: npm run bundle:check
+
+      - name: Verify Browser E2E Failure Cleanup
+        run: npm run test:browser-cleanup
+
+      - name: Run Vitest Suite (SQLite + PostgreSQL)
+        run: npm test
+
+      - name: Verify Health Route Unit Test
+        run: npx vitest run tests/health.test.ts --passWithNoTests
+
+      # Always obtain test results before a registry outage can fail the audit gate.
       - name: Reject High-Severity Dependency Advisories
         run: |
           audit_with_retries() {
@@ -77,21 +93,6 @@ jobs:
           }
           audit_with_retries npm run audit:runtime
           audit_with_retries npm run audit
-
-      - name: Run Build (Vite SPA + TypeScript)
-        run: npm run build
-
-      - name: Verify Frontend Bundle Budget
-        run: npm run bundle:check
-
-      - name: Verify Browser E2E Failure Cleanup
-        run: npm run test:browser-cleanup
-
-      - name: Run Vitest Suite (SQLite + PostgreSQL)
-        run: npm test
-
-      - name: Verify Health Route Unit Test
-        run: npx vitest run tests/health.test.ts --passWithNoTests
 
   office-proxies:
     runs-on: ubuntu-latest

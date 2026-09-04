@@ -130,7 +130,14 @@ export class PostgresAdapter extends BasePostgresAdapter {
   // never consume a checked-out database connection.
   private afterCommitQueue: Promise<unknown> = Promise.resolve();
 
-  constructor(connectionString: string, pool: PostgresPoolLike = new pg.Pool({ connectionString })) {
+  constructor(connectionString: string, pool: PostgresPoolLike = new pg.Pool({
+    connectionString,
+    // pg otherwise waits indefinitely for pool capacity or a DNS/TCP/auth
+    // handshake. During an outage that also strands readiness requests.
+    // The driver removes timed-out connections so a later request can retry;
+    // this limits connection acquisition, not SQL execution or migrations.
+    connectionTimeoutMillis: 5_000,
+  })) {
     super();
     this.pool = pool;
     // Idle connections emit errors outside any request's try/catch when the
