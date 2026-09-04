@@ -86,6 +86,34 @@ describe('MUS-27: remote-client (muster login/logout helpers)', () => {
     expect(match?.id).toBe('tok-new');
   });
 
+  it('finds a login token beyond the first page and follows only opaque cursors', async () => {
+    const app = express();
+    const cursors: unknown[] = [];
+    app.get('/api/v1/tokens', (req, res) => {
+      cursors.push(req.query.cursor);
+      expect(req.query.limit).toBe('100');
+      expect(req.headers.authorization).toBe('Bearer verification-token');
+      res.json(req.query.cursor ? {
+        items: [{ id: 'tok-new', prefix: 'bb112233', name: 'login', revoked_at: null }],
+        page: { has_more: false, next_cursor: null },
+      } : {
+        items: [{ id: 'tok-old', prefix: 'aaaaaaaa', name: 'old', revoked_at: null }],
+        page: { has_more: true, next_cursor: 'opaque_cursor' },
+      });
+    });
+    const { server: s, baseUrl } = await listen(app); server = s;
+    const tokens = await listMyTokens(baseUrl, 'verification-token');
+    expect(tokens.map(token => token.id)).toEqual(['tok-old', 'tok-new']);
+    expect(cursors).toEqual([undefined, 'opaque_cursor']);
+  });
+
+  it('refuses incomplete pagination instead of silently losing the logout token ID', async () => {
+    const app = express();
+    app.get('/api/v1/tokens', (_req, res) => res.json({ items: [], page: { has_more: true, next_cursor: null } }));
+    const { server: s, baseUrl } = await listen(app); server = s;
+    await expect(listMyTokens(baseUrl, 'token')).rejects.toThrow(/cursor/);
+  });
+
   it('revokeToken confirms success/already-revoked and surfaces network or server failures', async () => {
     let deletedId: string | null = null;
     const app = express();

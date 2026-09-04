@@ -121,6 +121,26 @@ function fixture() {
 }
 
 describe('frontend bundle budget provenance', () => {
+  it('accepts dependency font provenance while still validating the emitted asset path', () => {
+    const data = fixture();
+    const source = '../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2';
+    (data.manifest as Record<string, unknown>)[source] = { src: source, file: 'assets/inter-123.woff2' };
+    expect(checkBundleBudget(data).failures).toEqual([]);
+    (data.manifest as Record<string, unknown>)[source] = { src: source, file: '../inter-123.woff2' };
+    expect(() => checkBundleBudget(data)).toThrow(/traversal/);
+  });
+
+  it('does not extend dependency-font normalization to JavaScript or nested traversal', () => {
+    const data = fixture();
+    const source = '../../node_modules/example/../../hidden.woff2';
+    (data.manifest as Record<string, unknown>)[source] = { src: source, file: 'assets/font.woff2' };
+    expect(() => checkBundleBudget(data)).toThrow(/traversal/);
+    delete (data.manifest as Record<string, unknown>)[source];
+    const script = '../../node_modules/example/script.js';
+    (data.manifest as Record<string, unknown>)[script] = { src: script, file: 'assets/script.js' };
+    expect(() => checkBundleBudget(data)).toThrow(/traversal/);
+  });
+
   it('accepts legitimate cross-bound graph-only output imported only by Knowledge Base', () => {
     expect(checkBundleBudget(fixture()).failures).toEqual([]);
   });

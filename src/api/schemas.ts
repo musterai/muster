@@ -425,6 +425,9 @@ export const authCallbackQuerySchema = strictObject({
   error_description: textSchema(MAX_QUERY).optional(),
   error_uri: urlSchema.optional(),
   iss: urlSchema.optional(),
+  // OIDC Session Management providers (including Keycloak) return this opaque
+  // value alongside code/state. Accept it without treating it as identity.
+  session_state: textSchema(MAX_QUERY).optional(),
   scope: textSchema(MAX_QUERY).optional(),
 });
 export const authLocalSchema = strictObject({

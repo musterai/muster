@@ -69,8 +69,8 @@ export default {
         xl: 'var(--radius-xl)',
       },
       fontFamily: {
-        sans: ['Inter', 'Outfit', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ['Inter Variable', 'Inter', 'sans-serif'],
+        mono: ['JetBrains Mono Variable', 'JetBrains Mono', 'monospace'],
       },
     },
   },

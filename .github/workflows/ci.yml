@@ -2,7 +2,7 @@ name: MusterAI CI
 
 on:
   push:
-    branches: [ main, feat/*, rebuild/* ]
+    branches: [ main, feat/*, feature/*, rebuild/* ]
   pull_request:
     branches: [ main ]
 
@@ -77,3 +77,46 @@ jobs:
 
       - name: Verify Health Route Unit Test
         run: npx vitest run tests/health.test.ts --passWithNoTests
+
+  office-proxies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify supplied TLS certificates and NGINX/Traefik streaming
+        run: node scripts/remote-test/proxy-smoke.mjs
+      - name: Upload sanitized proxy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-proxies
+          path: scratch/office-proxy-*/report.json
+          if-no-files-found: warn
+
+  remote-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify real HTTPS, Keycloak, browsers, and independent MCP clients
+        env:
+          MUSTER_TEST_BACKEND: ${{ matrix.backend }}
+          MUSTER_TEST_CLIENTS: 10
+        run: npm run test:remote
+      - name: Upload sanitized remote verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-${{ matrix.backend }}
+          path: scratch/remote-*/results/report.json
+          if-no-files-found: warn

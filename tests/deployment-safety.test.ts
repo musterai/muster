@@ -118,8 +118,12 @@ describe('production deployment safety', () => {
     expect(compose).toContain('internal: true');
     expect(compose).toContain('subnet: 172.30.0.0/29');
     expect(caddyfile).toContain('reverse_proxy muster-backend:6878');
-    expect(caddyfile).toContain('header_up -X-Forwarded-For');
-    expect(caddyfile).toContain('header_up X-Forwarded-For {remote_host}');
+    for (const source of [caddyfile, fs.readFileSync(path.join(root, 'deploy/remote-test/Caddyfile'), 'utf8')]) {
+      expect(source).toContain('header_up X-Forwarded-For {remote_host}');
+      expect(source).toContain('header_up X-Forwarded-Proto {scheme}');
+      expect(source).toContain('header_up X-Forwarded-Host {http.request.host}');
+      expect(source).not.toMatch(/header_up -X-Forwarded-(For|Proto|Host)/);
+    }
 
     expect(dockerfile).toContain('FROM node:24.18.1-alpine3.23 AS builder');
     expect(dockerfile).toContain('FROM node:24.18.1-alpine3.23 AS runner');

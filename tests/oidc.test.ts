@@ -11,7 +11,7 @@
 // (tests/helpers/fake-oidc-provider.ts) that issues genuinely signed JWTs,
 // so signature/PKCE/nonce verification is real, not mocked.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createDatabaseAdapter } from '../src/db/factory.js';
@@ -52,6 +52,7 @@ describe('MUS-25: OIDC relying-party flow', () => {
     oidcService = new OidcService(db);
     provider.overrideNonce = null;
     provider.useForeignKeyForNextToken = false;
+    provider.discoveryUnavailable = false;
   });
 
   afterEach(async () => {
@@ -77,6 +78,31 @@ describe('MUS-25: OIDC relying-party flow', () => {
     expect(result.sub).toBe('sub-alice');
     expect(result.email).toBe('alice@example.com');
     expect(result.redirectTo).toBe('/dashboard');
+  });
+
+  it('recovers after discovery is temporarily unavailable without restarting Muster', async () => {
+    provider.discoveryUnavailable = true;
+    await expect(oidcService.buildLoginUrl(REDIRECT_URI)).rejects.toThrow();
+    provider.discoveryUnavailable = false;
+    const loginUrl = await oidcService.buildLoginUrl(REDIRECT_URI);
+    const result = await oidcService.handleCallback(provider.authorize(new URL(loginUrl).searchParams));
+    expect(result.sub).toBeTruthy();
+  });
+
+  it('accepts a published replacement signing key after the JWKS refresh cooldown', async () => {
+    const completeLogin = async () => {
+      const loginUrl = await oidcService.buildLoginUrl(REDIRECT_URI);
+      return oidcService.handleCallback(provider.authorize(new URL(loginUrl).searchParams));
+    };
+    await completeLogin(); // Populate the relying party's JWKS cache.
+    await provider.rotateSigningKey();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // Only advance the clock; HTTP, PKCE, token signatures, and discovery
+      // remain real. Respect the library's 60-second JWKS fetch cooldown.
+      vi.setSystemTime(Date.now() + 61_000);
+      expect((await completeLogin()).sub).toBeTruthy();
+    } finally { vi.useRealTimers(); }
   });
 
   it('refuses a callback with a mismatched state', async () => {

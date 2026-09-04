@@ -11,7 +11,7 @@
 import pg from 'pg';
 import { DatabaseAdapter, ExecutionResult } from './adapter.js';
 
-type PostgresPoolLike = Pick<pg.Pool, 'connect' | 'query' | 'end'>;
+type PostgresPoolLike = Pick<pg.Pool, 'connect' | 'query' | 'end'> & Partial<Pick<pg.Pool, 'on'>>;
 
 /**
  * SQLite-style positional `?` placeholders → Postgres's `$1, $2, ...`.
@@ -133,6 +133,12 @@ export class PostgresAdapter extends BasePostgresAdapter {
   constructor(connectionString: string, pool: PostgresPoolLike = new pg.Pool({ connectionString })) {
     super();
     this.pool = pool;
+    // Idle connections emit errors outside any request's try/catch when the
+    // database restarts. pg removes those clients itself; handle the event so
+    // readiness can report the outage and later requests can reconnect.
+    this.pool.on?.('error', () => {
+      console.error('PostgreSQL idle connection lost; the pool will reconnect on the next request.');
+    });
   }
 
   protected runQuery(sql: string, params: unknown[]): Promise<pg.QueryResult> {
@@ -142,17 +148,30 @@ export class PostgresAdapter extends BasePostgresAdapter {
   async transaction<T>(fn: (adapter: DatabaseAdapter) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     let released = false;
+    let broken = false;
+    let connectionError: Error | undefined;
+    const onError = (error: Error) => { broken = true; connectionError = error; };
+    // The pool's idle error listener is detached while a transaction owns
+    // this client. Cover gaps between queries as well as active query errors.
+    client.on?.('error', onError);
+    const releaseClient = () => {
+      // This listener belongs only to the checked-out transaction. Remove it
+      // before the pool can reuse the client, even if callbacks remain queued.
+      client.removeListener?.('error', onError);
+      client.release(broken);
+      released = true;
+    };
     try {
       await client.query('BEGIN');
       const txAdapter = new PostgresTransactionAdapter(client);
       const result = await fn(txAdapter);
+      if (connectionError) throw connectionError;
       await client.query('COMMIT');
       // COMMIT is durable before any listener runs. Release immediately so a
       // listener that awaits network/SSE backpressure cannot saturate the
       // pool. The queue preserves callback ordering across transactions and
       // each transaction adapter contains listener failures best-effort.
-      client.release();
-      released = true;
+      releaseClient();
       const callbacksRun = this.afterCommitQueue.then(() => txAdapter.runAfterCommit());
       this.afterCommitQueue = callbacksRun.catch(error => {
         console.error('Error in after-commit callbacks:', error);
@@ -164,12 +183,13 @@ export class PostgresAdapter extends BasePostgresAdapter {
         try {
           await client.query('ROLLBACK');
         } catch {
-          // Already rolled back (e.g. the connection itself failed) — ignore.
+          // An uncertain connection must never go back into the reusable pool.
+          broken = true;
         }
       }
       throw err;
     } finally {
-      if (!released) client.release();
+      if (!released) releaseClient();
     }
   }
 

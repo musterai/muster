@@ -1,5 +1,8 @@
 # Deploying Muster on a Public Host
 
+For an existing office TLS terminator, supplied certificates, private CAs, and
+the disposable Keycloak verification stack, see [remote deployment testing](remote-testing.md).
+
 Muster ships two very different postures, and picking the wrong one is the
 single most consequential deployment mistake:
 

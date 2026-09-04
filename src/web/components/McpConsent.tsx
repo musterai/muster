@@ -12,15 +12,10 @@ import React, { useEffect, useState } from 'react';
 import { api, ApiError } from '../api.js';
 import { AuthMe, McpAuthorizeDetails } from '../types.js';
 import { ShieldAlert, Bot, Loader2 } from 'lucide-react';
+import { consentRequestParams } from '../mcp-oauth-view.js';
 
 function currentQueryString(): string {
   return window.location.search.replace(/^\?/, '');
-}
-
-function currentQueryParams(): Record<string, string> {
-  const params: Record<string, string> = {};
-  new URLSearchParams(window.location.search).forEach((value, key) => { params[key] = value; });
-  return params;
 }
 
 export const McpConsent: React.FC = () => {
@@ -43,7 +38,7 @@ export const McpConsent: React.FC = () => {
 
   useEffect(() => {
     if (!me?.authenticated) return;
-    api.mcpAuthorizeDetails(currentQueryString())
+    api.mcpAuthorizeDetails(new URLSearchParams(window.location.search).get('client_id') || '')
       .then((d) => {
         setDetails(d);
         if (d.roles.length > 0) setRoleId(d.roles[0].id);
@@ -57,7 +52,7 @@ export const McpConsent: React.FC = () => {
     setError(null);
     try {
       const payload: Record<string, string> = {
-        ...currentQueryParams(),
+        ...consentRequestParams(window.location.search),
         decision,
         role_id: roleId,
       };

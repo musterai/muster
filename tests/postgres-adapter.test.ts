@@ -11,7 +11,7 @@
 // SQLite stays the zero-configuration default and nothing here should get
 // in the way of that.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import pg from 'pg';
 import { PostgresAdapter, convertPlaceholders, translateDialect } from '../src/db/postgres-adapter.js';
 import { Migrator } from '../src/db/migrator.js';
@@ -24,6 +24,7 @@ import { McpOAuthService } from '../src/services/mcp-oauth.service.js';
 import { TokenService } from '../src/services/token.service.js';
 import { isCanonicalRank } from '../src/shared/lexorank.js';
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 
 async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[]> {
   let release!: () => void;
@@ -40,6 +41,16 @@ async function raceAtBarrier<T>(operations: Array<() => Promise<T>>): Promise<T[
 const PG_URL = process.env.MUSTER_TEST_PG_URL;
 
 describe('PostgreSQL transaction lifecycle probe', () => {
+  it('handles idle pool failures without throwing an uncaught process error', async () => {
+    const pool = new pg.Pool(); // No network connection is opened by construction.
+    const adapter = new PostgresAdapter('unused', pool);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => pool.emit('error', new Error('database restarted'))).not.toThrow();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('pool will reconnect'));
+    } finally { await adapter.close(); log.mockRestore(); }
+  });
+
   it('returns the client before a slow after-commit callback and keeps commit order', async () => {
     const clients: Array<{ released: boolean; query: (sql: string) => Promise<{ rows: never[]; rowCount: number }> }> = [];
     const pool = {
@@ -87,6 +98,41 @@ describe('PostgreSQL transaction lifecycle probe', () => {
     expect(callbackOrder).toEqual(['first', 'second']);
     await adapter.close();
   });
+
+  it('removes transaction error listeners before a released client is reused behind a slow callback', async () => {
+    let checkedOut = false;
+    const client = Object.assign(new EventEmitter(), {
+      query: async (_sql: string) => ({ rows: [], rowCount: 0 }),
+      release: () => { checkedOut = false; },
+    });
+    const pool = {
+      connect: async () => {
+        expect(checkedOut).toBe(false);
+        checkedOut = true;
+        return client;
+      },
+      query: client.query,
+      end: async () => undefined,
+    };
+    const adapter = new PostgresAdapter('unused', pool as any);
+    let releaseCallback!: () => void;
+    const callbackRelease = new Promise<void>(resolve => { releaseCallback = resolve; });
+    const transactions: Promise<unknown>[] = [];
+    try {
+      for (let index = 0; index < 12; index++) {
+        transactions.push(adapter.transaction(async tx => {
+          if (index === 0) tx.afterCommit(() => callbackRelease);
+        }));
+        await new Promise(resolve => setImmediate(resolve));
+        expect(checkedOut).toBe(false);
+        expect(client.listenerCount('error')).toBe(0);
+      }
+    } finally {
+      releaseCallback();
+      await Promise.all(transactions);
+      await adapter.close();
+    }
+  });
 });
 
 describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
@@ -106,6 +152,28 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
     // coverage on every test, not just once.
     await adminPool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
     adapter = new PostgresAdapter(PG_URL!);
+  });
+
+  it('rejects an interrupted transaction, rolls back its write, and reconnects', async () => {
+    await adapter.execute('CREATE TABLE interruption_probe (value TEXT)');
+    let ready!: (pid: number) => void;
+    const started = new Promise<number>(resolve => { ready = resolve; });
+    let release!: () => void;
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const transaction = adapter.transaction(async tx => {
+      await tx.execute("INSERT INTO interruption_probe VALUES ('uncommitted')");
+      const [{ pid }] = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      ready(pid);
+      await resume;
+    });
+    const outcome = transaction.then(() => null, error => error);
+    try {
+      await adminPool.query('SELECT pg_terminate_backend($1)', [await started]);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      release();
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(await adapter.query('SELECT * FROM interruption_probe')).toEqual([]);
+    } finally { release(); await outcome; await adapter.close(); }
   });
 
   it('reports its dialect', () => {
@@ -168,6 +236,7 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
     await adapter.execute('INSERT INTO principal (id, kind, created_at) VALUES (?, ?, ?)', ['agent-1', 'agent', now]);
     await adapter.execute('INSERT INTO agent (id, name, status, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?)', ['agent-1', 'Agent', 'active', now, now]);
 
+    await configureTestBoard(adapter, 'board-1');
     const cardService = createCardServiceForTest(adapter);
     const card = await cardService.create({ column_id: 'col-1', title: 'Test card' });
 
@@ -197,6 +266,7 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
       await adapter.execute('INSERT INTO agent (id, name, status, last_seen_at, created_at) VALUES (?, ?, ?, ?, ?)', [id, id, 'active', now, now]);
     }
 
+    await configureTestBoard(adapter, 'board-race');
     const cardService = createCardServiceForTest(adapter);
     const card = await cardService.create({ column_id: 'col-race', title: 'Contested card' });
 
@@ -238,6 +308,7 @@ describe.skipIf(!PG_URL)('MUS-31: PostgreSQL adapter', () => {
         ],
       );
 
+      await configureTestBoard(adapter, 'board-rank-race');
       const serviceA = createCardServiceForTest(adapter);
       const serviceB = createCardServiceForTest(second);
       const cardA = await serviceA.create({ column_id: 'col-rank-source', title: 'Move A' });
@@ -401,3 +472,12 @@ describe('MUS-31: dialect translation helpers (pure functions, no database neede
 });
 import { createCardServiceForTest } from './support/card-service.js';
 import { createDeviceGrantServiceForTest, createMcpOAuthServiceForTest } from './support/transaction-services.js';
+
+/** Raw SQL fixtures must satisfy the same workflow contract as service-created boards. */
+async function configureTestBoard(adapter: PostgresAdapter, boardId: string): Promise<void> {
+  await adapter.execute('UPDATE "column" SET workflow_role = ?, is_terminal = 0 WHERE board_id = ?', ['ready', boardId]);
+  for (const [role, position] of [['active', 'y'], ['terminal', 'z']]) {
+    await adapter.execute('INSERT INTO "column" (id, board_id, name, position, workflow_role, is_terminal) VALUES (?, ?, ?, ?, ?, ?)',
+      [`${boardId}-${role}`, boardId, role, position, role, role === 'terminal' ? 1 : 0]);
+  }
+}

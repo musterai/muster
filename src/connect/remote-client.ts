@@ -39,7 +39,20 @@ export async function whoAmI(server: string, token: string): Promise<RemoteMe> {
 }
 
 export async function listMyTokens(server: string, token: string): Promise<RemoteTokenSummary[]> {
-  return get(server, '/api/v1/tokens', token);
+  const tokens: RemoteTokenSummary[] = [];
+  const cursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const page = await get(server, `/api/v1/tokens?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, token);
+    // Retain compatibility with servers predating collection pagination.
+    if (Array.isArray(page)) return [...tokens, ...page];
+    tokens.push(...page.items);
+    if (!page.page.has_more) return tokens;
+    cursor = page.page.next_cursor;
+    if (!cursor || cursors.has(cursor)) throw new RemoteError('Token list returned a missing or repeated continuation cursor');
+    cursors.add(cursor);
+  } while (cursor);
+  return tokens;
 }
 
 /** The token's own prefix segment — `muster_pat_<prefix>_<secret>` — used to find its record without ever transmitting the secret again. */

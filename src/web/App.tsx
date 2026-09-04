@@ -175,13 +175,16 @@ export const App: React.FC = () => {
         }
         setSelectedProjectId(selectedProject.id);
         if (!linkedCard) {
-          updateLocation(selectedProject.slug, activeTab, selectedDocId, selectedEntityId, boardSlug, true);
+          updateLocation(selectedProject.slug, nav.tab, nav.docId, nav.entityId, boardSlug, true);
         }
       }
     } catch (err) {
       console.error('Error loading projects:', err);
     }
-  }, [activeTab, rememberSelectedBoard, requestOpenCard, selectedDocId, selectedEntityId]);
+  // Route changes must not recreate this loader and rerun the project-load
+  // effect: doing so clears the selected board while leaving its tab, then
+  // races browser back navigation with a fallback to the first board.
+  }, [rememberSelectedBoard, requestOpenCard]);
 
   // Load Selected Project Data
   const loadProjectData = useCallback(async () => {

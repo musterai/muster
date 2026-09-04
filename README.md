@@ -343,6 +343,13 @@ Muster maintains strict test isolation — automated tests **never touch `data/m
 npm test
 ```
 
+For the real hosted deployment (HTTPS, Keycloak, independent CLI/MCP clients,
+browser login, concurrency, and recovery), run `npm run test:remote`.
+Set `MUSTER_TEST_ENGINE=podman` to use Podman or
+`MUSTER_TEST_BACKEND=postgres` to test the PostgreSQL configuration.
+See [Remote deployment verification](docs/remote-testing.md) for isolation,
+retained runs, soak testing, and certificate options for office networks.
+
 Runs the full suite under `tests/*.test.ts` (200+ tests, spanning kanban/card logic, auth — OIDC, device grant, PATs, MCP OAuth — permissions, and hardening).
 
 ### PostgreSQL Adapter Tests

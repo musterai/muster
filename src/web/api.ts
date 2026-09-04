@@ -249,13 +249,13 @@ export const api = {
   deviceDeny: (userCode: string) => fetchJSON<{ message: string }>(`/oauth/device/deny`, { method: 'POST', body: JSON.stringify({ user_code: userCode }) }),
 
   // MCP-native OAuth (MUS-29) — the `claude mcp add` consent screen
-  mcpAuthorizeDetails: async (queryString: string) => {
+  mcpAuthorizeDetails: async (clientId: string) => {
     const agents: McpAuthorizeDetails['agents'] = [];
     const roles: McpAuthorizeDetails['roles'] = [];
     let cursor: string | null = null;
     let first: McpAuthorizeDetails | null = null;
     do {
-      const page: McpAuthorizeDetails = await fetchJSON(`/oauth/authorize/details?${queryString}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      const page: McpAuthorizeDetails = await fetchJSON(`/oauth/authorize/details?client_id=${encodeURIComponent(clientId)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
       first ||= page; agents.push(...page.agents); roles.push(...page.roles);
       cursor = page.page.has_more ? page.page.next_cursor : null;
       if (page.page.has_more && !cursor) throw new Error('OAuth details response omitted its continuation cursor');

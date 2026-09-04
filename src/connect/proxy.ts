@@ -131,6 +131,9 @@ export function proxyToUpstream(upstreamUrl: string, upstreamToken: string) {
         proxyRes.statusCode || 502,
         selectHeaders(proxyRes.headers, FORWARDED_RESPONSE_HEADERS),
       );
+      // Establish SSE/MCP connections immediately, even if the upstream has
+      // only sent headers and its first event/keep-alive is still pending.
+      res.flushHeaders();
       proxyRes.pipe(res, { end: true });
     });
 

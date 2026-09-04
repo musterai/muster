@@ -6,4 +6,5 @@ scratch/
 *.db
 .claude
 .env
+.env.office
 secrets/

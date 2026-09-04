@@ -10,10 +10,11 @@ WORKDIR /app
 RUN apk add --no-cache python3 make g++ gcc
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 
 COPY . .
 RUN npm run build
+RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
 # Stage 2: Production Runtime
 FROM node:24.18.1-alpine3.23 AS runner
@@ -28,7 +29,10 @@ RUN apk add --no-cache curl
 RUN addgroup -S muster && adduser -S -G muster muster
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+# Native dependencies were compiled against this exact Node/Alpine base in
+# the builder. Reinstalling here fails when a prebuilt binary is unavailable
+# because the deliberately minimal runtime has no Python/compiler toolchain.
+COPY --from=builder --chown=muster:muster /app/node_modules ./node_modules
 
 COPY --from=builder --chown=muster:muster /app/dist ./dist
 COPY --from=builder --chown=muster:muster /app/public ./public
