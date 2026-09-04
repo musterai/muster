@@ -56,6 +56,8 @@ describe('resolved architecture and construction inventory', () => {
     }
   });
 
+  // Resolving the full TypeScript graph can exceed Vitest's five-second
+  // default on shared CI runners; this checks architecture, not scan speed.
   it('holds the production graph to the exact root construction inventory', () => {
     const inventory = inspectArchitecture({ projectRoot: process.cwd() });
     expect(inventory.files.some(file => file.endsWith('.tsx'))).toBe(true);
@@ -87,7 +89,7 @@ describe('resolved architecture and construction inventory', () => {
       'UserService',
     ]);
     expect(() => assertCleanArchitecture(inventory)).not.toThrow();
-  });
+  }, 30_000);
 
   it.each([
     ['static import', 'import { mcp } from "../mcp/server.js"; void mcp;', 'ts'],
